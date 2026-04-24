@@ -1,5 +1,11 @@
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+mod linux_clipboard;
+#[cfg(target_os = "linux")]
+mod linux_remote_desktop;
+#[cfg(target_os = "linux")]
+mod linux_token_store;
 
 #[cfg(not(target_os = "linux"))]
 pub mod unsupported {

@@ -1,17 +1,19 @@
-use arboard::Clipboard;
+use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
 use async_trait::async_trait;
 use codex_voice_core::{
     HotkeyEvent, HotkeyService, InsertMethod, InsertReport, PermissionKind, PermissionService,
     PermissionStatus, PlatformError, PlatformResult, TextInjector,
 };
-use std::{
-    env,
-    io::{self, Read},
-    process::Command,
-    thread,
-    time::Duration,
-};
+use futures_util::StreamExt;
+use std::{env, process::Command, sync::mpsc as std_mpsc, thread, time::Duration};
 use tokio::sync::mpsc;
+
+use crate::{linux_clipboard::LinuxClipboard, linux_remote_desktop::RemoteDesktopSessionManager};
+
+const HOTKEY_ID: &str = "codex-voice-hold-to-dictate";
+const HOTKEY_TRIGGER: &str = "<Control>m";
+const HOTKEY_DESCRIPTION: &str = "Hold to dictate with Codex Voice";
+const HOTKEY_START_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Default, Clone)]
 pub struct LinuxPermissionService;
@@ -56,12 +58,14 @@ impl PermissionService for LinuxPermissionService {
 
 #[derive(Debug, Clone)]
 pub struct LinuxTextInjector {
+    remote_desktop: RemoteDesktopSessionManager,
     restore_clipboard_after: Duration,
 }
 
 impl Default for LinuxTextInjector {
     fn default() -> Self {
         Self {
+            remote_desktop: RemoteDesktopSessionManager::new(),
             restore_clipboard_after: Duration::from_millis(250),
         }
     }
@@ -76,24 +80,17 @@ impl LinuxTextInjector {
 #[async_trait]
 impl TextInjector for LinuxTextInjector {
     async fn insert_text(&self, text: &str) -> PlatformResult<InsertReport> {
-        let mut clipboard = Clipboard::new().map_err(|error| {
-            PlatformError::Unavailable(format!("clipboard unavailable: {error}"))
-        })?;
-        let previous = clipboard.get_text().ok();
-        clipboard
-            .set_text(text.to_string())
-            .map_err(|error| PlatformError::Message(format!("failed to set clipboard: {error}")))?;
+        let clipboard = LinuxClipboard::new()?;
+        let previous = clipboard.snapshot();
+        clipboard.set_text(text)?;
 
-        let paste_result = send_paste_chord();
+        let paste_result = self.remote_desktop.send_paste_chord().await;
         tokio::time::sleep(self.restore_clipboard_after).await;
 
-        let restored_clipboard = match previous {
-            Some(previous) => clipboard.set_text(previous).is_ok(),
-            None => false,
-        };
+        let restored_clipboard = clipboard.restore(previous);
         paste_result?;
         Ok(InsertReport {
-            method: InsertMethod::ClipboardPaste,
+            method: InsertMethod::PortalPaste,
             restored_clipboard,
         })
     }
@@ -116,25 +113,39 @@ impl HotkeyService for LinuxHotkeyService {
             ));
         }
 
+        let (startup_tx, startup_rx) = std_mpsc::channel();
         thread::spawn(move || {
-            tracing::warn!(
-                "portal hotkey binding is not available in this diagnostic build; press Enter to simulate Control-M press/release"
-            );
-            let stdin = io::stdin();
-            let mut handle = stdin.lock();
-            let mut byte = [0_u8; 1];
-            loop {
-                match handle.read(&mut byte) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) if byte[0] == b'\n' => {
-                        let _ = events.blocking_send(HotkeyEvent::Pressed);
-                        let _ = events.blocking_send(HotkeyEvent::Released);
-                    }
-                    Ok(_) => {}
+            let startup_for_error = startup_tx.clone();
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = startup_tx.send(Err(PlatformError::Unavailable(format!(
+                        "failed to start hotkey portal runtime: {error}"
+                    ))));
+                    tracing::error!(message = %error, "failed to start hotkey portal runtime");
+                    return;
                 }
+            };
+            if let Err(error) = runtime.block_on(run_global_shortcut_listener(events, startup_tx)) {
+                let message = error.to_string();
+                let _ = startup_for_error.send(Err(error));
+                tracing::error!(message = %message, "GlobalShortcuts portal listener stopped");
             }
         });
-        Ok(())
+
+        startup_rx
+            .recv_timeout(HOTKEY_START_TIMEOUT)
+            .map_err(|error| match error {
+                std_mpsc::RecvTimeoutError::Timeout => PlatformError::PermissionDenied(
+                    "timed out waiting for the GlobalShortcuts portal approval prompt".into(),
+                ),
+                std_mpsc::RecvTimeoutError::Disconnected => PlatformError::Unavailable(
+                    "GlobalShortcuts portal listener stopped before startup completed".into(),
+                ),
+            })?
     }
 }
 
@@ -177,38 +188,80 @@ fn portal_version(interface: &str) -> Result<String, String> {
     }
 }
 
-fn send_paste_chord() -> PlatformResult<()> {
-    if command_exists("wtype") {
-        return run_paste_command("wtype", ["-M", "ctrl", "v", "-m", "ctrl"]);
+async fn run_global_shortcut_listener(
+    events: mpsc::Sender<HotkeyEvent>,
+    startup: std_mpsc::Sender<PlatformResult<()>>,
+) -> PlatformResult<()> {
+    let portal = GlobalShortcuts::new().await.map_err(|error| {
+        PlatformError::Unavailable(format!(
+            "failed to create GlobalShortcuts portal proxy: {error}"
+        ))
+    })?;
+    let session = portal
+        .create_session(Default::default())
+        .await
+        .map_err(|error| {
+            PlatformError::PermissionDenied(format!(
+                "failed to create GlobalShortcuts portal session: {error}"
+            ))
+        })?;
+    let shortcut =
+        NewShortcut::new(HOTKEY_ID, HOTKEY_DESCRIPTION).preferred_trigger(Some(HOTKEY_TRIGGER));
+    portal
+        .bind_shortcuts(&session, &[shortcut], None, BindShortcutsOptions::default())
+        .await
+        .map_err(|error| {
+            PlatformError::PermissionDenied(format!(
+                "failed to request GlobalShortcuts binding: {error}"
+            ))
+        })?
+        .response()
+        .map_err(|error| {
+            PlatformError::PermissionDenied(format!(
+                "GlobalShortcuts binding was not approved: {error}"
+            ))
+        })?;
+
+    tracing::info!(
+        shortcut_id = HOTKEY_ID,
+        preferred_trigger = HOTKEY_TRIGGER,
+        "GlobalShortcuts portal listener started"
+    );
+
+    let mut activated = portal.receive_activated().await.map_err(|error| {
+        PlatformError::Unavailable(format!(
+            "failed to subscribe to GlobalShortcuts Activated signals: {error}"
+        ))
+    })?;
+    let mut deactivated = portal.receive_deactivated().await.map_err(|error| {
+        PlatformError::Unavailable(format!(
+            "failed to subscribe to GlobalShortcuts Deactivated signals: {error}"
+        ))
+    })?;
+    let _ = startup.send(Ok(()));
+
+    loop {
+        tokio::select! {
+            event = activated.next() => match event {
+                Some(event) if event.shortcut_id() == HOTKEY_ID => {
+                    if events.send(HotkeyEvent::Pressed).await.is_err() {
+                        break;
+                    }
+                }
+                Some(_) => {}
+                None => break,
+            },
+            event = deactivated.next() => match event {
+                Some(event) if event.shortcut_id() == HOTKEY_ID => {
+                    if events.send(HotkeyEvent::Released).await.is_err() {
+                        break;
+                    }
+                }
+                Some(_) => {}
+                None => break,
+            },
+        }
     }
 
-    if command_exists("ydotool") {
-        return run_paste_command("ydotool", ["key", "29:1", "47:1", "47:0", "29:0"]);
-    }
-
-    Err(PlatformError::Unavailable(
-        "no supported paste injector found; install wtype for Wayland paste diagnostics or wire the RemoteDesktop portal keyboard session".into(),
-    ))
-}
-
-fn run_paste_command<const N: usize>(program: &str, args: [&str; N]) -> PlatformResult<()> {
-    let status = Command::new(program)
-        .args(args)
-        .status()
-        .map_err(|error| PlatformError::Message(format!("failed to run {program}: {error}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(PlatformError::Message(format!(
-            "{program} failed with status {status}"
-        )))
-    }
-}
-
-fn command_exists(name: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    Ok(())
 }

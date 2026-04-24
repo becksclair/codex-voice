@@ -95,7 +95,7 @@ async fn run() -> Result<()> {
     LinuxHotkeyService::new().start(hotkey_tx)?;
 
     let mut engine = DictationEngine::new(audio, transcription, injector, app_tx);
-    println!("Codex Voice is running. Press Enter in this terminal to simulate Control-M until the portal hotkey adapter is wired.");
+    println!("Codex Voice is running. Hold Control-M to dictate through the KDE/Wayland GlobalShortcuts portal.");
 
     loop {
         tokio::select! {
@@ -181,11 +181,13 @@ async fn doctor_transcribe(file: PathBuf) -> Result<()> {
 async fn doctor_hotkey() -> Result<()> {
     let (tx, mut rx) = mpsc::channel(8);
     LinuxHotkeyService::new().start(tx)?;
-    println!("Waiting for hotkey events. In this Linux milestone build, press Enter to simulate one press/release cycle.");
+    println!("Waiting for hotkey events. Hold and release Control-M after approving the KDE/Wayland GlobalShortcuts portal prompt.");
     for _ in 0..2 {
-        if let Some(event) = rx.recv().await {
-            println!("{event:?}");
-        }
+        let event = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .context("timed out waiting for hotkey event")?
+            .context("hotkey listener stopped before emitting the expected events")?;
+        println!("{event:?}");
     }
     Ok(())
 }

@@ -12,7 +12,7 @@ runtime first:
   refresh.
 - Private Codex transcription endpoint compatibility.
 - Linux KDE/Wayland diagnostics for portal availability.
-- Linux clipboard paste diagnostic using `wtype` or `ydotool` when installed.
+- Linux clipboard paste diagnostic using RemoteDesktop portal keyboard events.
 
 ## Commands
 
@@ -26,9 +26,8 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voi
 cargo run -p codex-voice-app --bin codex-voice -- run
 ```
 
-`run` currently uses the Linux engine wiring and a terminal Enter key simulation
-for the hold hotkey while the KDE GlobalShortcuts portal event binding is being
-finished.
+`run` currently uses the Linux engine wiring and binds Control-M through the KDE
+GlobalShortcuts portal for hold-to-dictate.
 
 ## Linux Notes
 
@@ -40,14 +39,10 @@ echo "$XDG_CURRENT_DESKTOP"
 ```
 
 `doctor linux-portals` checks the GlobalShortcuts and RemoteDesktop portal
-interfaces through the user D-Bus. `doctor paste` requires a local paste injector
-until the RemoteDesktop portal keyboard session is wired end-to-end. Install one
-of:
-
-```bash
-sudo pacman -S wtype
-# or another distro's ydotool package
-```
+interfaces through the user D-Bus. `doctor paste` sets the clipboard and sends
+Ctrl+V through a RemoteDesktop keyboard portal session. The first run may ask for
+desktop portal approval; subsequent runs reuse the persisted restore token when
+the portal returns one.
 
 ## Validation
 

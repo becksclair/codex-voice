@@ -36,8 +36,8 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - Observation: On this Linux KDE/Wayland host, `org.freedesktop.portal.GlobalShortcuts` and `org.freedesktop.portal.RemoteDesktop` are present on the user bus.
   Evidence: `busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.GlobalShortcuts` reports `version` 1 and activation/deactivation signals; the RemoteDesktop interface reports `version` 2 and `NotifyKeyboardKeysym`.
 
-- Observation: The first Linux implementation has a runnable engine, audio, auth, transcription, and portal diagnostics, but the true GlobalShortcuts binding and RemoteDesktop keyboard session are not complete yet. Hotkey diagnostics use terminal Enter simulation, and paste diagnostics require `wtype` or `ydotool`.
-  Evidence: `cargo check --workspace` and `cargo test --workspace` pass; `command -v wtype` and `command -v ydotool` returned absent on this host.
+- Observation: The Linux implementation has a runnable engine, audio, auth, transcription, portal diagnostics, GlobalShortcuts hotkey binding, and RemoteDesktop keyboard paste with persisted restore-token reuse.
+  Evidence: `LinuxHotkeyService` binds Control-M through `ashpd::desktop::global_shortcuts`; `LinuxTextInjector` sends Ctrl+V through `RemoteDesktopSessionManager`, which persists restore tokens under the user state directory.
 
 - Observation: `cargo-packager` is the right installer crate for this plan because it supports macOS `.app`/`.dmg`, Linux `.deb`/AppImage/Pacman, and Windows NSIS/MSI from Rust packaging metadata.
   Evidence: `cargo-packager` docs list those formats and `package.metadata.packager` configuration.
@@ -72,7 +72,7 @@ The existing Swift app remains a behavioral reference only. The new implementati
 
 Initial Linux implementation is in place. The workspace builds, the core state machine has unit coverage for short-recording discard behavior, CPAL writes temporary mono WAV files, Codex auth/transcription compatibility is isolated in its own crate, and the Linux app exposes diagnostic commands.
 
-Remaining Linux risk is concentrated in the portal-native input path: GlobalShortcuts session binding and RemoteDesktop keyboard event emission still need to replace the current terminal hotkey simulation and `wtype`/`ydotool` paste fallback. macOS, Windows, Slint UI, and packaging remain deferred.
+Remaining Linux risk is concentrated in live portal approval/runtime proof across target KDE sessions. macOS, Windows, Slint UI, and packaging remain deferred.
 
 ## Context and Orientation
 

@@ -57,7 +57,7 @@ rg -n "DictationEngine|HotkeyEvent|TextInjector|AudioRecorder|TranscriptionClien
 rg -n "doctor|Parser|Subcommand" crates/codex-voice-app/src
 rg -n "cpal|WavWriter|RecordedAudio" crates/codex-voice-audio/src
 rg -n "auth|transcribe|TRANSCRIBE_URL|account/read" crates/codex-voice-codex/src
-rg -n "GlobalShortcuts|RemoteDesktop|Clipboard|wtype|ydotool" crates/codex-voice-platform/src
+rg -n "GlobalShortcuts|RemoteDesktop|Clipboard|PortalTokenStore|PortalPaste" crates/codex-voice-platform/src
 find crates -name '*test*' -o -name '*.rs'
 ```
 
