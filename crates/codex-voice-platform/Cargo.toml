@@ -1,0 +1,11 @@
+[package]
+name = "codex-voice-platform"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+arboard.workspace = true
+async-trait.workspace = true
+codex-voice-core = { path = "../codex-voice-core" }
+tokio.workspace = true
+tracing.workspace = true

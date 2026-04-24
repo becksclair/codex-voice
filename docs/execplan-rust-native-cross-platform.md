@@ -16,9 +16,9 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - [x] (2026-04-24) Chose Slint, Codex auth reuse, and unsigned local installers as v1 defaults.
 - [x] (2026-04-24) Researched platform constraints and crate choices for audio, tray, hotkeys, Linux Wayland portals, Windows input, macOS permissions, and packaging.
 - [x] (2026-04-24) Added architecture, crate, runtime, platform, and packaging diagrams to make the plan easier to execute from a cold start.
-- [ ] Create the Rust workspace and scaffold crates.
-- [ ] Implement the core dictation state machine and file-based WAV capture.
-- [ ] Implement Codex auth/transcription compatibility.
+- [x] (2026-04-24) Created the Rust workspace and scaffolded the planned crates under `crates/`.
+- [x] (2026-04-24) Implemented the core dictation state machine and CPAL-backed mono WAV capture.
+- [x] (2026-04-24) Implemented Codex auth file reading, app-server refresh, and private transcription HTTP compatibility.
 - [ ] Prove Linux KDE6/Wayland global shortcut and paste insertion.
 - [ ] Implement macOS and Windows adapters.
 - [ ] Add Slint tray/settings/HUD UI.
@@ -32,6 +32,12 @@ The existing Swift app remains a behavioral reference only. The new implementati
 
 - Observation: Linux Wayland text insertion must be permission-mediated. The preferred path is clipboard plus RemoteDesktop portal keyboard events, with explicit diagnostics when portal permission is denied or unavailable.
   Evidence: XDG RemoteDesktop portal exposes keyboard device selection and `notify_keyboard_keycode` / `notify_keyboard_keysym`; `ashpd` exposes these methods and `connect_to_eis`.
+
+- Observation: On this Linux KDE/Wayland host, `org.freedesktop.portal.GlobalShortcuts` and `org.freedesktop.portal.RemoteDesktop` are present on the user bus.
+  Evidence: `busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.GlobalShortcuts` reports `version` 1 and activation/deactivation signals; the RemoteDesktop interface reports `version` 2 and `NotifyKeyboardKeysym`.
+
+- Observation: The first Linux implementation has a runnable engine, audio, auth, transcription, and portal diagnostics, but the true GlobalShortcuts binding and RemoteDesktop keyboard session are not complete yet. Hotkey diagnostics use terminal Enter simulation, and paste diagnostics require `wtype` or `ydotool`.
+  Evidence: `cargo check --workspace` and `cargo test --workspace` pass; `command -v wtype` and `command -v ydotool` returned absent on this host.
 
 - Observation: `cargo-packager` is the right installer crate for this plan because it supports macOS `.app`/`.dmg`, Linux `.deb`/AppImage/Pacman, and Windows NSIS/MSI from Rust packaging metadata.
   Evidence: `cargo-packager` docs list those formats and `package.metadata.packager` configuration.
@@ -64,7 +70,9 @@ The existing Swift app remains a behavioral reference only. The new implementati
 
 ## Outcomes & Retrospective
 
-No implementation has been performed yet. This section must be updated after each major milestone with what was achieved, what failed, and what remains.
+Initial Linux implementation is in place. The workspace builds, the core state machine has unit coverage for short-recording discard behavior, CPAL writes temporary mono WAV files, Codex auth/transcription compatibility is isolated in its own crate, and the Linux app exposes diagnostic commands.
+
+Remaining Linux risk is concentrated in the portal-native input path: GlobalShortcuts session binding and RemoteDesktop keyboard event emission still need to replace the current terminal hotkey simulation and `wtype`/`ydotool` paste fallback. macOS, Windows, Slint UI, and packaging remain deferred.
 
 ## Context and Orientation
 
@@ -325,27 +333,27 @@ Implement the state machine as `DictationEngine` with states `Idle`, `Recording`
 
 ## Plan of Work
 
-Milestone 1 creates the Rust workspace without deleting the Swift app. Add `Cargo.toml`, crate directories, a basic `cargo check` target, and a `codex-voice-app --version` command. The Swift app remains untouched except for documentation noting it is the reference implementation.
+Milestone 1 creates the Rust workspace without deleting the Swift app. Add `Cargo.toml`, crate directories, a basic `cargo check` target, and a `codex-voice --version` command. The Swift app remains untouched except for documentation noting it is the reference implementation.
 
 Milestone 2 implements the core state machine and audio capture. Use `cpal` to capture from the default input device into a temporary WAV file. Normalize to mono 16-bit PCM WAV for compatibility with the current Codex backend. Add unit tests for state transitions and short-recording discard behavior. Add a diagnostic command:
 
-    cargo run -p codex-voice-app -- doctor audio
+    cargo run -p codex-voice-app --bin codex-voice -- doctor audio
 
 It should record a 2-second sample to a temp file, print the path, duration, sample rate, and byte size, then delete it unless `--keep` is passed.
 
-Milestone 3 implements Codex auth and transcription compatibility. Read `~/.codex/auth.json` with the current `tokens.access_token` and `tokens.account_id` shape. Resolve `codex` in this order: `CODEX_CLI_PATH`, `PATH`, `/Applications/Codex.app/Contents/Resources/codex` on macOS, and plain `codex` on Linux/Windows. Refresh auth by spawning `codex app-server --listen stdio://`, sending JSON lines for `initialize` and `account/read` with `refreshToken: true`, and requiring an `id:2` result line. Post multipart form data to `https://chatgpt.com/backend-api/transcribe` with headers equivalent to the Swift app: `Authorization`, `ChatGPT-Account-Id`, `originator: Codex Desktop`, `User-Agent`, `Content-Type`, and `Accept`. Add `--doctor codex-auth` and `--doctor transcribe --file <wav>` commands.
+Milestone 3 implements Codex auth and transcription compatibility. Read `~/.codex/auth.json` with the current `tokens.access_token` and `tokens.account_id` shape. Resolve `codex` in this order: `CODEX_CLI_PATH`, `PATH`, `/Applications/Codex.app/Contents/Resources/codex` on macOS, and plain `codex` on Linux/Windows. Refresh auth by spawning `codex app-server --listen stdio://`, sending JSON lines for `initialize` and `account/read` with `refreshToken: true`, and requiring an `id:2` result line. Post multipart form data to `https://chatgpt.com/backend-api/transcribe` with headers equivalent to the Swift app: `Authorization`, `ChatGPT-Account-Id`, `originator: Codex Desktop`, `User-Agent`, `Content-Type`, and `Accept`. Add `doctor codex-auth` and `doctor transcribe --file <wav>` commands.
 
 Milestone 4 implements Linux KDE6/Wayland proof before polishing UI. Add `linux_wayland` adapters using `ashpd`. The hotkey adapter creates a GlobalShortcuts session, binds `Control-M`, and emits `Pressed`/`Released` from activation/deactivation. The text adapter sets the clipboard text, requests a RemoteDesktop keyboard session, starts it, waits for user permission, and sends Ctrl+V key events. Add diagnostics:
 
-    cargo run -p codex-voice-app -- doctor linux-portals
-    cargo run -p codex-voice-app -- doctor paste --text "codex voice portal paste test"
+    cargo run -p codex-voice-app --bin codex-voice -- doctor linux-portals
+    cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice portal paste test"
 
 On KDE6/Wayland, the first command must report whether GlobalShortcuts and RemoteDesktop are available and their portal versions. The second command must paste the text into the focused field or print a precise denial/unavailable message.
 
 Milestone 5 implements Windows 11 adapters. Use `global-hotkey` first for `Control-M` if it emits reliable press/release; if testing proves it only emits press or lacks release fidelity, replace the Windows hotkey path with a `WH_KEYBOARD_LL` low-level hook that tracks left/right Control plus M and emits a single press and release per hold. Use clipboard plus `SendInput(Ctrl+V)` for insertion, waiting for Control to be released before paste so the dictation hotkey does not contaminate the paste chord. Add diagnostics:
 
-    cargo run -p codex-voice-app -- doctor hotkey
-    cargo run -p codex-voice-app -- doctor paste --text "codex voice windows paste test"
+    cargo run -p codex-voice-app --bin codex-voice -- doctor hotkey
+    cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice windows paste test"
 
 Document that insertion into elevated apps may fail from a non-elevated Codex Voice process because of UIPI.
 
@@ -394,10 +402,10 @@ For platform-specific validation, run the relevant doctor command from the insta
 Core acceptance:
 
 - `cargo test --workspace` passes.
-- `cargo run -p codex-voice-app -- --version` prints the app version.
-- `cargo run -p codex-voice-app -- doctor audio` proves microphone capture by recording and reporting a WAV duration and size.
-- `cargo run -p codex-voice-app -- doctor codex-auth` proves local Codex credentials can be read or refreshed, without printing the access token.
-- `cargo run -p codex-voice-app -- doctor transcribe --file <known-wav>` prints a non-empty transcript for a valid sample.
+- `cargo run -p codex-voice-app --bin codex-voice -- --version` prints the app version.
+- `cargo run -p codex-voice-app --bin codex-voice -- doctor audio` proves microphone capture by recording and reporting a WAV duration and size.
+- `cargo run -p codex-voice-app --bin codex-voice -- doctor codex-auth` proves local Codex credentials can be read or refreshed, without printing the access token.
+- `cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file <known-wav>` prints a non-empty transcript for a valid sample.
 
 Linux KDE6/Wayland acceptance:
 

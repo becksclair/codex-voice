@@ -1,0 +1,12 @@
+[package]
+name = "codex-voice-codex"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+codex-voice-core = { path = "../codex-voice-core" }
+dirs.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true

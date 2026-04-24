@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/codex-voice-app",
+    "crates/codex-voice-audio",
+    "crates/codex-voice-codex",
+    "crates/codex-voice-core",
+    "crates/codex-voice-platform",
+    "crates/codex-voice-ui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+arboard = "3.4.1"
+async-trait = "0.1.88"
+clap = { version = "4.5.37", features = ["derive"] }
+cpal = "0.15.3"
+dirs = "6.0.0"
+hound = "3.5.1"
+reqwest = { version = "0.12.15", features = ["json", "multipart", "rustls-tls"], default-features = false }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tempfile = "3.19.1"
+thiserror = "2.0.12"
+tokio = { version = "1.44.2", features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

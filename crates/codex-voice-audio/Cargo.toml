@@ -1,0 +1,12 @@
+[package]
+name = "codex-voice-audio"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+codex-voice-core = { path = "../codex-voice-core" }
+cpal.workspace = true
+hound.workspace = true
+tempfile.workspace = true
+tracing.workspace = true

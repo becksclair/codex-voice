@@ -1,0 +1,7 @@
+[package]
+name = "codex-voice-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+codex-voice-core = { path = "../codex-voice-core" }

@@ -1,0 +1,21 @@
+[package]
+name = "codex-voice-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+codex-voice-audio = { path = "../codex-voice-audio" }
+codex-voice-codex = { path = "../codex-voice-codex" }
+codex-voice-core = { path = "../codex-voice-core" }
+codex-voice-platform = { path = "../codex-voice-platform" }
+codex-voice-ui = { path = "../codex-voice-ui" }
+hound.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "codex-voice"
+path = "src/main.rs"
