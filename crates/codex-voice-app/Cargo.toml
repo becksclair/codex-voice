@@ -11,6 +11,7 @@ codex-voice-codex = { path = "../codex-voice-codex" }
 codex-voice-core = { path = "../codex-voice-core" }
 codex-voice-platform = { path = "../codex-voice-platform" }
 codex-voice-ui = { path = "../codex-voice-ui" }
+dirs.workspace = true
 hound.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -13,6 +13,8 @@ runtime first:
 - Private Codex transcription endpoint compatibility.
 - Linux KDE/Wayland diagnostics for portal availability.
 - Linux clipboard paste diagnostic using RemoteDesktop portal keyboard events.
+- Linux tray, system notification status HUD, settings/status window, log file,
+  diagnostics, test recording, and quit menu actions.
 
 ## Commands
 
@@ -26,8 +28,10 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voi
 cargo run -p codex-voice-app --bin codex-voice -- run
 ```
 
-`run` currently uses the Linux engine wiring and binds Control-M through the KDE
-GlobalShortcuts portal for hold-to-dictate.
+`run` currently uses the Linux engine wiring, binds Control-M plus the keyboard
+dictation key through the KDE GlobalShortcuts portal for hold-to-dictate, and
+exposes a Linux desktop surface with a tray menu, system notification status
+HUD, and settings/status window.
 
 ## Linux Notes
 
@@ -43,6 +47,14 @@ interfaces through the user D-Bus. `doctor paste` sets the clipboard and sends
 Ctrl+V through a RemoteDesktop keyboard portal session. The first run may ask for
 desktop portal approval; subsequent runs reuse the persisted restore token when
 the portal returns one.
+
+The Linux desktop surface depends on GTK 3 plus AppIndicator/Ayatana
+AppIndicator runtime libraries. It mirrors dictation state in the tray and uses
+the desktop notification service for the HUD so it does not steal focus from the
+target app. Logs are written to
+`${XDG_STATE_HOME:-~/.local/state}/codex-voice/codex-voice.log`, and the tray
+provides menu actions for test recording, settings/status, logs, portal
+diagnostics, and quitting the background app.
 
 ## Validation
 

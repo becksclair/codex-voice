@@ -50,7 +50,7 @@ rg -n "redact|access_token|preview|transcript_chars" src/main.rs
 
 - `doctor transcribe` requires `--file`; do not change it back to a positional file without updating docs.
 - `doctor paste` requires `--text`; this is intentionally documented in the ExecPlan.
-- `run` binds Control-M through the Linux GlobalShortcuts portal; approval may be prompted by the desktop.
+- `run` binds Control-M plus the keyboard dictation key through the Linux GlobalShortcuts portal; approval may be prompted by the desktop.
 - Keep Linux-only commands behind `#[cfg(target_os = "linux")]`.
 
 ## Pre-PR Checks

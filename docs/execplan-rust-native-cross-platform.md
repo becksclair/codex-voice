@@ -19,9 +19,10 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - [x] (2026-04-24) Created the Rust workspace and scaffolded the planned crates under `crates/`.
 - [x] (2026-04-24) Implemented the core dictation state machine and CPAL-backed mono WAV capture.
 - [x] (2026-04-24) Implemented Codex auth file reading, app-server refresh, and private transcription HTTP compatibility.
-- [ ] Prove Linux KDE6/Wayland global shortcut and paste insertion.
+- [x] (2026-04-24) Proved Linux KDE6/Wayland global shortcut and paste insertion through portals.
+- [x] (2026-04-24) Added the Linux app surface: tray menu, system notification status HUD, settings/status window, log file, test recording, diagnostics, and quit actions.
 - [ ] Implement macOS and Windows adapters.
-- [ ] Add Slint tray/settings/HUD UI.
+- [ ] Add cross-platform Slint settings/HUD UI if GTK remains Linux-only after macOS/Windows adapters.
 - [ ] Add packaging with `cargo-packager`.
 - [ ] Validate end-to-end on macOS, Linux KDE6/Wayland, and Windows 11.
 
@@ -37,7 +38,10 @@ The existing Swift app remains a behavioral reference only. The new implementati
   Evidence: `busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.GlobalShortcuts` reports `version` 1 and activation/deactivation signals; the RemoteDesktop interface reports `version` 2 and `NotifyKeyboardKeysym`.
 
 - Observation: The Linux implementation has a runnable engine, audio, auth, transcription, portal diagnostics, GlobalShortcuts hotkey binding, and RemoteDesktop keyboard paste with persisted restore-token reuse.
-  Evidence: `LinuxHotkeyService` binds Control-M through `ashpd::desktop::global_shortcuts`; `LinuxTextInjector` sends Ctrl+V through `RemoteDesktopSessionManager`, which persists restore tokens under the user state directory.
+  Evidence: `LinuxHotkeyService` binds Control-M and the keyboard dictation key through `ashpd::desktop::global_shortcuts`; `LinuxTextInjector` sends Ctrl+V through `RemoteDesktopSessionManager`, which persists restore tokens under the user state directory.
+
+- Observation: The Linux app now has a complete desktop control surface before cross-platform UI polish.
+  Evidence: `codex-voice-ui` maps core `AppEvent` values into `UiStatus`, starts a Linux `tray-icon` menu, uses desktop notifications for the focus-safe status HUD, shows a GTK settings/status window, and `codex-voice-app` forwards status updates plus Start Test Recording/Open Logs/Run Diagnostics/Quit commands.
 
 - Observation: `cargo-packager` is the right installer crate for this plan because it supports macOS `.app`/`.dmg`, Linux `.deb`/AppImage/Pacman, and Windows NSIS/MSI from Rust packaging metadata.
   Evidence: `cargo-packager` docs list those formats and `package.metadata.packager` configuration.
@@ -72,7 +76,7 @@ The existing Swift app remains a behavioral reference only. The new implementati
 
 Initial Linux implementation is in place. The workspace builds, the core state machine has unit coverage for short-recording discard behavior, CPAL writes temporary mono WAV files, Codex auth/transcription compatibility is isolated in its own crate, and the Linux app exposes diagnostic commands.
 
-Remaining Linux risk is concentrated in live portal approval/runtime proof across target KDE sessions. macOS, Windows, Slint UI, and packaging remain deferred.
+The Linux portal path has live proof for KDE/Wayland hotkey and paste behavior, and the app now exposes the Linux tray, notification HUD, settings/status, logging, and diagnostic surface. Cross-platform UI polish can still move to Slint later if needed. macOS, Windows, and packaging remain deferred.
 
 ## Context and Orientation
 
@@ -343,7 +347,7 @@ It should record a 2-second sample to a temp file, print the path, duration, sam
 
 Milestone 3 implements Codex auth and transcription compatibility. Read `~/.codex/auth.json` with the current `tokens.access_token` and `tokens.account_id` shape. Resolve `codex` in this order: `CODEX_CLI_PATH`, `PATH`, `/Applications/Codex.app/Contents/Resources/codex` on macOS, and plain `codex` on Linux/Windows. Refresh auth by spawning `codex app-server --listen stdio://`, sending JSON lines for `initialize` and `account/read` with `refreshToken: true`, and requiring an `id:2` result line. Post multipart form data to `https://chatgpt.com/backend-api/transcribe` with headers equivalent to the Swift app: `Authorization`, `ChatGPT-Account-Id`, `originator: Codex Desktop`, `User-Agent`, `Content-Type`, and `Accept`. Add `doctor codex-auth` and `doctor transcribe --file <wav>` commands.
 
-Milestone 4 implements Linux KDE6/Wayland proof before polishing UI. Add `linux_wayland` adapters using `ashpd`. The hotkey adapter creates a GlobalShortcuts session, binds `Control-M`, and emits `Pressed`/`Released` from activation/deactivation. The text adapter sets the clipboard text, requests a RemoteDesktop keyboard session, starts it, waits for user permission, and sends Ctrl+V key events. Add diagnostics:
+Milestone 4 implements Linux KDE6/Wayland proof before polishing UI. Add `linux_wayland` adapters using `ashpd`. The hotkey adapter creates a GlobalShortcuts session, binds `Control-M` plus the keyboard dictation key, and emits `Pressed`/`Released` from activation/deactivation. The text adapter sets the clipboard text, requests a RemoteDesktop keyboard session, starts it, waits for user permission, and sends Ctrl+V key events. Add diagnostics:
 
     cargo run -p codex-voice-app --bin codex-voice -- doctor linux-portals
     cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice portal paste test"
@@ -359,7 +363,7 @@ Document that insertion into elevated apps may fail from a non-elevated Codex Vo
 
 Milestone 6 implements macOS adapters. Use `global-hotkey` or direct Carbon only if needed to preserve press/release semantics. Use AppKit/ApplicationServices bindings for Accessibility checks and settings links. Implement insertion as Accessibility selected-text replacement first, then clipboard plus CGEvent Command-V fallback, preserving and restoring the previous pasteboard. Include `NSMicrophoneUsageDescription` and background-app configuration in the packaged app. Add diagnostics equivalent to Windows.
 
-Milestone 7 adds Slint UI, tray, and HUD. The app should start as a tray/background utility. The tray menu includes status, "Start Test Recording", "Open Settings", "Open Logs", "Run Diagnostics", and "Quit". The settings window lets the user configure the hotkey string, view permission status, choose transcription timeout, and enable debug logs. The HUD is a small always-on-top status surface with four states: Listening, Transcribing, Inserting, and Error. Do not add account management in v1; the app relies on Codex sign-in.
+Milestone 7 adds desktop UI, tray, and HUD. The Linux app has a GTK/AppIndicator tray status/menu with "Start Test Recording", "Open Settings", "Open Logs", "Run Diagnostics", and "Quit". Its settings/status window shows the current hotkey, portal insertion mode, Codex auth source, timeout/log hints, and log file path. Its HUD uses the desktop notification service for Listening, Transcribing, Inserting, and Error states so it remains focus-safe on KDE/Wayland. Do not add account management in v1; the app relies on Codex sign-in. Cross-platform Slint UI can replace or complement the Linux GTK surfaces after macOS/Windows adapters exist.
 
 Milestone 8 adds packaging with `cargo-packager`. Add `[package.metadata.packager]` to the app crate or a root `Packager.toml`. Use product name `Codex Voice`, identifier `dev.codexvoice.app`, category `Productivity`, and icon resources under `resources/icons`. Configure formats:
 

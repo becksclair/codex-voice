@@ -11,8 +11,12 @@ use tokio::sync::mpsc;
 use crate::{linux_clipboard::LinuxClipboard, linux_remote_desktop::RemoteDesktopSessionManager};
 
 const HOTKEY_ID: &str = "codex-voice-hold-to-dictate";
+const MEDIA_HOTKEY_ID: &str = "codex-voice-media-dictation";
 const HOTKEY_TRIGGER: &str = "<Control>m";
+const MEDIA_HOTKEY_TRIGGER: &str = "<Super>h";
 const HOTKEY_DESCRIPTION: &str = "Hold to dictate with Codex Voice";
+const MEDIA_HOTKEY_DESCRIPTION: &str =
+    "Hold the keyboard dictation key to dictate with Codex Voice";
 const HOTKEY_START_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Default, Clone)]
@@ -205,10 +209,13 @@ async fn run_global_shortcut_listener(
                 "failed to create GlobalShortcuts portal session: {error}"
             ))
         })?;
-    let shortcut =
-        NewShortcut::new(HOTKEY_ID, HOTKEY_DESCRIPTION).preferred_trigger(Some(HOTKEY_TRIGGER));
+    let shortcuts = [
+        NewShortcut::new(HOTKEY_ID, HOTKEY_DESCRIPTION).preferred_trigger(Some(HOTKEY_TRIGGER)),
+        NewShortcut::new(MEDIA_HOTKEY_ID, MEDIA_HOTKEY_DESCRIPTION)
+            .preferred_trigger(Some(MEDIA_HOTKEY_TRIGGER)),
+    ];
     portal
-        .bind_shortcuts(&session, &[shortcut], None, BindShortcutsOptions::default())
+        .bind_shortcuts(&session, &shortcuts, None, BindShortcutsOptions::default())
         .await
         .map_err(|error| {
             PlatformError::PermissionDenied(format!(
@@ -225,6 +232,8 @@ async fn run_global_shortcut_listener(
     tracing::info!(
         shortcut_id = HOTKEY_ID,
         preferred_trigger = HOTKEY_TRIGGER,
+        media_shortcut_id = MEDIA_HOTKEY_ID,
+        media_preferred_trigger = MEDIA_HOTKEY_TRIGGER,
         "GlobalShortcuts portal listener started"
     );
 
@@ -243,7 +252,7 @@ async fn run_global_shortcut_listener(
     loop {
         tokio::select! {
             event = activated.next() => match event {
-                Some(event) if event.shortcut_id() == HOTKEY_ID => {
+                Some(event) if is_dictation_shortcut(event.shortcut_id()) => {
                     if events.send(HotkeyEvent::Pressed).await.is_err() {
                         break;
                     }
@@ -252,7 +261,7 @@ async fn run_global_shortcut_listener(
                 None => break,
             },
             event = deactivated.next() => match event {
-                Some(event) if event.shortcut_id() == HOTKEY_ID => {
+                Some(event) if is_dictation_shortcut(event.shortcut_id()) => {
                     if events.send(HotkeyEvent::Released).await.is_err() {
                         break;
                     }
@@ -264,4 +273,8 @@ async fn run_global_shortcut_listener(
     }
 
     Ok(())
+}
+
+fn is_dictation_shortcut(shortcut_id: &str) -> bool {
+    matches!(shortcut_id, HOTKEY_ID | MEDIA_HOTKEY_ID)
 }
