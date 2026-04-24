@@ -21,6 +21,7 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - [x] (2026-04-24) Implemented Codex auth file reading, app-server refresh, and private transcription HTTP compatibility.
 - [x] (2026-04-24) Proved Linux KDE6/Wayland global shortcut and paste insertion through portals.
 - [x] (2026-04-24) Added the Linux app surface: tray menu, system notification status HUD, settings/status window, log file, test recording, diagnostics, and quit actions.
+- [x] (2026-04-24) Ran cleanup and repeated review passes over the Linux app surface, fixing tray test-recording error-state handling and stale crate guidance.
 - [ ] Implement macOS and Windows adapters.
 - [ ] Add cross-platform Slint settings/HUD UI if GTK remains Linux-only after macOS/Windows adapters.
 - [ ] Add packaging with `cargo-packager`.
@@ -42,6 +43,9 @@ The existing Swift app remains a behavioral reference only. The new implementati
 
 - Observation: The Linux app now has a complete desktop control surface before cross-platform UI polish.
   Evidence: `codex-voice-ui` maps core `AppEvent` values into `UiStatus`, starts a Linux `tray-icon` menu, uses desktop notifications for the focus-safe status HUD, shows a GTK settings/status window, and `codex-voice-app` forwards status updates plus Start Test Recording/Open Logs/Run Diagnostics/Quit commands.
+
+- Observation: The Linux slice has passed focused cleanup/review validation and current workspace checks.
+  Evidence: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `git diff --check`, `codex-voice --version`, `doctor linux-portals`, and `doctor audio --seconds 1` all passed on 2026-04-24. `doctor linux-portals` reported KDE/Wayland with GlobalShortcuts version `u 1` and RemoteDesktop version `u 2`.
 
 - Observation: `cargo-packager` is the right installer crate for this plan because it supports macOS `.app`/`.dmg`, Linux `.deb`/AppImage/Pacman, and Windows NSIS/MSI from Rust packaging metadata.
   Evidence: `cargo-packager` docs list those formats and `package.metadata.packager` configuration.
@@ -76,7 +80,7 @@ The existing Swift app remains a behavioral reference only. The new implementati
 
 Initial Linux implementation is in place. The workspace builds, the core state machine has unit coverage for short-recording discard behavior, CPAL writes temporary mono WAV files, Codex auth/transcription compatibility is isolated in its own crate, and the Linux app exposes diagnostic commands.
 
-The Linux portal path has live proof for KDE/Wayland hotkey and paste behavior, and the app now exposes the Linux tray, notification HUD, settings/status, logging, and diagnostic surface. Cross-platform UI polish can still move to Slint later if needed. macOS, Windows, and packaging remain deferred.
+The Linux portal path has live proof for KDE/Wayland hotkey and paste behavior, including the keyboard dictation media key, and the app now exposes the Linux tray, notification HUD, settings/status, logging, and diagnostic surface. Cleanup and repeated review passes fixed the concrete issues found in the Linux surface and left the current workspace checks green. Cross-platform UI polish can still move to Slint later if needed. macOS, Windows, and packaging remain deferred.
 
 ## Context and Orientation
 
@@ -416,7 +420,8 @@ Linux KDE6/Wayland acceptance:
 - `echo $XDG_SESSION_TYPE` prints `wayland`.
 - `echo $XDG_CURRENT_DESKTOP` identifies KDE or Plasma.
 - `doctor linux-portals` reports GlobalShortcuts available and RemoteDesktop keyboard support available, or prints exact missing package/portal names.
-- Holding `Control-M` starts recording and releasing it begins transcription.
+- Holding `Control-M` or the keyboard dictation key starts recording and releasing it begins transcription.
+- The tray appears, status updates do not steal focus, and the tray menu can start a test recording, open logs, run diagnostics, show settings/status, and quit.
 - `doctor paste --text "codex voice portal paste test"` inserts that text into KWrite, Kate, Konsole, and a Chromium/Electron text field where portal permission is granted.
 
 Windows 11 acceptance:
