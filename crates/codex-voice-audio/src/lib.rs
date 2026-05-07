@@ -29,10 +29,11 @@ struct CaptureState {
     sample_rate: u32,
 }
 
-// CPAL marks Stream as not sendable across every backend it supports. This crate's
-// current implementation is Linux-first and only moves the stream as part of the
-// recorder state guarded by a mutex so it can be stopped from the app task.
-#[cfg(target_os = "linux")]
+// CPAL marks Stream as not sendable across every backend it supports. This
+// recorder never shares the stream with audio callbacks; callbacks only receive
+// the writer and counter Arcs. The stream is created, paused, and dropped through
+// the recorder state, so the assertion is kept narrow to host targets we validate.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 unsafe impl Send for CaptureState {}
 
 impl CpalWavRecorder {

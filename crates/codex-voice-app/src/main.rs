@@ -2,18 +2,23 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use codex_voice_audio::CpalWavRecorder;
 use codex_voice_codex::{CodexAuthService, CodexTranscriptionClient};
+#[cfg(target_os = "linux")]
+use codex_voice_core::DictationState;
 use codex_voice_core::{
-    AppEvent, AudioRecorder, DictationEngine, DictationState, HotkeyService, PermissionService,
-    RecordedAudio, TextInjector, TranscriptionClient,
+    AppEvent, AudioRecorder, DictationEngine, HotkeyService, PermissionService, RecordedAudio,
+    TextInjector, TranscriptionClient,
 };
 #[cfg(target_os = "linux")]
 use codex_voice_platform::{LinuxHotkeyService, LinuxPermissionService, LinuxTextInjector};
+#[cfg(target_os = "windows")]
+use codex_voice_platform::{WindowsHotkeyService, WindowsPermissionService, WindowsTextInjector};
 #[cfg(target_os = "linux")]
 use codex_voice_ui::{LinuxUiConfig, StatusTray, UiCommand, UiStatus};
+#[cfg(target_os = "linux")]
+use std::process::Command as ProcessCommand;
 use std::{
     io::Write,
     path::PathBuf,
-    process::Command as ProcessCommand,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -187,9 +192,31 @@ fn open_log_append(path: &PathBuf) -> Result<std::fs::File> {
         .with_context(|| format!("failed to open log file {}", path.display()))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
 async fn run() -> Result<()> {
-    anyhow::bail!("this milestone implements Linux only")
+    let audio = Arc::new(CpalWavRecorder::new());
+    let auth = CodexAuthService::new()?;
+    let transcription = Arc::new(CodexTranscriptionClient::new(auth)?);
+    let injector = Arc::new(WindowsTextInjector::new());
+    let (app_tx, mut app_rx) = mpsc::channel(64);
+    let (hotkey_tx, mut hotkey_rx) = mpsc::channel(16);
+    WindowsHotkeyService::new().start(hotkey_tx)?;
+    let mut engine = DictationEngine::new(audio, transcription, injector, app_tx);
+    println!("Codex Voice is running. Hold Control-M to dictate. Paste insertion uses clipboard plus SendInput and may be blocked for elevated target apps.");
+
+    loop {
+        tokio::select! {
+            Some(event) = hotkey_rx.recv() => engine.handle_hotkey(event).await,
+            Some(event) = app_rx.recv() => print_app_event(event),
+            else => break,
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+async fn run() -> Result<()> {
+    anyhow::bail!("this milestone implements Linux and Windows only")
 }
 
 async fn doctor_audio(args: AudioDoctor) -> Result<()> {
@@ -209,12 +236,14 @@ async fn doctor_audio(args: AudioDoctor) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn run_tray_test_recording(tray: &Option<StatusTray>) {
     if let Err(error) = run_test_recording(tray).await {
         tracing::warn!(%error, "tray test recording failed");
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn run_test_recording(tray: &Option<StatusTray>) -> Result<()> {
     set_tray_status(
         tray,
@@ -251,6 +280,7 @@ async fn run_test_recording(tray: &Option<StatusTray>) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn set_test_recording_error(tray: &Option<StatusTray>, error: &anyhow::Error) {
     let message = format!("Test recording failed: {error:#}");
     tracing::warn!(error = %error, "test recording failed");
@@ -284,12 +314,14 @@ async fn capture_audio_sample(duration: Duration) -> Result<(RecordedAudio, u64)
     Ok((recording, size))
 }
 
+#[cfg(target_os = "linux")]
 fn set_tray_status(tray: &Option<StatusTray>, status: UiStatus) {
     if let Some(tray) = tray {
         tray.update(status);
     }
 }
 
+#[cfg(target_os = "linux")]
 fn open_logs() -> Result<()> {
     let path = ensure_log_file()?;
     tracing::info!(path = %path.display(), "opening log file");
@@ -301,6 +333,7 @@ fn open_logs() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn open_tray_logs(tray: &Option<StatusTray>) {
     if let Err(error) = open_logs() {
         tracing::warn!(%error, "failed to open logs");
@@ -308,6 +341,7 @@ fn open_tray_logs(tray: &Option<StatusTray>) {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn run_tray_diagnostics(tray: &Option<StatusTray>) {
     let _ = append_log_line("running linux portal diagnostics");
     set_tray_status(
@@ -330,6 +364,7 @@ async fn run_tray_diagnostics(tray: &Option<StatusTray>) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn set_tray_error(tray: &Option<StatusTray>, message: String, error: anyhow::Error) {
     set_tray_status(
         tray,
@@ -387,9 +422,24 @@ async fn doctor_hotkey() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
 async fn doctor_hotkey() -> Result<()> {
-    anyhow::bail!("hotkey diagnostics are implemented for Linux only")
+    let (tx, mut rx) = mpsc::channel(8);
+    WindowsHotkeyService::new().start(tx)?;
+    println!("Waiting for hotkey events. Hold and release Control-M within 30 seconds.");
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .context("timed out waiting for hotkey event")?
+            .context("hotkey listener stopped before emitting the expected events")?;
+        println!("{event:?}");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+async fn doctor_hotkey() -> Result<()> {
+    anyhow::bail!("hotkey diagnostics are implemented for Linux and Windows only")
 }
 
 #[cfg(target_os = "linux")]
@@ -400,9 +450,20 @@ async fn doctor_paste(text: String) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+async fn doctor_paste(text: String) -> Result<()> {
+    let report = WindowsTextInjector::new().insert_text(&text).await?;
+    println!("method: {:?}", report.method);
+    println!("restored_clipboard: {}", report.restored_clipboard);
+    println!(
+        "note: SendInput may be blocked when targeting elevated apps from a non-elevated process"
+    );
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 async fn doctor_paste(_text: String) -> Result<()> {
-    anyhow::bail!("paste diagnostics are implemented for Linux only")
+    anyhow::bail!("paste diagnostics are implemented for Linux and Windows only")
 }
 
 #[cfg(target_os = "linux")]
@@ -426,7 +487,20 @@ async fn doctor_linux_portals() -> Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 async fn doctor_linux_portals() -> Result<()> {
-    anyhow::bail!("linux portal diagnostics are implemented for Linux only")
+    #[cfg(not(target_os = "windows"))]
+    anyhow::bail!("linux portal diagnostics are implemented for Linux only");
+
+    #[cfg(target_os = "windows")]
+    println!("linux portal diagnostics are not applicable on Windows");
+    #[cfg(target_os = "windows")]
+    for status in WindowsPermissionService::new().check().await? {
+        println!(
+            "{:?}: available={} granted={:?} detail={}",
+            status.kind, status.available, status.granted, status.detail
+        );
+    }
+    #[cfg(target_os = "windows")]
+    Ok(())
 }
 
 fn print_app_event(event: AppEvent) {

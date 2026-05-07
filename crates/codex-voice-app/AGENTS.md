@@ -2,7 +2,7 @@
 
 ## Package Identity
 
-`codex-voice-app` is the CLI/runtime wiring crate. It exposes the `codex-voice` binary, diagnostic subcommands, Linux run loop, logging setup, and top-level error handling.
+`codex-voice-app` is the CLI/runtime wiring crate. It exposes the `codex-voice` binary, diagnostic subcommands, platform run loops, logging setup, and top-level error handling.
 
 ## Setup & Run
 
@@ -25,7 +25,7 @@ cargo check -p codex-voice-app
 - ✅ DO: Redact auth in diagnostics like `doctor_codex_auth()`; print token presence, never token values.
 - ✅ DO: Print transcript length and a short preview only, following `doctor_transcribe()`.
 - ❌ DON'T: Change the CLI shape without updating `README.md` and `docs/execplan-rust-native-cross-platform.md`; both document concrete `cargo run ... --bin codex-voice -- ...` commands.
-- ❌ DON'T: Put platform-specific implementation details here; Linux-specific behavior belongs in `crates/codex-voice-platform/src/linux.rs`.
+- ❌ DON'T: Put platform-specific implementation details here; platform behavior belongs in `crates/codex-voice-platform/src/`.
 - Use `anyhow::Result` in this crate only; lower crates should expose typed result aliases.
 
 ## Touch Points / Key Files
@@ -35,7 +35,7 @@ cargo check -p codex-voice-app
 - Core state integration: `crates/codex-voice-core/src/engine.rs`
 - Audio diagnostics: `crates/codex-voice-audio/src/lib.rs`
 - Codex diagnostics: `crates/codex-voice-codex/src/lib.rs`
-- Linux platform diagnostics: `crates/codex-voice-platform/src/linux.rs`
+- Platform diagnostics: `crates/codex-voice-platform/src/linux.rs`, `crates/codex-voice-platform/src/windows.rs`
 
 ## JIT Index Hints
 
@@ -50,8 +50,9 @@ rg -n "redact|access_token|preview|transcript_chars" src/main.rs
 
 - `doctor transcribe` requires `--file`; do not change it back to a positional file without updating docs.
 - `doctor paste` requires `--text`; this is intentionally documented in the ExecPlan.
-- `run` binds Control-M plus the keyboard dictation key through the Linux GlobalShortcuts portal; approval may be prompted by the desktop.
-- Keep Linux-only commands behind `#[cfg(target_os = "linux")]`.
+- Linux `run` binds Control-M plus the keyboard dictation key through the GlobalShortcuts portal; approval may be prompted by the desktop.
+- Windows `run` currently uses Control-M polling and clipboard plus SendInput paste.
+- Keep platform-only commands behind the matching `#[cfg(target_os = "...")]`.
 
 ## Pre-PR Checks
 

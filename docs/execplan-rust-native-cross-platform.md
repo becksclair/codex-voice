@@ -22,6 +22,7 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - [x] (2026-04-24) Proved Linux KDE6/Wayland global shortcut and paste insertion through portals.
 - [x] (2026-04-24) Added the Linux app surface: tray menu, system notification status HUD, settings/status window, log file, test recording, diagnostics, and quit actions.
 - [x] (2026-04-24) Ran cleanup and repeated review passes over the Linux app surface, fixing tray test-recording error-state handling and stale crate guidance.
+- [x] (2026-04-24) Unblocked Windows workspace compilation, added Windows Control-M polling, Windows clipboard plus `SendInput` paste, and Windows CLI wiring.
 - [ ] Implement macOS and Windows adapters.
 - [ ] Add cross-platform Slint settings/HUD UI if GTK remains Linux-only after macOS/Windows adapters.
 - [ ] Add packaging with `cargo-packager`.
@@ -46,6 +47,9 @@ The existing Swift app remains a behavioral reference only. The new implementati
 
 - Observation: The Linux slice has passed focused cleanup/review validation and current workspace checks.
   Evidence: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `git diff --check`, `codex-voice --version`, `doctor linux-portals`, and `doctor audio --seconds 1` all passed on 2026-04-24. `doctor linux-portals` reported KDE/Wayland with GlobalShortcuts version `u 1` and RemoteDesktop version `u 2`.
+
+- Observation: The Windows build now compiles and exposes initial diagnostics, but live audio/input validation depends on the execution context.
+  Evidence: `cargo check --workspace` passes on Windows. `codex-voice --version` and `doctor linux-portals` run on Windows, with the latter reporting Windows permission diagnostics. `doctor audio --seconds 1` reaches CPAL but may report no default input device in this shell. `doctor paste --text "codex voice windows paste test"` reaches the Windows adapter, but `SendInput` may return `Access is denied. (os error 5)` from this shell; hotkey and paste behavior still need validation from a normal interactive desktop process or packaged app.
 
 - Observation: `cargo-packager` is the right installer crate for this plan because it supports macOS `.app`/`.dmg`, Linux `.deb`/AppImage/Pacman, and Windows NSIS/MSI from Rust packaging metadata.
   Evidence: `cargo-packager` docs list those formats and `package.metadata.packager` configuration.
@@ -358,7 +362,7 @@ Milestone 4 implements Linux KDE6/Wayland proof before polishing UI. Add `linux_
 
 On KDE6/Wayland, the first command must report whether GlobalShortcuts and RemoteDesktop are available and their portal versions. The second command must paste the text into the focused field or print a precise denial/unavailable message.
 
-Milestone 5 implements Windows 11 adapters. Use `global-hotkey` first for `Control-M` if it emits reliable press/release; if testing proves it only emits press or lacks release fidelity, replace the Windows hotkey path with a `WH_KEYBOARD_LL` low-level hook that tracks left/right Control plus M and emits a single press and release per hold. Use clipboard plus `SendInput(Ctrl+V)` for insertion, waiting for Control to be released before paste so the dictation hotkey does not contaminate the paste chord. Add diagnostics:
+Milestone 5 implements Windows 11 adapters. The first Windows slice uses `GetAsyncKeyState` polling for `Control-M` press/release fidelity and clipboard plus `SendInput(Ctrl+V)` for insertion, waiting for Control to be released before paste so the dictation hotkey does not contaminate the paste chord. If polling proves too broad or unreliable in normal desktop validation, replace the Windows hotkey path with a `WH_KEYBOARD_LL` low-level hook that tracks left/right Control plus M and emits a single press and release per hold. Add diagnostics:
 
     cargo run -p codex-voice-app --bin codex-voice -- doctor hotkey
     cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice windows paste test"

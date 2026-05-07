@@ -23,7 +23,7 @@ timeout 10s cargo run -p codex-voice-app --bin codex-voice -- doctor audio --sec
 - ✅ DO: Return `RecordedAudio` with `content_type: "audio/wav"` and a file name derived from the temp path.
 - ❌ DON'T: Add transcription, auth, or CLI behavior here; use `crates/codex-voice-codex` and `crates/codex-voice-app`.
 - ❌ DON'T: Drop cleanup when adding a new CPAL sample format; every branch after temp creation must either store or remove the file.
-- Keep the Linux-only `unsafe impl Send for CaptureState` narrow and documented.
+- Keep the target-gated `unsafe impl Send for CaptureState` narrow and documented.
 
 ## Touch Points / Key Files
 
@@ -43,7 +43,7 @@ rg -n "doctor_audio|AudioDoctor" ../codex-voice-app/src/main.rs
 
 ## Common Gotchas
 
-- CPAL streams are marked not sendable across every backend; do not broaden the current Linux-specific send assertion casually.
+- CPAL streams are marked not sendable across every backend; do not broaden the current target-specific send assertion casually.
 - `stop()` pauses briefly before finalizing the WAV; keep the audio smoke test when touching teardown.
 - Short-recording discard lives in core, not this crate.
 
