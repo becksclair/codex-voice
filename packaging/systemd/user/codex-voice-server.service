@@ -1,0 +1,12 @@
+[Unit]
+Description=Codex Voice local OpenAI-compatible audio server
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/codex-voice server
+Restart=on-failure
+RestartSec=2
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

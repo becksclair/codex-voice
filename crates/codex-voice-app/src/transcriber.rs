@@ -45,7 +45,6 @@ pub struct ServeConfig {
     pub chunk_seconds: u64,
     pub token_env: String,
     pub ffmpeg_binary: String,
-    pub require_tts: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +124,7 @@ const SPEECH_BODY_LIMIT_BYTES: usize = 64 * 1024;
 pub async fn serve(config: ServeConfig) -> Result<()> {
     let listener = TcpListener::bind(config.bind)
         .await
-        .with_context(|| format!("failed to bind transcriber service on {}", config.bind))?;
+        .with_context(|| format!("failed to bind audio service on {}", config.bind))?;
     let local_addr = listener.local_addr()?;
     let backend = Arc::new(CodexTranscriptionClient::with_timeout(
         CodexAuthService::new()?,
@@ -134,18 +133,12 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
     let root_url = service_root_url(local_addr);
     let token = resolve_or_generate_token(&config.token_env);
 
-    // Attempt to load TTS config and create speech client.
     let speech = match load_speech_client().await {
         Ok(client) => {
             tracing::info!("TTS client loaded successfully");
             Some(client)
         }
         Err(error) => {
-            if config.require_tts {
-                return Err(anyhow::anyhow!(
-                    "TTS is required but failed to load: {error}"
-                ));
-            }
             tracing::warn!(%error, "TTS client not available; speech endpoint will return 503");
             None
         }

@@ -28,8 +28,7 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor codex-auth
 cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file /path/to/sample.wav
 cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice portal paste test"
 cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello from codex voice"
-cargo run -p codex-voice-app --bin codex-voice -- transcriber serve
-cargo run -p codex-voice-app --bin codex-voice -- tts serve
+cargo run -p codex-voice-app --bin codex-voice -- server
 cargo run -p codex-voice-app --bin codex-voice -- transcriber probe-limits --file /path/to/long-audio.wav
 cargo run -p codex-voice-app --bin codex-voice -- run
 ```
@@ -41,17 +40,17 @@ HUD, and settings/status window. If a healthy local transcriber service is
 running, `run` uses it as the transcription backend; otherwise it falls back to
 direct Codex transcription.
 
-## Transcriber Service
+## Local Audio Server
 
-`transcriber serve` exposes a localhost OpenAI-compatible Whisper endpoint:
+`server` exposes a localhost OpenAI-compatible audio endpoint:
 
 ```bash
-cargo run -p codex-voice-app --bin codex-voice -- transcriber serve
+cargo run -p codex-voice-app --bin codex-voice -- server
 ```
 
 The service listens on `127.0.0.1:3845` by default, accepts
-`POST /v1/audio/transcriptions` and `POST /audio/transcriptions`, and writes a
-private discovery file to
+`POST /v1/audio/transcriptions`, `POST /audio/transcriptions`,
+`POST /v1/audio/speech`, and `POST /audio/speech`, and writes a private discovery file to
 `${XDG_STATE_HOME:-~/.local/state}/codex-voice/transcriber.json`. The discovery
 file includes the service URL, OpenAI-compatible base URL, token, and PID. It is
 written with mode `0600` on Unix.
@@ -76,12 +75,9 @@ lengths, and redacted errors.
 
 ## Text-to-Speech (TTS)
 
-`transcriber serve` now also exposes a unified localhost OpenAI-compatible audio
-service that includes TTS when `~/.codex/read-aloud-defaults.json` is present and
-valid. The service accepts:
-
-- `POST /v1/audio/transcriptions` and `POST /audio/transcriptions` (existing)
-- `POST /v1/audio/speech` and `POST /audio/speech` (new)
+`server` includes TTS when `~/.codex/read-aloud-defaults.json` is present and
+valid. If TTS config is absent, transcription still works and the speech endpoint
+returns `503`.
 
 The TTS endpoint accepts standard OpenAI TTS JSON requests:
 
@@ -106,11 +102,6 @@ provider-native voice identifier for the selected/default provider. If a persona
 is configured, the service uses the persona's primary provider and preserves
 persona context (scene, style, pace) across fallback to the other provider.
 
-`tts serve` starts the same unified service but **requires** TTS config to be
-present and valid; it fails fast if the config is missing or no provider can be
-resolved. `transcriber serve` remains backward-compatible: if TTS config is
-absent, transcription still works and the speech endpoint returns `503`.
-
 `doctor tts` tests TTS config loading and optionally performs a live synthesis:
 
 ```bash
@@ -120,6 +111,20 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello world
 The `read-aloud-defaults.json` config is read from `~/.codex/read-aloud-defaults.json`
 and supports Google Gemini TTS and ElevenLabs backends with persona-aware
 provider fallback.
+
+## User Service Setup
+
+`mise run setup` builds the release binary, installs it to `/usr/local/bin/codex-voice`,
+installs two systemd user units, reloads systemd, enables both services, and starts
+the background server immediately:
+
+- `codex-voice.service` runs `codex-voice run` after the graphical session is available; setup enables it but does not start it immediately.
+- `codex-voice-server.service` runs `codex-voice server` as a background user service.
+
+```bash
+mise run setup
+systemctl --user status codex-voice.service codex-voice-server.service
+```
 
 ## Linux Notes
 

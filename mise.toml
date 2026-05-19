@@ -1,0 +1,18 @@
+[tasks.setup]
+description = "Build codex-voice, install it, and enable user services"
+run = '''
+set -eu
+
+cargo build --release -p codex-voice-app --bin codex-voice
+sudo install -Dm755 target/release/codex-voice /usr/local/bin/codex-voice
+
+install -Dm644 packaging/systemd/user/codex-voice.service "$HOME/.config/systemd/user/codex-voice.service"
+install -Dm644 packaging/systemd/user/codex-voice-server.service "$HOME/.config/systemd/user/codex-voice-server.service"
+
+systemctl --user daemon-reload
+systemctl --user enable --now codex-voice-server.service
+systemctl --user enable codex-voice.service
+
+systemctl --user --no-pager status codex-voice-server.service
+systemctl --user is-enabled codex-voice.service
+'''

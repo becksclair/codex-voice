@@ -25,7 +25,7 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - [x] (2026-04-24) Ran cleanup and repeated review passes over the Linux app surface, fixing tray test-recording error-state handling and stale crate guidance.
 - [x] (2026-04-24) Unblocked Windows workspace compilation, added Windows Control-M polling, Windows clipboard plus `SendInput` paste, and Windows CLI wiring.
 - [x] (2026-05-04) Added a localhost OpenAI-compatible transcriber service for `summarize`, service discovery, GUI runtime fallback to direct Codex transcription, and explicit long-audio chunking behavior.
-- [x] (2026-05-19) Added OpenAI-compatible TTS endpoint (`POST /v1/audio/speech`) backed by Google Gemini TTS and ElevenLabs, with persona-aware provider fallback, config loading from `~/.codex/read-aloud-defaults.json`, `doctor tts`, and `tts serve` commands.
+- [x] (2026-05-19) Added unified `codex-voice server` OpenAI-compatible audio service with transcription and TTS endpoints, Google Gemini TTS and ElevenLabs backends, persona-aware provider fallback, config loading from `~/.codex/read-aloud-defaults.json`, `doctor tts`, and systemd user service setup via `mise run setup`.
 - [ ] Add cross-platform Slint settings/HUD UI if GTK remains Linux-only after macOS/Windows adapters.
 - [ ] Add packaging with `cargo-packager`.
 - [ ] Validate end-to-end on macOS, Linux KDE6/Wayland, and Windows 11.
@@ -57,7 +57,7 @@ The existing Swift app remains a behavioral reference only. The new implementati
   Evidence: `cargo check --workspace` passes on Windows. `codex-voice --version` and `doctor linux-portals` run on Windows, with the latter reporting Windows permission diagnostics. `doctor audio --seconds 1` reaches CPAL but may report no default input device in this shell. `doctor paste --text "codex voice windows paste test"` reaches the Windows adapter, but `SendInput` may return `Access is denied. (os error 5)` from this shell; hotkey and paste behavior still need validation from a normal interactive desktop process or packaged app.
 
 - Observation: `summarize` can use Codex Voice without a `summarize` patch by pointing its OpenAI Whisper base URL at a local Codex Voice service.
-  Evidence: `codex-voice transcriber serve` exposes `POST /v1/audio/transcriptions` and writes a private discovery file with `openai_base_url` and token under the user state directory. The app runtime probes this service once at startup and falls back to direct Codex transcription if it is stale, unhealthy, or unauthorized.
+  Evidence: `codex-voice server` exposes `POST /v1/audio/transcriptions` and writes a private discovery file with `openai_base_url` and token under the user state directory. The app runtime probes this service once at startup and falls back to direct Codex transcription if it is stale, unhealthy, or unauthorized.
 
 - Observation: There is no public limit documentation for the private Codex transcription endpoint, so the implementation keeps the same conservative envelope as OpenAI-compatible Whisper callers.
   Evidence: Public OpenAI audio transcription documentation and cookbook examples use a 25 MB upload cap; the local service defaults to 24 MiB per Codex backend request, splits oversized client uploads with `ffmpeg`, and returns `413 Payload Too Large` when chunking is unavailable.
@@ -103,10 +103,14 @@ The existing Swift app remains a behavioral reference only. The new implementati
   Date/Author: 2026-05-04 / Bex + Codex
 
 - Decision: Add TTS as a unified localhost OpenAI-compatible audio service endpoint, not a separate daemon.
-  Rationale: One service means one bearer token, one discovery file, one `openai_base_url`, and clients can treat it as a single OpenAI-compatible audio base. This reuses the existing `transcriber serve` auth/discovery/health patterns.
+  Rationale: One service means one bearer token, one discovery file, one `openai_base_url`, and clients can treat it as a single OpenAI-compatible audio base. The public command is `codex-voice server`; separate TTS/transcriber serve commands are redundant.
   Date/Author: 2026-05-19 / Bex + Codex
 
-- Decision: Load TTS config (`~/.codex/read-aloud-defaults.json`) only on TTS service startup and `doctor tts`, not on ordinary `codex-voice run`.
+- Decision: Use systemd user units for local install setup rather than desktop autostart `.desktop` files.
+  Rationale: systemd user services give restart policy, logs, status, and clear enable/start semantics. `codex-voice.service` is tied to `graphical-session.target`, while `codex-voice-server.service` runs under `default.target`.
+  Date/Author: 2026-05-19 / Bex + Codex
+
+- Decision: Load TTS config (`~/.codex/read-aloud-defaults.json`) only on `codex-voice server` startup and `doctor tts`, not on ordinary `codex-voice run`.
   Rationale: A broken or missing TTS config should not break today's dictation-only flow. TTS is additive, not required.
   Date/Author: 2026-05-19 / Bex + Codex
 
@@ -426,7 +430,7 @@ It should record a 2-second sample to a temp file, print the path, duration, sam
 
 Milestone 3 implements Codex auth and transcription compatibility. Read `~/.codex/auth.json` with the current `tokens.access_token` and `tokens.account_id` shape. Resolve `codex` in this order: `CODEX_CLI_PATH`, `PATH`, `/Applications/Codex.app/Contents/Resources/codex` on macOS, and plain `codex` on Linux/Windows. Refresh auth by spawning `codex app-server --listen stdio://`, sending JSON lines for `initialize` and `account/read` with `refreshToken: true`, and requiring an `id:2` result line. Post multipart form data to `https://chatgpt.com/backend-api/transcribe` with headers equivalent to the Swift app: `Authorization`, `ChatGPT-Account-Id`, `originator: Codex Desktop`, `User-Agent`, `Content-Type`, and `Accept`. Add `doctor codex-auth` and `doctor transcribe --file <wav>` commands.
 
-The Linux app also exposes this transcription path as a localhost service for other tools. `codex-voice transcriber serve` listens on `127.0.0.1:3845` by default, accepts OpenAI-compatible `POST /v1/audio/transcriptions` requests, writes a private discovery file under the user state directory, and returns JSON `{ "text": ... }`. The GUI runtime reads that discovery file or `CODEX_VOICE_TRANSCRIBER_URL`, probes health with the bearer token, uses the service when healthy, and falls back to direct Codex transcription otherwise. The service must never send more than the configured Codex upload limit in one backend request; oversized client uploads are split with `ffmpeg` into 16 kHz mono WAV chunks, or rejected with `413` if chunking is unavailable. `codex-voice transcriber probe-limits --file <audio>` may be used to test real backend behavior while printing only sizes, status, transcript length, and redacted errors.
+The Linux app also exposes this transcription path as a localhost service for other tools. `codex-voice server` listens on `127.0.0.1:3845` by default, accepts OpenAI-compatible `POST /v1/audio/transcriptions` and `POST /v1/audio/speech` requests, writes a private discovery file under the user state directory, and returns JSON `{ "text": ... }` for transcription requests. The GUI runtime reads that discovery file or `CODEX_VOICE_TRANSCRIBER_URL`, probes health with the bearer token, uses the service when healthy, and falls back to direct Codex transcription otherwise. The service must never send more than the configured Codex upload limit in one backend request; oversized client uploads are split with `ffmpeg` into 16 kHz mono WAV chunks, or rejected with `413` if chunking is unavailable. `codex-voice transcriber probe-limits --file <audio>` may be used to test real backend behavior while printing only sizes, status, transcript length, and redacted errors.
 
 Milestone 4 implements Linux KDE6/Wayland proof before polishing UI. Add `linux_wayland` adapters using `ashpd`. The hotkey adapter creates a GlobalShortcuts session, binds `Control-M` plus the keyboard dictation key, and emits `Pressed`/`Released` from activation/deactivation. The text adapter sets the clipboard text, requests a RemoteDesktop keyboard session, starts it, waits for user permission, and sends Ctrl+V key events. Add diagnostics:
 
@@ -491,15 +495,15 @@ Core acceptance:
 - `cargo run -p codex-voice-app --bin codex-voice -- doctor audio` proves microphone capture by recording and reporting a WAV duration and size.
 - `cargo run -p codex-voice-app --bin codex-voice -- doctor codex-auth` proves local Codex credentials can be read or refreshed, without printing the access token.
 - `cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file <known-wav>` prints a non-empty transcript for a valid sample.
-- `cargo run -p codex-voice-app --bin codex-voice -- transcriber serve` starts a localhost OpenAI-compatible transcription service and writes a private discovery file.
+- `cargo run -p codex-voice-app --bin codex-voice -- server` starts a localhost OpenAI-compatible audio service and writes a private discovery file.
 - With that service running, `codex-voice run` reports/logs `transcription_backend=local-service`; without it, `codex-voice run` reports/logs `transcription_backend=direct-codex`.
 - Oversized service uploads are chunked with `ffmpeg` or rejected with `413 Payload Too Large` when `ffmpeg` is unavailable.
 - `cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello world"` prints resolved provider, content type, byte size, and synthesized audio output path (deleted unless `--keep`).
-- `cargo run -p codex-voice-app --bin codex-voice -- tts serve` starts the unified audio service and requires valid TTS config; it fails fast if config is missing or no provider resolves.
 - The unified service exposes `POST /v1/audio/speech` and returns raw audio bytes with a correct `Content-Type` header when TTS is configured and the bearer token is valid.
 - The speech endpoint converts provider-native output into the requested `response_format` when practical; compressed/container outputs require `ffmpeg` on `PATH`.
 - The speech endpoint returns `503` when TTS is not configured.
 - The discovery file includes capability flags: `{ "transcriptions": true, "speech": <bool> }`.
+- `mise run setup` installs `/usr/local/bin/codex-voice` and enables the `codex-voice.service` and `codex-voice-server.service` user units.
 
 Linux KDE6/Wayland acceptance:
 
@@ -574,9 +578,8 @@ The expected final CLI surface is:
     codex-voice doctor hotkey
     codex-voice doctor paste --text <text>
     codex-voice doctor linux-portals
-    codex-voice transcriber serve
+    codex-voice server
     codex-voice transcriber probe-limits --file <path>
-    codex-voice tts serve
 
 The app must never log tokens, account IDs in full, or full transcript content unless explicit debug logging is enabled. Even in debug mode, redact tokens and print transcript length plus a short preview only.
 

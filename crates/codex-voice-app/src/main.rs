@@ -43,6 +43,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Run,
+    Server(ServerArgs),
     Doctor {
         #[command(subcommand)]
         command: Option<DoctorCommand>,
@@ -50,10 +51,6 @@ enum Command {
     Transcriber {
         #[command(subcommand)]
         command: TranscriberCommand,
-    },
-    Tts {
-        #[command(subcommand)]
-        command: TtsCommand,
     },
 }
 
@@ -90,23 +87,11 @@ struct PasteDoctor {
 
 #[derive(Debug, Subcommand)]
 enum TranscriberCommand {
-    Serve(TranscriberServeArgs),
     ProbeLimits(TranscriberProbeLimitsArgs),
 }
 
-#[derive(Debug, Subcommand)]
-enum TtsCommand {
-    Serve(TtsServeArgs),
-}
-
 #[derive(Debug, Args)]
-struct TtsServeArgs {
-    #[arg(long, default_value = "127.0.0.1:3845")]
-    bind: SocketAddr,
-}
-
-#[derive(Debug, Args)]
-struct TranscriberServeArgs {
+struct ServerArgs {
     #[arg(long, default_value = "127.0.0.1:3845")]
     bind: SocketAddr,
     #[arg(long, default_value_t = 24)]
@@ -144,6 +129,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => run().await,
+        Command::Server(args) => transcriber::serve(args.try_into()?).await,
         Command::Doctor { command } => match command.unwrap_or(DoctorCommand::LinuxPortals) {
             DoctorCommand::Audio(args) => doctor_audio(args).await,
             DoctorCommand::CodexAuth => doctor_codex_auth(),
@@ -154,34 +140,11 @@ async fn main() -> Result<()> {
             DoctorCommand::LinuxPortals => doctor_linux_portals().await,
         },
         Command::Transcriber { command } => match command {
-            TranscriberCommand::Serve(args) => transcriber::serve(args.try_into()?).await,
             TranscriberCommand::ProbeLimits(args) => {
                 transcriber::probe_limits(args.try_into()?).await
             }
         },
-        Command::Tts { command } => match command {
-            TtsCommand::Serve(args) => tts_serve(args).await,
-        },
     }
-}
-
-async fn tts_serve(args: TtsServeArgs) -> Result<()> {
-    if !args.bind.ip().is_loopback() {
-        anyhow::bail!(
-            "tts service must bind to a loopback address (e.g. 127.0.0.1); {} is not allowed",
-            args.bind.ip()
-        );
-    }
-    transcriber::serve(transcriber::ServeConfig {
-        bind: args.bind,
-        codex_upload_limit_bytes: 24 * 1024 * 1024,
-        client_upload_limit_bytes: 512 * 1024 * 1024,
-        chunk_seconds: 600,
-        token_env: "CODEX_VOICE_TRANSCRIBER_TOKEN".to_string(),
-        ffmpeg_binary: "ffmpeg".to_string(),
-        require_tts: true,
-    })
-    .await
 }
 
 #[cfg(target_os = "linux")]
@@ -238,13 +201,13 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
-impl TryFrom<TranscriberServeArgs> for transcriber::ServeConfig {
+impl TryFrom<ServerArgs> for transcriber::ServeConfig {
     type Error = anyhow::Error;
 
-    fn try_from(value: TranscriberServeArgs) -> Result<Self> {
+    fn try_from(value: ServerArgs) -> Result<Self> {
         if !value.bind.ip().is_loopback() {
             anyhow::bail!(
-                "transcriber service must bind to a loopback address (e.g. 127.0.0.1); {} is not allowed",
+                "server must bind to a loopback address (e.g. 127.0.0.1); {} is not allowed",
                 value.bind.ip()
             );
         }
@@ -255,7 +218,6 @@ impl TryFrom<TranscriberServeArgs> for transcriber::ServeConfig {
             chunk_seconds: value.chunk_seconds,
             token_env: value.token_env,
             ffmpeg_binary: value.ffmpeg_binary,
-            require_tts: false,
         })
     }
 }
