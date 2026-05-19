@@ -18,6 +18,7 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file /tmp/
 
 - Auth reading and refresh live in `CodexAuthService` in `src/lib.rs`.
 - Transcription HTTP lives in `CodexTranscriptionClient` in `src/lib.rs`.
+- Long-running service callers may use `CodexTranscriptionClient::with_timeout`; keep `new()` at the current diagnostic/dictation default.
 - ✅ DO: Read `~/.codex/auth.json`; never write it directly.
 - ✅ DO: Refresh auth by spawning `codex app-server --listen stdio://` and sending JSON-RPC lines, as `refresh()` does.
 - ✅ DO: Kill/reap spawned Codex helpers on timeout, success, and setup/read failures; see `terminate_child()`.

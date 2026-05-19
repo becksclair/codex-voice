@@ -11,6 +11,7 @@ runtime first:
 - Codex auth reuse through `~/.codex/auth.json` plus `codex app-server --listen stdio://`
   refresh.
 - Private Codex transcription endpoint compatibility.
+- Local OpenAI-compatible transcription service for tools such as `summarize`.
 - Linux KDE/Wayland diagnostics for portal availability.
 - Linux clipboard paste diagnostic using RemoteDesktop portal keyboard events.
 - Linux tray, system notification status HUD, settings/status window, log file,
@@ -25,13 +26,50 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor audio --seconds 2
 cargo run -p codex-voice-app --bin codex-voice -- doctor codex-auth
 cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file /path/to/sample.wav
 cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice portal paste test"
+cargo run -p codex-voice-app --bin codex-voice -- transcriber serve
+cargo run -p codex-voice-app --bin codex-voice -- transcriber probe-limits --file /path/to/long-audio.wav
 cargo run -p codex-voice-app --bin codex-voice -- run
 ```
 
 `run` currently uses the Linux engine wiring, binds Control-M plus the keyboard
 dictation key through the KDE GlobalShortcuts portal for hold-to-dictate, and
 exposes a Linux desktop surface with a tray menu, system notification status
-HUD, and settings/status window.
+HUD, and settings/status window. If a healthy local transcriber service is
+running, `run` uses it as the transcription backend; otherwise it falls back to
+direct Codex transcription.
+
+## Transcriber Service
+
+`transcriber serve` exposes a localhost OpenAI-compatible Whisper endpoint:
+
+```bash
+cargo run -p codex-voice-app --bin codex-voice -- transcriber serve
+```
+
+The service listens on `127.0.0.1:3845` by default, accepts
+`POST /v1/audio/transcriptions` and `POST /audio/transcriptions`, and writes a
+private discovery file to
+`${XDG_STATE_HOME:-~/.local/state}/codex-voice/transcriber.json`. The discovery
+file includes the service URL, OpenAI-compatible base URL, token, and PID. It is
+written with mode `0600` on Unix.
+
+To use it from `summarize` without patching `summarize`:
+
+```bash
+export OPENAI_WHISPER_BASE_URL="$(jq -r .openai_base_url ~/.local/state/codex-voice/transcriber.json)"
+export OPENAI_API_KEY="$(jq -r .token ~/.local/state/codex-voice/transcriber.json)"
+export SUMMARIZE_TRANSCRIBER=whisper
+export SUMMARIZE_DISABLE_LOCAL_WHISPER_CPP=1
+```
+
+The service defaults to a 24 MiB Codex upload limit per backend request and a
+512 MiB client upload limit. Oversized uploads are split with `ffmpeg` into
+16 kHz mono WAV chunks before transcription. If `ffmpeg` is unavailable, the
+service returns `413 Payload Too Large` with a clear error.
+
+`transcriber probe-limits --file <audio>` tests the real Codex backend with a
+source file or generated chunks and prints only sizes, status, transcript
+lengths, and redacted errors.
 
 ## Linux Notes
 

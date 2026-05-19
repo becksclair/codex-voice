@@ -201,8 +201,12 @@ pub struct CodexTranscriptionClient {
 
 impl CodexTranscriptionClient {
     pub fn new(auth: CodexAuthService) -> TranscriptionResult<Self> {
+        Self::with_timeout(auth, Duration::from_secs(60))
+    }
+
+    pub fn with_timeout(auth: CodexAuthService, timeout: Duration) -> TranscriptionResult<Self> {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(timeout)
             .build()
             .map_err(|error| {
                 TranscriptionError::Request(format!("failed to build HTTP client: {error}"))
@@ -215,13 +219,15 @@ impl CodexTranscriptionClient {
 impl TranscriptionClient for CodexTranscriptionClient {
     async fn transcribe(&self, recording: &RecordedAudio) -> TranscriptionResult<String> {
         let auth = self.auth.read_or_refresh()?;
-        let bytes = fs::read(&recording.path).map_err(|error| {
-            TranscriptionError::Request(format!(
-                "failed to read {}: {error}",
-                recording.path.display()
-            ))
-        })?;
-        let file_part = multipart::Part::bytes(bytes)
+        let file_part = multipart::Part::file(&recording.path)
+            .await
+            .map_err(|error| {
+                TranscriptionError::Request(format!(
+                    "failed to open {}: {error}",
+                    recording.path.display()
+                ))
+            })?;
+        let file_part = file_part
             .file_name(recording.filename.clone())
             .mime_str(&recording.content_type)
             .map_err(|error| {
@@ -296,8 +302,16 @@ fn resolve_codex_cli() -> PathBuf {
 
 fn redact(text: &str) -> String {
     const MAX: usize = 300;
-    let clipped: String = text.chars().take(MAX).collect();
-    clipped.replace("access_token", "access_token(redacted)")
+    let mut result = text
+        .replace("access_token", "access_token(redacted)")
+        .replace("Authorization", "Authorization(redacted)");
+    result = codex_voice_core::redact_bearer_tokens(&result);
+    result = codex_voice_core::redact_jwts(&result);
+    if result.chars().count() > MAX {
+        format!("{}...", result.chars().take(MAX).collect::<String>())
+    } else {
+        result
+    }
 }
 
 #[derive(Debug, Deserialize)]

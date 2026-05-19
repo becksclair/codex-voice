@@ -12,6 +12,8 @@ pub enum TranscriptionError {
     Auth(String),
     #[error("request failed: {0}")]
     Request(String),
+    #[error("service responded with HTTP {status}: {message}")]
+    Service { status: u16, message: String },
 }
 
 #[async_trait]

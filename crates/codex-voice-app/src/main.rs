@@ -1,3 +1,5 @@
+mod transcriber;
+
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use codex_voice_audio::CpalWavRecorder;
@@ -18,6 +20,7 @@ use codex_voice_ui::{LinuxUiConfig, StatusTray, UiCommand, UiStatus};
 use std::process::Command as ProcessCommand;
 use std::{
     io::Write,
+    net::SocketAddr,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -41,6 +44,10 @@ enum Command {
     Doctor {
         #[command(subcommand)]
         command: Option<DoctorCommand>,
+    },
+    Transcriber {
+        #[command(subcommand)]
+        command: TranscriberCommand,
     },
 }
 
@@ -74,6 +81,44 @@ struct PasteDoctor {
     text: String,
 }
 
+#[derive(Debug, Subcommand)]
+enum TranscriberCommand {
+    Serve(TranscriberServeArgs),
+    ProbeLimits(TranscriberProbeLimitsArgs),
+}
+
+#[derive(Debug, Args)]
+struct TranscriberServeArgs {
+    #[arg(long, default_value = "127.0.0.1:3845")]
+    bind: SocketAddr,
+    #[arg(long, default_value_t = 24)]
+    codex_upload_limit_mib: u64,
+    #[arg(long, default_value_t = 512)]
+    client_upload_limit_mib: u64,
+    #[arg(long, default_value_t = 600)]
+    chunk_seconds: u64,
+    #[arg(long, default_value = "CODEX_VOICE_TRANSCRIBER_TOKEN")]
+    token_env: String,
+    #[arg(long, default_value = "ffmpeg")]
+    ffmpeg_binary: String,
+}
+
+#[derive(Debug, Args)]
+struct TranscriberProbeLimitsArgs {
+    #[arg(long)]
+    file: PathBuf,
+    #[arg(long, default_value_t = 24)]
+    codex_upload_limit_mib: u64,
+    #[arg(long, default_value_t = 600)]
+    chunk_seconds: u64,
+    #[arg(long, default_value_t = 1)]
+    max_chunks: usize,
+    #[arg(long)]
+    include_oversized: bool,
+    #[arg(long, default_value = "ffmpeg")]
+    ffmpeg_binary: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing()?;
@@ -89,14 +134,23 @@ async fn main() -> Result<()> {
             DoctorCommand::Paste(args) => doctor_paste(args.text).await,
             DoctorCommand::LinuxPortals => doctor_linux_portals().await,
         },
+        Command::Transcriber { command } => match command {
+            TranscriberCommand::Serve(args) => transcriber::serve(args.try_into()?).await,
+            TranscriberCommand::ProbeLimits(args) => {
+                transcriber::probe_limits(args.try_into()?).await
+            }
+        },
     }
 }
 
 #[cfg(target_os = "linux")]
 async fn run() -> Result<()> {
     let audio = Arc::new(CpalWavRecorder::new());
-    let auth = CodexAuthService::new()?;
-    let transcription = Arc::new(CodexTranscriptionClient::new(auth)?);
+    let resolved = transcriber::resolve_transcription_backend().await?;
+    tracing::info!(backend = resolved.label, "selected transcription backend");
+    append_log_line(format!("transcription_backend={}", resolved.label))?;
+    println!("transcription backend: {}", resolved.label);
+    let transcription = Arc::new(resolved.client);
     let injector = Arc::new(LinuxTextInjector::new());
     let (app_tx, mut app_rx) = mpsc::channel(64);
     let (hotkey_tx, mut hotkey_rx) = mpsc::channel(16);
@@ -141,6 +195,50 @@ async fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+impl TryFrom<TranscriberServeArgs> for transcriber::ServeConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(value: TranscriberServeArgs) -> Result<Self> {
+        if !value.bind.ip().is_loopback() {
+            anyhow::bail!(
+                "transcriber service must bind to a loopback address (e.g. 127.0.0.1); {} is not allowed",
+                value.bind.ip()
+            );
+        }
+        Ok(Self {
+            bind: value.bind,
+            codex_upload_limit_bytes: mib_to_bytes(value.codex_upload_limit_mib)?,
+            client_upload_limit_bytes: mib_to_bytes(value.client_upload_limit_mib)?,
+            chunk_seconds: value.chunk_seconds,
+            token_env: value.token_env,
+            ffmpeg_binary: value.ffmpeg_binary,
+        })
+    }
+}
+
+impl TryFrom<TranscriberProbeLimitsArgs> for transcriber::ProbeLimitsConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(value: TranscriberProbeLimitsArgs) -> Result<Self> {
+        Ok(Self {
+            file: value.file,
+            codex_upload_limit_bytes: mib_to_bytes(value.codex_upload_limit_mib)?,
+            chunk_seconds: value.chunk_seconds,
+            max_chunks: value.max_chunks,
+            include_oversized: value.include_oversized,
+            ffmpeg_binary: value.ffmpeg_binary,
+        })
+    }
+}
+
+fn mib_to_bytes(mib: u64) -> Result<u64> {
+    let bytes = mib
+        .checked_mul(1024 * 1024)
+        .context("MiB value is too large")?;
+    anyhow::ensure!(bytes > 0, "MiB value must be greater than zero");
+    Ok(bytes)
 }
 
 fn init_tracing() -> Result<()> {
@@ -522,6 +620,10 @@ fn print_app_event(event: AppEvent) {
                 report.method, report.restored_clipboard
             ));
             println!("inserted via {:?}", report.method);
+        }
+        AppEvent::Error(message) => {
+            tracing::error!(target: "codex_voice_app", %message, "app event error");
+            println!("dictation error occurred; see logs for details");
         }
         other => {
             tracing::debug!(target: "codex_voice_app", event = ?other, "app event");

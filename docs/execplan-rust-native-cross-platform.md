@@ -22,8 +22,9 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - [x] (2026-04-24) Proved Linux KDE6/Wayland global shortcut and paste insertion through portals.
 - [x] (2026-04-24) Added the Linux app surface: tray menu, system notification status HUD, settings/status window, log file, test recording, diagnostics, and quit actions.
 - [x] (2026-04-24) Ran cleanup and repeated review passes over the Linux app surface, fixing tray test-recording error-state handling and stale crate guidance.
+- [x] (2026-04-24) Ran cleanup and repeated review passes over the Linux app surface, fixing tray test-recording error-state handling and stale crate guidance.
 - [x] (2026-04-24) Unblocked Windows workspace compilation, added Windows Control-M polling, Windows clipboard plus `SendInput` paste, and Windows CLI wiring.
-- [ ] Implement macOS and Windows adapters.
+- [x] (2026-05-04) Added a localhost OpenAI-compatible transcriber service for `summarize`, service discovery, GUI runtime fallback to direct Codex transcription, and explicit long-audio chunking behavior.
 - [ ] Add cross-platform Slint settings/HUD UI if GTK remains Linux-only after macOS/Windows adapters.
 - [ ] Add packaging with `cargo-packager`.
 - [ ] Validate end-to-end on macOS, Linux KDE6/Wayland, and Windows 11.
@@ -48,9 +49,17 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - Observation: The Linux slice has passed focused cleanup/review validation and current workspace checks.
   Evidence: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `git diff --check`, `codex-voice --version`, `doctor linux-portals`, and `doctor audio --seconds 1` all passed on 2026-04-24. `doctor linux-portals` reported KDE/Wayland with GlobalShortcuts version `u 1` and RemoteDesktop version `u 2`.
 
+- Observation: The Linux slice has passed focused cleanup/review validation and current workspace checks.
+  Evidence: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `git diff --check`, `codex-voice --version`, `doctor linux-portals`, and `doctor audio --seconds 1` all passed on 2026-04-24. `doctor linux-portals` reported KDE/Wayland with GlobalShortcuts version `u 1` and RemoteDesktop version `u 2`.
+
 - Observation: The Windows build now compiles and exposes initial diagnostics, but live audio/input validation depends on the execution context.
   Evidence: `cargo check --workspace` passes on Windows. `codex-voice --version` and `doctor linux-portals` run on Windows, with the latter reporting Windows permission diagnostics. `doctor audio --seconds 1` reaches CPAL but may report no default input device in this shell. `doctor paste --text "codex voice windows paste test"` reaches the Windows adapter, but `SendInput` may return `Access is denied. (os error 5)` from this shell; hotkey and paste behavior still need validation from a normal interactive desktop process or packaged app.
 
+- Observation: `summarize` can use Codex Voice without a `summarize` patch by pointing its OpenAI Whisper base URL at a local Codex Voice service.
+  Evidence: `codex-voice transcriber serve` exposes `POST /v1/audio/transcriptions` and writes a private discovery file with `openai_base_url` and token under the user state directory. The app runtime probes this service once at startup and falls back to direct Codex transcription if it is stale, unhealthy, or unauthorized.
+
+- Observation: There is no public limit documentation for the private Codex transcription endpoint, so the implementation keeps the same conservative envelope as OpenAI-compatible Whisper callers.
+  Evidence: Public OpenAI audio transcription documentation and cookbook examples use a 25 MB upload cap; the local service defaults to 24 MiB per Codex backend request, splits oversized client uploads with `ffmpeg`, and returns `413 Payload Too Large` when chunking is unavailable.
 - Observation: `cargo-packager` is the right installer crate for this plan because it supports macOS `.app`/`.dmg`, Linux `.deb`/AppImage/Pacman, and Windows NSIS/MSI from Rust packaging metadata.
   Evidence: `cargo-packager` docs list those formats and `package.metadata.packager` configuration.
 
@@ -76,6 +85,10 @@ The existing Swift app remains a behavioral reference only. The new implementati
   Rationale: Wayland global shortcuts and input injection are the highest-risk parts. If the Linux portal path works, macOS and Windows are mostly adapter work.
   Date/Author: 2026-04-24 / Codex
 
+- Decision: Expose transcription reuse as a localhost OpenAI-compatible service rather than a custom `summarize` CLI hook.
+  Rationale: `summarize` already supports `OPENAI_WHISPER_BASE_URL`, so this keeps integration one-sided, makes the service reusable by the GUI, and keeps Codex auth/transcription behavior in one backend path.
+  Date/Author: 2026-05-04 / Bex + Codex
+
 - Decision: Embed Mermaid diagrams in the ExecPlan.
   Rationale: The implementation spans multiple crates, platform adapters, runtime event flow, and installer outputs. Diagrams reduce ambiguity for future agents without replacing the prose requirements.
   Date/Author: 2026-04-24 / Codex
@@ -84,7 +97,7 @@ The existing Swift app remains a behavioral reference only. The new implementati
 
 Initial Linux implementation is in place. The workspace builds, the core state machine has unit coverage for short-recording discard behavior, CPAL writes temporary mono WAV files, Codex auth/transcription compatibility is isolated in its own crate, and the Linux app exposes diagnostic commands.
 
-The Linux portal path has live proof for KDE/Wayland hotkey and paste behavior, including the keyboard dictation media key, and the app now exposes the Linux tray, notification HUD, settings/status, logging, and diagnostic surface. Cleanup and repeated review passes fixed the concrete issues found in the Linux surface and left the current workspace checks green. Cross-platform UI polish can still move to Slint later if needed. macOS, Windows, and packaging remain deferred.
+The Linux portal path has live proof for KDE/Wayland hotkey and paste behavior, including the keyboard dictation media key, and the app now exposes the Linux tray, notification HUD, settings/status, logging, diagnostic surface, and shared local transcriber service. Cleanup and repeated review passes fixed the concrete issues found in the Linux surface and left the current workspace checks green. Cross-platform UI polish can still move to Slint later if needed. macOS, Windows, and packaging remain deferred.
 
 ## Context and Orientation
 
@@ -268,6 +281,7 @@ Use these dependencies unless implementation proves one cannot meet the interfac
 - `serde`, `serde_json`, and `toml` for config/auth parsing.
 - `thiserror` and `anyhow` for error handling at library/app boundaries.
 - `reqwest` with multipart support for transcription HTTP.
+- `axum` for the localhost OpenAI-compatible transcriber service.
 - `cpal` for audio capture.
 - `hound` for WAV writing.
 - `slint` and `slint-build` for UI.
@@ -355,6 +369,8 @@ It should record a 2-second sample to a temp file, print the path, duration, sam
 
 Milestone 3 implements Codex auth and transcription compatibility. Read `~/.codex/auth.json` with the current `tokens.access_token` and `tokens.account_id` shape. Resolve `codex` in this order: `CODEX_CLI_PATH`, `PATH`, `/Applications/Codex.app/Contents/Resources/codex` on macOS, and plain `codex` on Linux/Windows. Refresh auth by spawning `codex app-server --listen stdio://`, sending JSON lines for `initialize` and `account/read` with `refreshToken: true`, and requiring an `id:2` result line. Post multipart form data to `https://chatgpt.com/backend-api/transcribe` with headers equivalent to the Swift app: `Authorization`, `ChatGPT-Account-Id`, `originator: Codex Desktop`, `User-Agent`, `Content-Type`, and `Accept`. Add `doctor codex-auth` and `doctor transcribe --file <wav>` commands.
 
+The Linux app also exposes this transcription path as a localhost service for other tools. `codex-voice transcriber serve` listens on `127.0.0.1:3845` by default, accepts OpenAI-compatible `POST /v1/audio/transcriptions` requests, writes a private discovery file under the user state directory, and returns JSON `{ "text": ... }`. The GUI runtime reads that discovery file or `CODEX_VOICE_TRANSCRIBER_URL`, probes health with the bearer token, uses the service when healthy, and falls back to direct Codex transcription otherwise. The service must never send more than the configured Codex upload limit in one backend request; oversized client uploads are split with `ffmpeg` into 16 kHz mono WAV chunks, or rejected with `413` if chunking is unavailable. `codex-voice transcriber probe-limits --file <audio>` may be used to test real backend behavior while printing only sizes, status, transcript length, and redacted errors.
+
 Milestone 4 implements Linux KDE6/Wayland proof before polishing UI. Add `linux_wayland` adapters using `ashpd`. The hotkey adapter creates a GlobalShortcuts session, binds `Control-M` plus the keyboard dictation key, and emits `Pressed`/`Released` from activation/deactivation. The text adapter sets the clipboard text, requests a RemoteDesktop keyboard session, starts it, waits for user permission, and sends Ctrl+V key events. Add diagnostics:
 
     cargo run -p codex-voice-app --bin codex-voice -- doctor linux-portals
@@ -418,6 +434,9 @@ Core acceptance:
 - `cargo run -p codex-voice-app --bin codex-voice -- doctor audio` proves microphone capture by recording and reporting a WAV duration and size.
 - `cargo run -p codex-voice-app --bin codex-voice -- doctor codex-auth` proves local Codex credentials can be read or refreshed, without printing the access token.
 - `cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file <known-wav>` prints a non-empty transcript for a valid sample.
+- `cargo run -p codex-voice-app --bin codex-voice -- transcriber serve` starts a localhost OpenAI-compatible transcription service and writes a private discovery file.
+- With that service running, `codex-voice run` reports/logs `transcription_backend=local-service`; without it, `codex-voice run` reports/logs `transcription_backend=direct-codex`.
+- Oversized service uploads are chunked with `ffmpeg` or rejected with `413 Payload Too Large` when `ffmpeg` is unavailable.
 
 Linux KDE6/Wayland acceptance:
 
@@ -490,6 +509,8 @@ The expected final CLI surface is:
     codex-voice doctor hotkey
     codex-voice doctor paste --text <text>
     codex-voice doctor linux-portals
+    codex-voice transcriber serve
+    codex-voice transcriber probe-limits --file <path>
 
 The app must never log tokens, account IDs in full, or full transcript content unless explicit debug logging is enabled. Even in debug mode, redact tokens and print transcript length plus a short preview only.
 
