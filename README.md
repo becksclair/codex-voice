@@ -12,6 +12,7 @@ runtime first:
   refresh.
 - Private Codex transcription endpoint compatibility.
 - Local OpenAI-compatible transcription service for tools such as `summarize`.
+- Local OpenAI-compatible text-to-speech (TTS) service backed by Google Gemini TTS or ElevenLabs.
 - Linux KDE/Wayland diagnostics for portal availability.
 - Linux clipboard paste diagnostic using RemoteDesktop portal keyboard events.
 - Linux tray, system notification status HUD, settings/status window, log file,
@@ -26,7 +27,9 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor audio --seconds 2
 cargo run -p codex-voice-app --bin codex-voice -- doctor codex-auth
 cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file /path/to/sample.wav
 cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice portal paste test"
+cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello from codex voice"
 cargo run -p codex-voice-app --bin codex-voice -- transcriber serve
+cargo run -p codex-voice-app --bin codex-voice -- tts serve
 cargo run -p codex-voice-app --bin codex-voice -- transcriber probe-limits --file /path/to/long-audio.wav
 cargo run -p codex-voice-app --bin codex-voice -- run
 ```
@@ -70,6 +73,53 @@ service returns `413 Payload Too Large` with a clear error.
 `transcriber probe-limits --file <audio>` tests the real Codex backend with a
 source file or generated chunks and prints only sizes, status, transcript
 lengths, and redacted errors.
+
+## Text-to-Speech (TTS)
+
+`transcriber serve` now also exposes a unified localhost OpenAI-compatible audio
+service that includes TTS when `~/.codex/read-aloud-defaults.json` is present and
+valid. The service accepts:
+
+- `POST /v1/audio/transcriptions` and `POST /audio/transcriptions` (existing)
+- `POST /v1/audio/speech` and `POST /audio/speech` (new)
+
+The TTS endpoint accepts standard OpenAI TTS JSON requests:
+
+```json
+{
+  "model": "gpt-4o-mini-tts",
+  "voice": "sky",
+  "input": "Hello from Codex Voice.",
+  "response_format": "wav",
+  "speed": 1.0
+}
+```
+
+Supported `response_format` values: `mp3`, `opus`, `aac`, `flac`, `wav`, `pcm`.
+Provider-native output is converted to the requested format before returning.
+Google Gemini TTS currently returns raw `audio/L16;codec=pcm;rate=24000`, so
+`wav` is wrapped locally and compressed/container formats require `ffmpeg` on
+`PATH`.
+
+`voice` is required. It can be a configured persona name (e.g. `"sky"`) or a
+provider-native voice identifier for the selected/default provider. If a persona
+is configured, the service uses the persona's primary provider and preserves
+persona context (scene, style, pace) across fallback to the other provider.
+
+`tts serve` starts the same unified service but **requires** TTS config to be
+present and valid; it fails fast if the config is missing or no provider can be
+resolved. `transcriber serve` remains backward-compatible: if TTS config is
+absent, transcription still works and the speech endpoint returns `503`.
+
+`doctor tts` tests TTS config loading and optionally performs a live synthesis:
+
+```bash
+cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello world"
+```
+
+The `read-aloud-defaults.json` config is read from `~/.codex/read-aloud-defaults.json`
+and supports Google Gemini TTS and ElevenLabs backends with persona-aware
+provider fallback.
 
 ## Linux Notes
 

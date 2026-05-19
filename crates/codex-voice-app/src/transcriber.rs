@@ -9,8 +9,10 @@ use axum::{
 };
 use codex_voice_codex::{CodexAuthService, CodexTranscriptionClient};
 use codex_voice_core::{
-    RecordedAudio, TranscriptionClient, TranscriptionError, TranscriptionResult,
+    RecordedAudio, SpeechClient, SpeechFormat, SpeechRequest, TranscriptionClient,
+    TranscriptionError, TranscriptionResult,
 };
+use codex_voice_tts::{ConfiguredSpeechClient, ReadAloudConfigLoader};
 use reqwest::multipart;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,6 +45,7 @@ pub struct ServeConfig {
     pub chunk_seconds: u64,
     pub token_env: String,
     pub ffmpeg_binary: String,
+    pub require_tts: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +120,8 @@ pub async fn resolve_transcription_backend() -> Result<ResolvedTranscriptionBack
     })
 }
 
+const SPEECH_BODY_LIMIT_BYTES: usize = 64 * 1024;
+
 pub async fn serve(config: ServeConfig) -> Result<()> {
     let listener = TcpListener::bind(config.bind)
         .await
@@ -128,11 +133,34 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
     )?);
     let root_url = service_root_url(local_addr);
     let token = resolve_or_generate_token(&config.token_env);
-    let discovery = TranscriberDiscoveryFile::new(root_url, token);
+
+    // Attempt to load TTS config and create speech client.
+    let speech = match load_speech_client().await {
+        Ok(client) => {
+            tracing::info!("TTS client loaded successfully");
+            Some(client)
+        }
+        Err(error) => {
+            if config.require_tts {
+                return Err(anyhow::anyhow!(
+                    "TTS is required but failed to load: {error}"
+                ));
+            }
+            tracing::warn!(%error, "TTS client not available; speech endpoint will return 503");
+            None
+        }
+    };
+
+    let capabilities = ServiceCapabilities {
+        transcriptions: true,
+        speech: speech.is_some(),
+    };
+    let discovery = TranscriberDiscoveryFile::new(root_url, token, capabilities.clone());
     write_discovery_file(&discovery)?;
 
     let app = service_router(ServiceState {
         backend,
+        speech,
         auth: ServiceAuth {
             token: discovery.token.clone(),
         },
@@ -142,18 +170,36 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
         ffmpeg_binary: config.ffmpeg_binary,
     });
 
-    println!(
-        "Codex Voice transcriber service listening on {}",
-        discovery.url
-    );
+    println!("Codex Voice audio service listening on {}", discovery.url);
     println!("OpenAI-compatible base URL: {}", discovery.openai_base_url);
+    println!(
+        "Capabilities: transcriptions={} speech={}",
+        capabilities.transcriptions, capabilities.speech
+    );
     println!("Discovery file: {}", discovery_path().display());
 
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await;
     remove_discovery_file_if_current(&discovery);
-    result.context("transcriber service failed")
+    result.context("audio service failed")
+}
+
+async fn load_speech_client() -> anyhow::Result<Arc<dyn SpeechClient>> {
+    let path = ReadAloudConfigLoader::default_path()
+        .map_err(|e| anyhow::anyhow!("failed to resolve config path: {e}"))?;
+    let loader = ReadAloudConfigLoader::new(path);
+    let config = loader
+        .load()
+        .map_err(|e| anyhow::anyhow!("failed to load read-aloud config: {e}"))?;
+    let client = ConfiguredSpeechClient::try_new(config)
+        .map_err(|e| anyhow::anyhow!("failed to create TTS client: {e}"))?;
+    if !client.has_any_provider() {
+        return Err(anyhow::anyhow!(
+            "TTS config parsed but no usable provider is configured (no Google or ElevenLabs client could be created)"
+        ));
+    }
+    Ok(Arc::new(client))
 }
 
 pub async fn probe_limits(config: ProbeLimitsConfig) -> Result<()> {
@@ -365,6 +411,7 @@ impl TranscriptionClient for LocalTranscriberClient {
 #[derive(Clone)]
 struct ServiceState {
     backend: Arc<dyn TranscriptionClient>,
+    speech: Option<Arc<dyn SpeechClient>>,
     auth: ServiceAuth,
     codex_upload_limit_bytes: u64,
     client_upload_limit_bytes: u64,
@@ -378,7 +425,7 @@ struct ServiceAuth {
 }
 
 fn service_router(state: ServiceState) -> Router {
-    let body_limit = usize::try_from(
+    let transcription_body_limit = usize::try_from(
         state
             .client_upload_limit_bytes
             .saturating_add(MULTIPART_OVERHEAD_BYTES),
@@ -389,7 +436,15 @@ fn service_router(state: ServiceState) -> Router {
         .route("/v1/healthz", get(health))
         .route("/audio/transcriptions", post(transcribe))
         .route("/v1/audio/transcriptions", post(transcribe))
-        .layer(DefaultBodyLimit::max(body_limit))
+        .layer(DefaultBodyLimit::max(transcription_body_limit))
+        .route(
+            "/audio/speech",
+            post(speech).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/audio/speech",
+            post(speech).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES)),
+        )
         .with_state(state)
 }
 
@@ -398,7 +453,14 @@ async fn health(
     headers: HeaderMap,
 ) -> Result<Json<Health>, ApiError> {
     authorize(&headers, &state.auth)?;
-    Ok(Json(Health { ok: true }))
+    let capabilities = ServiceCapabilities {
+        transcriptions: true,
+        speech: state.speech.is_some(),
+    };
+    Ok(Json(Health {
+        ok: true,
+        capabilities,
+    }))
 }
 
 async fn transcribe(
@@ -534,6 +596,74 @@ async fn read_response_format_field(
     let value = String::from_utf8(bytes)
         .map_err(|error| ApiError::bad_request(format!("response_format is not UTF-8: {error}")))?;
     parse_response_format(&value)
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiSpeechRequest {
+    model: String,
+    input: String,
+    #[serde(default)]
+    voice: Option<String>,
+    #[serde(default)]
+    instructions: Option<String>,
+    #[serde(rename = "response_format", default)]
+    response_format: Option<String>,
+    #[serde(default)]
+    speed: Option<f32>,
+}
+
+async fn speech(State(state): State<ServiceState>, request: Request) -> Result<Response, ApiError> {
+    authorize(request.headers(), &state.auth)?;
+
+    let speech_client = state
+        .speech
+        .as_ref()
+        .ok_or_else(|| ApiError::service_unavailable("TTS service is not configured"))?;
+
+    let Json(body) = Json::<OpenAiSpeechRequest>::from_request(request, &state)
+        .await
+        .map_err(ApiError::json_rejection)?;
+
+    let voice = body
+        .voice
+        .filter(|voice| !voice.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("voice is required"))?;
+
+    let format = match body.response_format.as_deref() {
+        None | Some("") => SpeechFormat::Mp3,
+        Some(s) => SpeechFormat::from_openai(s)
+            .ok_or_else(|| ApiError::bad_request(format!("unsupported response_format: {s:?}; supported values are mp3, opus, aac, flac, wav, pcm")))?,
+    };
+
+    let request = SpeechRequest {
+        input: body.input,
+        model_hint: body.model,
+        voice_hint: Some(voice),
+        instructions: body.instructions,
+        format,
+        speed: body.speed,
+    };
+
+    let synthesized = speech_client
+        .synthesize(&request)
+        .await
+        .map_err(|error| match &error {
+            codex_voice_core::SpeechError::Unsupported(msg) => ApiError::bad_request(msg.clone()),
+            codex_voice_core::SpeechError::Config(msg) => ApiError::bad_request(msg.clone()),
+            codex_voice_core::SpeechError::Auth(msg) => ApiError::service_unavailable(msg.clone()),
+            _ => ApiError::backend(format!("{error}")),
+        })?;
+
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, synthesized.mime_type.clone());
+
+    // Optional informational headers
+    response = response.header("X-Codex-Voice-Format", synthesized.format.to_openai());
+
+    response
+        .body(axum::body::Body::from(synthesized.bytes))
+        .map_err(|error| ApiError::internal(format!("failed to build response: {error}")))
 }
 
 async fn transcribe_upload(state: &ServiceState, upload: &Upload) -> Result<String, ApiError> {
@@ -832,6 +962,7 @@ fn effective_chunk_seconds(requested_seconds: u64, upload_limit_bytes: u64) -> u
 #[derive(Debug, Serialize)]
 struct Health {
     ok: bool,
+    capabilities: ServiceCapabilities,
 }
 
 #[derive(Debug, Serialize)]
@@ -886,6 +1017,28 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            kind: "service_unavailable",
+            message: message.into(),
+        }
+    }
+
+    fn json_rejection(error: axum::extract::rejection::JsonRejection) -> Self {
+        let status = error.status();
+        let kind = match status {
+            StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
+            _ => "bad_request",
+        };
+        Self {
+            status,
+            kind,
+            message: error.to_string(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -932,15 +1085,24 @@ pub struct TranscriberDiscoveryFile {
     pub openai_base_url: String,
     pub token: String,
     pub pid: u32,
+    #[serde(default)]
+    pub capabilities: ServiceCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ServiceCapabilities {
+    pub transcriptions: bool,
+    pub speech: bool,
 }
 
 impl TranscriberDiscoveryFile {
-    fn new(root_url: String, token: String) -> Self {
+    fn new(root_url: String, token: String, capabilities: ServiceCapabilities) -> Self {
         Self {
             openai_base_url: format!("{}/v1", root_url.trim_end_matches('/')),
             url: root_url,
             token,
             pid: std::process::id(),
+            capabilities,
         }
     }
 }
@@ -1148,7 +1310,13 @@ fn service_root_url(addr: SocketAddr) -> String {
 
 fn root_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
-    for suffix in ["/v1/audio/transcriptions", "/audio/transcriptions", "/v1"] {
+    for suffix in [
+        "/v1/audio/transcriptions",
+        "/audio/transcriptions",
+        "/v1/audio/speech",
+        "/audio/speech",
+        "/v1",
+    ] {
         if let Some(stripped) = trimmed.strip_suffix(suffix) {
             return stripped.trim_end_matches('/').to_string();
         }
@@ -1162,6 +1330,11 @@ fn health_url(base_url: &str) -> String {
 
 fn transcription_url(base_url: &str) -> String {
     format!("{}/v1/audio/transcriptions", root_url(base_url))
+}
+
+#[allow(dead_code)]
+fn speech_url(base_url: &str) -> String {
+    format!("{}/v1/audio/speech", root_url(base_url))
 }
 
 fn parse_openai_transcription_response(body: &str) -> TranscriptionResult<String> {
@@ -1294,9 +1467,47 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeSpeechBackend {
+        seen: Mutex<Vec<codex_voice_core::SpeechRequest>>,
+    }
+
+    #[async_trait]
+    impl SpeechClient for FakeSpeechBackend {
+        async fn synthesize(
+            &self,
+            request: &codex_voice_core::SpeechRequest,
+        ) -> codex_voice_core::SpeechResult<codex_voice_core::SynthesizedSpeech> {
+            self.seen
+                .lock()
+                .expect("fake speech lock")
+                .push(request.clone());
+            Ok(codex_voice_core::SynthesizedSpeech {
+                bytes: b"fake audio bytes".to_vec(),
+                format: request.format,
+                mime_type: request.format.mime_type().to_string(),
+            })
+        }
+    }
+
     fn test_state(codex_upload_limit_bytes: u64) -> ServiceState {
+        test_state_with_speech_backend(codex_upload_limit_bytes, None)
+    }
+
+    fn test_state_with_speech(codex_upload_limit_bytes: u64) -> ServiceState {
+        test_state_with_speech_backend(
+            codex_upload_limit_bytes,
+            Some(Arc::new(FakeSpeechBackend::default())),
+        )
+    }
+
+    fn test_state_with_speech_backend(
+        codex_upload_limit_bytes: u64,
+        speech: Option<Arc<dyn SpeechClient>>,
+    ) -> ServiceState {
         ServiceState {
             backend: Arc::new(FakeBackend::default()),
+            speech,
             auth: ServiceAuth {
                 token: "test-token".into(),
             },
@@ -1305,6 +1516,23 @@ mod tests {
             chunk_seconds: 600,
             ffmpeg_binary: "definitely-not-ffmpeg".into(),
         }
+    }
+
+    fn speech_request(
+        path: &str,
+        body: &str,
+        token: Option<&str>,
+    ) -> axum::http::Request<body::Body> {
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder
+            .body(body::Body::from(body.to_string()))
+            .expect("request builds")
     }
 
     fn multipart_request(
@@ -1370,6 +1598,157 @@ mod tests {
             let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
             assert_eq!(value["text"], "hello from service");
         }
+    }
+
+    #[tokio::test]
+    async fn speech_route_aliases_return_audio_bytes() {
+        for path in ["/audio/speech", "/v1/audio/speech"] {
+            let app = service_router(test_state_with_speech(1024));
+            let response = app
+                .oneshot(speech_request(
+                    path,
+                    r#"{"model":"gpt-4o-mini-tts","voice":"sky","input":"hello","response_format":"wav"}"#,
+                    Some("test-token"),
+                ))
+                .await
+                .expect("request succeeds");
+            assert_eq!(response.status(), StatusCode::OK);
+            let content_type = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .cloned()
+                .expect("content-type header present");
+            let bytes = body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body reads");
+            assert_eq!(&bytes[..], b"fake audio bytes");
+            assert_eq!(content_type, "audio/wav");
+        }
+    }
+
+    #[tokio::test]
+    async fn speech_route_requires_voice() {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(speech_request(
+                "/v1/audio/speech",
+                r#"{"model":"gpt-4o-mini-tts","input":"hello"}"#,
+                Some("test-token"),
+            ))
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn speech_route_defaults_response_format_to_mp3() {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(speech_request(
+                "/v1/audio/speech",
+                r#"{"model":"gpt-4o-mini-tts","voice":"sky","input":"hello"}"#,
+                Some("test-token"),
+            ))
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("X-Codex-Voice-Format")
+                .expect("format header"),
+            "mp3"
+        );
+    }
+
+    #[tokio::test]
+    async fn speech_route_preserves_payload_too_large_status() {
+        let app = service_router(test_state_with_speech(1024));
+        let body = format!(
+            r#"{{"model":"gpt-4o-mini-tts","voice":"sky","input":"{}"}}"#,
+            "a".repeat(SPEECH_BODY_LIMIT_BYTES)
+        );
+        let response = app
+            .oneshot(speech_request(
+                "/v1/audio/speech",
+                &body,
+                Some("test-token"),
+            ))
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn speech_route_rejects_missing_auth() {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(speech_request(
+                "/v1/audio/speech",
+                r#"{"model":"gpt-4o-mini-tts","input":"hello"}"#,
+                None,
+            ))
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn speech_route_returns_503_when_tts_not_configured() {
+        let app = service_router(test_state(1024));
+        let response = app
+            .oneshot(speech_request(
+                "/v1/audio/speech",
+                r#"{"model":"gpt-4o-mini-tts","input":"hello"}"#,
+                Some("test-token"),
+            ))
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn health_includes_capabilities() {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/healthz")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["capabilities"]["transcriptions"], true);
+        assert_eq!(value["capabilities"]["speech"], true);
+    }
+
+    #[tokio::test]
+    async fn health_shows_speech_false_when_no_tts() {
+        let app = service_router(test_state(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/healthz")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(value["capabilities"]["speech"], false);
     }
 
     #[tokio::test]
@@ -1507,6 +1886,14 @@ mod tests {
             "http://127.0.0.1:3845/v1/audio/transcriptions"
         );
         assert_eq!(
+            speech_url("http://127.0.0.1:3845"),
+            "http://127.0.0.1:3845/v1/audio/speech"
+        );
+        assert_eq!(
+            speech_url("http://127.0.0.1:3845/v1/audio/speech"),
+            "http://127.0.0.1:3845/v1/audio/speech"
+        );
+        assert_eq!(
             root_url("http://127.0.0.1:3845/v1/audio/transcriptions"),
             "http://127.0.0.1:3845"
         );
@@ -1519,6 +1906,7 @@ mod tests {
             openai_base_url: "http://127.0.0.1:3845/v1".into(),
             token: "from-file".into(),
             pid: 42,
+            capabilities: ServiceCapabilities::default(),
         };
         assert!(discovery_candidate_from_parts(None, None, Some(discovery), |_| false).is_none());
     }
@@ -1530,6 +1918,7 @@ mod tests {
             openai_base_url: "http://127.0.0.1:3845/v1".into(),
             token: "from-file".into(),
             pid: 42,
+            capabilities: ServiceCapabilities::default(),
         };
         let candidate = discovery_candidate_from_parts(
             Some("http://127.0.0.1:3845/v1".into()),
@@ -1549,6 +1938,7 @@ mod tests {
             openai_base_url: "http://127.0.0.1:3845/v1".into(),
             token: "from-file".into(),
             pid: 42,
+            capabilities: ServiceCapabilities::default(),
         };
         assert!(discovery_candidate_from_parts(
             Some("http://127.0.0.1:9999/v1".into()),
@@ -1566,6 +1956,7 @@ mod tests {
             openai_base_url: "http://127.0.0.1:3845/v1".into(),
             token: "from-file".into(),
             pid: 42,
+            capabilities: ServiceCapabilities::default(),
         };
         let candidate = discovery_candidate_from_parts(
             Some("http://127.0.0.1:9999/v1".into()),
@@ -1648,6 +2039,7 @@ mod tests {
             openai_base_url: "http://127.0.0.1:3845/v1".into(),
             token: "from-file".into(),
             pid: 42,
+            capabilities: ServiceCapabilities::default(),
         };
         assert!(discovery_url_matches("http://localhost:3845", &discovery));
     }
@@ -1659,6 +2051,7 @@ mod tests {
             openai_base_url: "http://127.0.0.1:3845/v1".into(),
             token: "from-file".into(),
             pid: 42,
+            capabilities: ServiceCapabilities::default(),
         };
         assert!(discovery_url_matches("http://[::1]:3845", &discovery));
     }
@@ -1670,6 +2063,7 @@ mod tests {
             openai_base_url: "http://127.0.0.1:3845/v1".into(),
             token: "from-file".into(),
             pid: 42,
+            capabilities: ServiceCapabilities::default(),
         };
         assert!(discovery_url_matches("http://LOCALHOST:3845", &discovery));
         assert!(discovery_url_matches("http://Localhost:3845", &discovery));

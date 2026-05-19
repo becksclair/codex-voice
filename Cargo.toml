@@ -5,6 +5,7 @@ members = [
     "crates/codex-voice-codex",
     "crates/codex-voice-core",
     "crates/codex-voice-platform",
+    "crates/codex-voice-tts",
     "crates/codex-voice-ui",
 ]
 resolver = "2"
@@ -16,6 +17,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
+base64 = "0.22.1"
 arboard = "3.4.1"
 ashpd = { version = "0.13.10", default-features = false, features = ["tokio", "global_shortcuts", "remote_desktop", "screencast"] }
 async-trait = "0.1.88"

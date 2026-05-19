@@ -25,6 +25,7 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - [x] (2026-04-24) Ran cleanup and repeated review passes over the Linux app surface, fixing tray test-recording error-state handling and stale crate guidance.
 - [x] (2026-04-24) Unblocked Windows workspace compilation, added Windows Control-M polling, Windows clipboard plus `SendInput` paste, and Windows CLI wiring.
 - [x] (2026-05-04) Added a localhost OpenAI-compatible transcriber service for `summarize`, service discovery, GUI runtime fallback to direct Codex transcription, and explicit long-audio chunking behavior.
+- [x] (2026-05-19) Added OpenAI-compatible TTS endpoint (`POST /v1/audio/speech`) backed by Google Gemini TTS and ElevenLabs, with persona-aware provider fallback, config loading from `~/.codex/read-aloud-defaults.json`, `doctor tts`, and `tts serve` commands.
 - [ ] Add cross-platform Slint settings/HUD UI if GTK remains Linux-only after macOS/Windows adapters.
 - [ ] Add packaging with `cargo-packager`.
 - [ ] Validate end-to-end on macOS, Linux KDE6/Wayland, and Windows 11.
@@ -63,6 +64,18 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - Observation: `cargo-packager` is the right installer crate for this plan because it supports macOS `.app`/`.dmg`, Linux `.deb`/AppImage/Pacman, and Windows NSIS/MSI from Rust packaging metadata.
   Evidence: `cargo-packager` docs list those formats and `package.metadata.packager` configuration.
 
+- Observation: OpenChamber's voice module uses a unified server-side TTS approach that generates audio on the server and streams to clients, bypassing browser audio context restrictions. It supports OpenAI-compatible custom base URLs, which is the same pattern codex-voice now uses.
+  Evidence: OpenChamber `packages/web/server/lib/tts/service.js` implements `generateSpeechStream` with OpenAI client and custom `baseURL` support.
+
+- Observation: Google Gemini TTS requires a carefully constructed prompt that explicitly instructs "speak exactly this text, do not paraphrase" to prevent the model from drifting or adding commentary.
+  Evidence: Live testing of Gemini `generateContent` with `responseModalities: ["AUDIO"]` showed that without explicit constraints, the model may embellish or explain the text rather than reading it verbatim.
+
+- Observation: Google Gemini TTS returns raw PCM rather than WAV.
+  Evidence: Live validation with `GEMINI_API_KEY` returned `audio/L16;codec=pcm;rate=24000`; codex-voice wraps PCM as WAV in-process and uses `ffmpeg` for compressed/container outputs such as MP3 and Opus.
+
+- Observation: ElevenLabs has no available credits for live validation, so the implementation must treat ElevenLabs as optional and use Google as the first proven lane and fallback.
+  Evidence: User confirmed ElevenLabs account has no credits; Google Gemini TTS is accessible with a valid API key.
+
 ## Decision Log
 
 - Decision: Build a greenfield Rust workspace instead of porting Swift code.
@@ -88,6 +101,22 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - Decision: Expose transcription reuse as a localhost OpenAI-compatible service rather than a custom `summarize` CLI hook.
   Rationale: `summarize` already supports `OPENAI_WHISPER_BASE_URL`, so this keeps integration one-sided, makes the service reusable by the GUI, and keeps Codex auth/transcription behavior in one backend path.
   Date/Author: 2026-05-04 / Bex + Codex
+
+- Decision: Add TTS as a unified localhost OpenAI-compatible audio service endpoint, not a separate daemon.
+  Rationale: One service means one bearer token, one discovery file, one `openai_base_url`, and clients can treat it as a single OpenAI-compatible audio base. This reuses the existing `transcriber serve` auth/discovery/health patterns.
+  Date/Author: 2026-05-19 / Bex + Codex
+
+- Decision: Load TTS config (`~/.codex/read-aloud-defaults.json`) only on TTS service startup and `doctor tts`, not on ordinary `codex-voice run`.
+  Rationale: A broken or missing TTS config should not break today's dictation-only flow. TTS is additive, not required.
+  Date/Author: 2026-05-19 / Bex + Codex
+
+- Decision: Google-first for TTS with ElevenLabs as optional/fallback.
+  Rationale: ElevenLabs has no credits for live validation. Google is the only provider we can currently prove. Both backends are fully implemented; ElevenLabs is just gated from required CI validation.
+  Date/Author: 2026-05-19 / Bex + Codex
+
+- Decision: Defer LLM speech-prep to v2.
+  Rationale: The config has `speechPrep` (LLM text rewrite before TTS), but it adds a second model-provider/auth path, increases latency/cost, and makes output less deterministic. Google persona prompting is already a soft prompt; stacking another LLM rewrite on top is premature.
+  Date/Author: 2026-05-19 / Bex + Codex
 
 - Decision: Embed Mermaid diagrams in the ExecPlan.
   Rationale: The implementation spans multiple crates, platform adapters, runtime event flow, and installer outputs. Diagrams reduce ambiguity for future agents without replacing the prose requirements.
@@ -163,6 +192,7 @@ flowchart TB
     Core["crates/codex-voice-core\nstate machine, traits, events, config"]
     Audio["crates/codex-voice-audio\ncpal capture, WAV writer"]
     Codex["crates/codex-voice-codex\nauth reader, refresh, transcription HTTP"]
+    TTS["crates/codex-voice-tts\nconfig loader, Google/ElevenLabs clients, persona fallback"]
     Platform["crates/codex-voice-platform\nmacOS, Windows, Linux adapters"]
     Resources["resources/\nicons, macOS plist, package assets"]
     Packager["cargo-packager\nlocal installers"]
@@ -171,10 +201,12 @@ flowchart TB
     App --> Core
     App --> Audio
     App --> Codex
+    App --> TTS
     App --> Platform
     UI --> Core
     Audio --> Core
     Codex --> Core
+    TTS --> Core
     Platform --> Core
     Packager --> App
     Packager --> Resources
@@ -355,6 +387,31 @@ Define transcription in `crates/codex-voice-core/src/transcription.rs`:
         async fn transcribe(&self, recording: &RecordedAudio) -> TranscriptionResult<String>;
     }
 
+Define speech synthesis in `crates/codex-voice-core/src/speech.rs`:
+
+    pub trait SpeechClient: Send + Sync {
+        async fn synthesize(&self, request: &SpeechRequest) -> SpeechResult<SynthesizedSpeech>;
+    }
+
+    pub struct SpeechRequest {
+        pub input: String,
+        pub model_hint: String,
+        pub voice_hint: Option<String>,
+        pub instructions: Option<String>,
+        pub format: SpeechFormat,
+        pub speed: Option<f32>,
+    }
+
+    pub struct SynthesizedSpeech {
+        pub bytes: Vec<u8>,
+        pub format: SpeechFormat,
+        pub mime_type: String,
+    }
+
+    pub enum SpeechFormat {
+        Mp3, Opus, Aac, Flac, Wav, Pcm,
+    }
+
 Implement the state machine as `DictationEngine` with states `Idle`, `Recording`, `Transcribing`, `Inserting`, and `Error`. It receives `HotkeyEvent`, emits `AppEvent`, and enforces the same behavior as the Swift reference: ignore presses while busy, discard recordings shorter than 120 ms, delete temp recordings after transcription attempt, and return to idle after successful insertion.
 
 ## Plan of Work
@@ -437,6 +494,12 @@ Core acceptance:
 - `cargo run -p codex-voice-app --bin codex-voice -- transcriber serve` starts a localhost OpenAI-compatible transcription service and writes a private discovery file.
 - With that service running, `codex-voice run` reports/logs `transcription_backend=local-service`; without it, `codex-voice run` reports/logs `transcription_backend=direct-codex`.
 - Oversized service uploads are chunked with `ffmpeg` or rejected with `413 Payload Too Large` when `ffmpeg` is unavailable.
+- `cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello world"` prints resolved provider, content type, byte size, and synthesized audio output path (deleted unless `--keep`).
+- `cargo run -p codex-voice-app --bin codex-voice -- tts serve` starts the unified audio service and requires valid TTS config; it fails fast if config is missing or no provider resolves.
+- The unified service exposes `POST /v1/audio/speech` and returns raw audio bytes with a correct `Content-Type` header when TTS is configured and the bearer token is valid.
+- The speech endpoint converts provider-native output into the requested `response_format` when practical; compressed/container outputs require `ffmpeg` on `PATH`.
+- The speech endpoint returns `503` when TTS is not configured.
+- The discovery file includes capability flags: `{ "transcriptions": true, "speech": <bool> }`.
 
 Linux KDE6/Wayland acceptance:
 
@@ -491,6 +554,7 @@ The expected final workspace shape is:
     /Users/rebecca/projects/codex-voice/crates/codex-voice-core
     /Users/rebecca/projects/codex-voice/crates/codex-voice-audio
     /Users/rebecca/projects/codex-voice/crates/codex-voice-codex
+    /Users/rebecca/projects/codex-voice/crates/codex-voice-tts
     /Users/rebecca/projects/codex-voice/crates/codex-voice-platform
     /Users/rebecca/projects/codex-voice/crates/codex-voice-ui
     /Users/rebecca/projects/codex-voice/crates/codex-voice-app
@@ -506,11 +570,13 @@ The expected final CLI surface is:
     codex-voice doctor audio [--seconds 2] [--keep]
     codex-voice doctor codex-auth
     codex-voice doctor transcribe --file <path>
+    codex-voice doctor tts [--text <text>] [--voice <voice>] [--response-format <fmt>] [--out <path>] [--keep]
     codex-voice doctor hotkey
     codex-voice doctor paste --text <text>
     codex-voice doctor linux-portals
     codex-voice transcriber serve
     codex-voice transcriber probe-limits --file <path>
+    codex-voice tts serve
 
 The app must never log tokens, account IDs in full, or full transcript content unless explicit debug logging is enabled. Even in debug mode, redact tokens and print transcript length plus a short preview only.
 

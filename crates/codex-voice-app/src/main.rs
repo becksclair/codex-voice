@@ -1,9 +1,11 @@
 mod transcriber;
+mod tts;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use codex_voice_audio::CpalWavRecorder;
 use codex_voice_codex::{CodexAuthService, CodexTranscriptionClient};
+
 #[cfg(target_os = "linux")]
 use codex_voice_core::DictationState;
 use codex_voice_core::{
@@ -49,6 +51,10 @@ enum Command {
         #[command(subcommand)]
         command: TranscriberCommand,
     },
+    Tts {
+        #[command(subcommand)]
+        command: TtsCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -56,6 +62,7 @@ enum DoctorCommand {
     Audio(AudioDoctor),
     CodexAuth,
     Transcribe(TranscribeDoctor),
+    Tts(tts::TtsDoctor),
     Hotkey,
     Paste(PasteDoctor),
     LinuxPortals,
@@ -85,6 +92,17 @@ struct PasteDoctor {
 enum TranscriberCommand {
     Serve(TranscriberServeArgs),
     ProbeLimits(TranscriberProbeLimitsArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum TtsCommand {
+    Serve(TtsServeArgs),
+}
+
+#[derive(Debug, Args)]
+struct TtsServeArgs {
+    #[arg(long, default_value = "127.0.0.1:3845")]
+    bind: SocketAddr,
 }
 
 #[derive(Debug, Args)]
@@ -130,6 +148,7 @@ async fn main() -> Result<()> {
             DoctorCommand::Audio(args) => doctor_audio(args).await,
             DoctorCommand::CodexAuth => doctor_codex_auth(),
             DoctorCommand::Transcribe(args) => doctor_transcribe(args.file).await,
+            DoctorCommand::Tts(args) => tts::doctor_tts(args).await,
             DoctorCommand::Hotkey => doctor_hotkey().await,
             DoctorCommand::Paste(args) => doctor_paste(args.text).await,
             DoctorCommand::LinuxPortals => doctor_linux_portals().await,
@@ -140,7 +159,29 @@ async fn main() -> Result<()> {
                 transcriber::probe_limits(args.try_into()?).await
             }
         },
+        Command::Tts { command } => match command {
+            TtsCommand::Serve(args) => tts_serve(args).await,
+        },
     }
+}
+
+async fn tts_serve(args: TtsServeArgs) -> Result<()> {
+    if !args.bind.ip().is_loopback() {
+        anyhow::bail!(
+            "tts service must bind to a loopback address (e.g. 127.0.0.1); {} is not allowed",
+            args.bind.ip()
+        );
+    }
+    transcriber::serve(transcriber::ServeConfig {
+        bind: args.bind,
+        codex_upload_limit_bytes: 24 * 1024 * 1024,
+        client_upload_limit_bytes: 512 * 1024 * 1024,
+        chunk_seconds: 600,
+        token_env: "CODEX_VOICE_TRANSCRIBER_TOKEN".to_string(),
+        ffmpeg_binary: "ffmpeg".to_string(),
+        require_tts: true,
+    })
+    .await
 }
 
 #[cfg(target_os = "linux")]
@@ -214,6 +255,7 @@ impl TryFrom<TranscriberServeArgs> for transcriber::ServeConfig {
             chunk_seconds: value.chunk_seconds,
             token_env: value.token_env,
             ffmpeg_binary: value.ffmpeg_binary,
+            require_tts: false,
         })
     }
 }

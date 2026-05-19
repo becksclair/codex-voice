@@ -470,6 +470,7 @@ dependencies = [
  "codex-voice-codex",
  "codex-voice-core",
  "codex-voice-platform",
+ "codex-voice-tts",
  "codex-voice-ui",
  "dirs",
  "hex",
@@ -534,6 +535,24 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "codex-voice-tts"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "codex-voice-core",
+ "dirs",
+ "hound",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ codex-voice-audio = { path = "../codex-voice-audio" }
 codex-voice-codex = { path = "../codex-voice-codex" }
 codex-voice-core = { path = "../codex-voice-core" }
 codex-voice-platform = { path = "../codex-voice-platform" }
+codex-voice-tts = { path = "../codex-voice-tts" }
 codex-voice-ui = { path = "../codex-voice-ui" }
 dirs.workspace = true
 hex.workspace = true
