@@ -119,7 +119,7 @@ installs two systemd user units, reloads systemd, enables both services, and sta
 the background server immediately:
 
 - `codex-voice.service` runs `codex-voice run` after the graphical session is available; setup enables it but does not start it immediately.
-- `codex-voice-server.service` runs `codex-voice server` as a background user service.
+- `codex-voice-server.service` runs `codex-voice server --no-auth` as a background user service, so any OpenAI-compatible client on the same machine can use it without configuring a bearer token.
 
 ```bash
 mise run setup

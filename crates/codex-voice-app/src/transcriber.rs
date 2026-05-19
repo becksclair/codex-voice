@@ -45,6 +45,7 @@ pub struct ServeConfig {
     pub chunk_seconds: u64,
     pub token_env: String,
     pub ffmpeg_binary: String,
+    pub no_auth: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +157,7 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
         speech,
         auth: ServiceAuth {
             token: discovery.token.clone(),
+            no_auth: config.no_auth,
         },
         codex_upload_limit_bytes: config.codex_upload_limit_bytes,
         client_upload_limit_bytes: config.client_upload_limit_bytes,
@@ -415,6 +417,7 @@ struct ServiceState {
 #[derive(Clone)]
 struct ServiceAuth {
     token: String,
+    no_auth: bool,
 }
 
 fn service_router(state: ServiceState) -> Router {
@@ -1047,6 +1050,9 @@ impl IntoResponse for ApiError {
 }
 
 fn authorize(headers: &HeaderMap, auth: &ServiceAuth) -> Result<(), ApiError> {
+    if auth.no_auth {
+        return Ok(());
+    }
     let Some(value) = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -1503,6 +1509,7 @@ mod tests {
             speech,
             auth: ServiceAuth {
                 token: "test-token".into(),
+                no_auth: false,
             },
             codex_upload_limit_bytes,
             client_upload_limit_bytes: 1024 * 1024,

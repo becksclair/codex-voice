@@ -104,6 +104,8 @@ struct ServerArgs {
     token_env: String,
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg_binary: String,
+    #[arg(long, help = "Disable bearer token authentication")]
+    no_auth: bool,
 }
 
 #[derive(Debug, Args)]
@@ -218,6 +220,7 @@ impl TryFrom<ServerArgs> for transcriber::ServeConfig {
             chunk_seconds: value.chunk_seconds,
             token_env: value.token_env,
             ffmpeg_binary: value.ffmpeg_binary,
+            no_auth: value.no_auth,
         })
     }
 }
