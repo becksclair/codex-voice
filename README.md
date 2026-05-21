@@ -126,6 +126,77 @@ mise run setup
 systemctl --user status codex-voice.service codex-voice-server.service
 ```
 
+## Homelab Reverse-Proxy Setup
+
+When the service runs on a different machine from the homelab ingress point, Orion
+(Raspberry Pi) proxies `codex-voice.heliasar.com` across the Tailscale network to
+the service host. This lets any Tailnet client reach the OpenAI-compatible endpoints
+without knowing the backend machine's Tailscale IP.
+
+### Architecture
+
+```
+Client ──https──▶ Orion (Caddy 80/443)
+                    │
+                    └──reverse_proxy──▶ asgard (Tailscale 100.120.202.119:3845)
+```
+
+- **Orion** is the ingress node; host Caddy owns `80/443`.
+- **asgard** runs the actual `codex-voice server` bound to `0.0.0.0:3845`.
+- Caddy handles TLS termination with the wildcard `heliasar.com` certificate.
+
+### Orion Caddy snippet
+
+`/opt/homelab/configs/caddy/generated/30-exact-sites.caddy`:
+
+```caddy
+codex-voice.heliasar.com {
+    tls /etc/certs/heliasar.com.crt /etc/certs/heliasar.com.key
+    encode zstd gzip
+    reverse_proxy 100.120.202.119:3845 {
+        header_up X-Forwarded-Proto https
+        header_up Host {host}
+    }
+}
+```
+
+This is generated from the homelab `services.json` manifest, which marks the service
+as `runtime.type: external` on machine `asgard` with a managed DNS alias.
+
+### asgard systemd unit
+
+`~/.config/systemd/user/codex-voice-server.service`:
+
+```ini
+[Unit]
+Description=Codex Voice local OpenAI-compatible audio server
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/codex-voice-wrapper server --no-auth --bind 0.0.0.0:3845
+Restart=on-failure
+RestartSec=2
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+```
+
+The wrapper script sources `~/personal/dotfiles/secrets.sh` (API keys, TTS config)
+before launching the binary.
+
+### Verification
+
+```bash
+# From any Tailnet host
+curl -s https://codex-voice.heliasar.com/healthz
+# Expected: {"ok":true,"capabilities":{"transcriptions":true,"speech":true}}
+```
+
+If asgard is offline, Caddy returns a gateway error; the manifest marks the service
+`availability: optional` because it depends on the laptop being awake and on the
+Tailnet.
+
 ## Linux Notes
 
 On KDE/Wayland, verify the desktop first:
