@@ -427,6 +427,13 @@ fn service_router(state: ServiceState) -> Router {
             .saturating_add(MULTIPART_OVERHEAD_BYTES),
     )
     .unwrap_or(usize::MAX);
+    use tower_http::cors::{Any, CorsLayer};
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
         .route("/healthz", get(health))
         .route("/v1/healthz", get(health))
@@ -441,6 +448,7 @@ fn service_router(state: ServiceState) -> Router {
             "/v1/audio/speech",
             post(speech).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES)),
         )
+        .layer(cors)
         .with_state(state)
 }
 
@@ -1581,6 +1589,56 @@ mod tests {
         builder
             .body(body::Body::from(payload))
             .expect("request builds")
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_browser_transcription_request() {
+        let app = service_router(test_state(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::OPTIONS)
+                    .uri("/v1/audio/transcriptions")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "authorization,content-type",
+                    )
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("*")
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_headers_are_present_on_unauthorized_response() {
+        let app = service_router(test_state(1024));
+        let mut request = multipart_request("/v1/audio/transcriptions", "tiny wav", None);
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, "http://localhost:5173".parse().unwrap());
+
+        let response = app.oneshot(request).await.expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok()),
+            Some("*")
+        );
     }
 
     #[tokio::test]

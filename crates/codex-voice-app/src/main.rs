@@ -657,3 +657,42 @@ fn wav_duration(path: &PathBuf) -> Result<Duration> {
         samples as f64 / spec.sample_rate.max(1) as f64,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server_args(bind: SocketAddr) -> ServerArgs {
+        ServerArgs {
+            bind,
+            codex_upload_limit_mib: 24,
+            client_upload_limit_mib: 512,
+            chunk_seconds: 600,
+            token_env: "CODEX_VOICE_TRANSCRIBER_TOKEN".to_string(),
+            ffmpeg_binary: "ffmpeg".to_string(),
+            no_auth: false,
+        }
+    }
+
+    #[test]
+    fn server_config_rejects_non_loopback_bind() {
+        let bind = "0.0.0.0:3845".parse().expect("socket addr");
+
+        let error = transcriber::ServeConfig::try_from(server_args(bind))
+            .expect_err("non-loopback bind should fail");
+
+        assert!(error
+            .to_string()
+            .contains("server must bind to a loopback address"));
+    }
+
+    #[test]
+    fn server_config_accepts_loopback_bind() {
+        let bind = "127.0.0.1:3845".parse().expect("socket addr");
+
+        let config = transcriber::ServeConfig::try_from(server_args(bind))
+            .expect("loopback bind should succeed");
+
+        assert_eq!(config.bind, bind);
+    }
+}
