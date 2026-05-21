@@ -13,7 +13,9 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor audio --seconds 1
 cargo run -p codex-voice-app --bin codex-voice -- doctor codex-auth
 cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file /tmp/sample.wav
 cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice portal paste test"
+cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello world"
 cargo run -p codex-voice-app --bin codex-voice -- server
+cargo run -p codex-voice-app --bin codex-voice -- server --no-auth
 cargo run -p codex-voice-app --bin codex-voice -- transcriber probe-limits --file /tmp/sample.wav
 cargo check -p codex-voice-app
 ```
@@ -38,6 +40,7 @@ cargo check -p codex-voice-app
 
 - CLI and diagnostics: `src/main.rs`
 - Local transcriber service/client/discovery: `src/transcriber.rs`
+- TTS diagnostic wiring: `src/tts.rs`
 - Binary name: `Cargo.toml`
 - Core state integration: `crates/codex-voice-core/src/engine.rs`
 - Audio diagnostics: `crates/codex-voice-audio/src/lib.rs`
@@ -58,6 +61,7 @@ rg -n "redact|access_token|preview|transcript_chars" src/main.rs
 - `doctor transcribe` requires `--file`; do not change it back to a positional file without updating docs.
 - `doctor paste` requires `--text`; this is intentionally documented in the ExecPlan.
 - `server` writes `${XDG_STATE_HOME:-~/.local/state}/codex-voice/transcriber.json`; keep it private and do not log the bearer token.
+- `server --no-auth` skips Codex auth for OpenAI-compatible clients that bring their own token; the service still enforces a bearer token on every request, it just does not require a valid Codex session.
 - The GUI probes the discovery file or `CODEX_VOICE_TRANSCRIBER_URL` once at startup, then uses direct Codex transcription if the service is stale, unhealthy, or unauthorized.
 - Oversized service uploads require `ffmpeg` for chunking; without it, return a clear `413` instead of sending an unsafe oversized Codex request.
 - Linux `run` binds Control-M plus the keyboard dictation key through the GlobalShortcuts portal; approval may be prompted by the desktop.

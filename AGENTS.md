@@ -2,7 +2,7 @@
 
 ## Project Snapshot
 
-Codex Voice is a Rust workspace for a Linux-first, Rust-native hold-to-dictate desktop utility. The workspace is split into small crates for app wiring, core state, audio capture, Codex auth/transcription, platform adapters, and UI placeholders. Read the nearest crate-level `AGENTS.md` before editing files under `crates/**`.
+Codex Voice is a Rust workspace for a Linux-first, Rust-native hold-to-dictate desktop utility. The workspace is split into small crates for app wiring, core state, audio capture, Codex auth/transcription, TTS, platform adapters, and UI. Read the nearest crate-level `AGENTS.md` before editing files under `crates/**`.
 
 ## Root Setup Commands
 
@@ -20,6 +20,7 @@ Linux smoke checks:
 ```bash
 cargo run -p codex-voice-app --bin codex-voice -- doctor linux-portals
 timeout 10s cargo run -p codex-voice-app --bin codex-voice -- doctor audio --seconds 1
+cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"
 ```
 
 ## Universal Conventions
@@ -35,6 +36,7 @@ timeout 10s cargo run -p codex-voice-app --bin codex-voice -- doctor audio --sec
 
 - Never print or commit access tokens, refresh tokens, full account IDs, full transcripts, or private audio.
 - Codex auth is read from `~/.codex/auth.json`; do not write this file directly.
+- TTS secrets are read from `~/.codex/read-aloud-defaults.json`; never log API keys.
 - Diagnostics may print token presence, redacted account IDs, transcript length, and short previews only.
 - Temp WAV files must be deleted unless the user explicitly asks to keep a diagnostic recording.
 
@@ -42,12 +44,13 @@ timeout 10s cargo run -p codex-voice-app --bin codex-voice -- doctor audio --sec
 
 ### Package Structure
 
-- App/CLI wiring: `crates/codex-voice-app/` -> [see crates/codex-voice-app/AGENTS.md](crates/codex-voice-app/AGENTS.md)
-- Core traits/state machine: `crates/codex-voice-core/` -> [see crates/codex-voice-core/AGENTS.md](crates/codex-voice-core/AGENTS.md)
-- Audio capture: `crates/codex-voice-audio/` -> [see crates/codex-voice-audio/AGENTS.md](crates/codex-voice-audio/AGENTS.md)
-- Codex auth/transcription: `crates/codex-voice-codex/` -> [see crates/codex-voice-codex/AGENTS.md](crates/codex-voice-codex/AGENTS.md)
-- Platform adapters: `crates/codex-voice-platform/` -> [see crates/codex-voice-platform/AGENTS.md](crates/codex-voice-platform/AGENTS.md)
-- UI placeholder: `crates/codex-voice-ui/` -> [see crates/codex-voice-ui/AGENTS.md](crates/codex-voice-ui/AGENTS.md)
+- App/CLI wiring: `crates/codex-voice-app/` -> [see AGENTS.md](crates/codex-voice-app/AGENTS.md)
+- Core traits/state machine: `crates/codex-voice-core/` -> [see AGENTS.md](crates/codex-voice-core/AGENTS.md)
+- Audio capture: `crates/codex-voice-audio/` -> [see AGENTS.md](crates/codex-voice-audio/AGENTS.md)
+- Codex auth/transcription: `crates/codex-voice-codex/` -> [see AGENTS.md](crates/codex-voice-codex/AGENTS.md)
+- TTS (Google Gemini + ElevenLabs): `crates/codex-voice-tts/` -> [see AGENTS.md](crates/codex-voice-tts/AGENTS.md)
+- Platform adapters: `crates/codex-voice-platform/` -> [see AGENTS.md](crates/codex-voice-platform/AGENTS.md)
+- UI placeholder: `crates/codex-voice-ui/` -> [see AGENTS.md](crates/codex-voice-ui/AGENTS.md)
 - Architecture plan: `docs/execplan-rust-native-cross-platform.md`
 
 ### Quick Find Commands
@@ -57,6 +60,7 @@ rg -n "DictationEngine|HotkeyEvent|TextInjector|AudioRecorder|TranscriptionClien
 rg -n "doctor|Parser|Subcommand" crates/codex-voice-app/src
 rg -n "cpal|WavWriter|RecordedAudio" crates/codex-voice-audio/src
 rg -n "auth|transcribe|TRANSCRIBE_URL|account/read" crates/codex-voice-codex/src
+rg -n "tts|speech|synthesize|ProviderKind|ReadAloudConfig" crates/codex-voice-tts/src
 rg -n "GlobalShortcuts|RemoteDesktop|Clipboard|PortalTokenStore|PortalPaste" crates/codex-voice-platform/src
 find crates -name '*test*' -o -name '*.rs'
 ```
@@ -66,4 +70,5 @@ find crates -name '*test*' -o -name '*.rs'
 - Relevant crate-level checks pass, then root `cargo fmt --check`, `cargo check --workspace`, and `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings` after non-trivial Rust changes.
 - For Linux runtime changes, run `doctor linux-portals` and the 1-second `doctor audio` smoke when relevant.
-- Update README/ExecPlan for changed CLI, runtime, auth, or platform behavior.
+- For TTS changes, run `doctor tts` with a short test phrase.
+- Update README/ExecPlan for changed CLI, runtime, auth, platform, or TTS behavior.
