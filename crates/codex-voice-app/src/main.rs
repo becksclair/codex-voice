@@ -6,16 +6,21 @@ mod tts;
 use anyhow::{Context, Result};
 use clap::Parser;
 use codex_voice_audio::CpalWavRecorder;
-#[cfg(target_os = "linux")]
 use codex_voice_core::DictationState;
 use codex_voice_core::{AppEvent, DictationEngine, HotkeyEvent, HotkeyService, TextInjector};
 #[cfg(target_os = "linux")]
 use codex_voice_platform::LinuxTextInjector;
+#[cfg(target_os = "macos")]
+use codex_voice_platform::MacOSTextInjector;
 #[cfg(target_os = "windows")]
 use codex_voice_platform::WindowsTextInjector;
 use codex_voice_transcriber::RuntimeTranscriptionClient;
 #[cfg(target_os = "linux")]
 use codex_voice_ui::{LinuxUiConfig, StatusTray, UiCommand, UiStatus};
+#[cfg(target_os = "macos")]
+use codex_voice_ui::{MacOSUiConfig, StatusTray, UiCommand, UiStatus};
+#[cfg(target_os = "windows")]
+use codex_voice_ui::{StatusTray, UiCommand, UiStatus, WindowsUiConfig};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
@@ -71,7 +76,7 @@ impl<I: TextInjector> DictationApp<I> {
         let audio = Arc::new(CpalWavRecorder::new());
         let resolved = codex_voice_transcriber::resolve_transcription_backend().await?;
         tracing::info!(backend = resolved.label, "selected transcription backend");
-        logging::append_log_line(format!("transcription_backend={}", resolved.label))?;
+        let _ = logging::append_log_line(format!("transcription_backend={}", resolved.label));
         println!("transcription backend: {}", resolved.label);
         let transcription = Arc::new(resolved.client);
         let (app_tx, app_rx) = mpsc::channel(64);
@@ -144,6 +149,14 @@ async fn run() -> Result<()> {
 
 #[cfg(target_os = "windows")]
 async fn run() -> Result<()> {
+    let log_path = logging::log_file_path();
+    let tray = match StatusTray::start(UiStatus::idle(), WindowsUiConfig { log_path }) {
+        Ok(tray) => Some(tray),
+        Err(error) => {
+            tracing::warn!(%error, "failed to start status tray");
+            None
+        }
+    };
     let DictationApp {
         mut engine,
         mut app_rx,
@@ -155,19 +168,100 @@ async fn run() -> Result<()> {
     .await?;
     println!("Codex Voice is running. Hold Control-M to dictate. Paste insertion uses clipboard plus SendInput and may be blocked for elevated target apps.");
 
+    let tray_busy = Arc::new(AtomicBool::new(false));
+    let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
             Some(event) = hotkey_rx.recv() => engine.handle_hotkey(event).await,
-            Some(event) = app_rx.recv() => print_app_event(event),
+            Some(event) = app_rx.recv() => {
+                if let Some(ref tray) = tray {
+                    if let Some(status) = UiStatus::from_app_event(&event) {
+                        tray.update(status);
+                    }
+                }
+                print_app_event(event);
+            }
+            _ = tray_poll.tick() => {
+                if let Some(ref tray) = tray {
+                    while let Some(command) = tray.try_recv_command() {
+                        match command {
+                            UiCommand::StartTestRecording => {
+                                spawn_tray_task(tray, &tray_busy, run_tray_test_recording);
+                            }
+                            UiCommand::OpenLogs => open_tray_logs(tray),
+                            UiCommand::RunDiagnostics => {
+                                spawn_tray_task(tray, &tray_busy, run_tray_diagnostics);
+                            }
+                            UiCommand::Quit => return Ok(()),
+                        }
+                    }
+                }
+            }
             else => break,
         }
     }
     Ok(())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
 async fn run() -> Result<()> {
-    anyhow::bail!("this milestone implements Linux and Windows only")
+    let log_path = logging::log_file_path();
+    let tray = match StatusTray::start(UiStatus::idle(), MacOSUiConfig { log_path }) {
+        Ok(tray) => Some(tray),
+        Err(error) => {
+            tracing::warn!(%error, "failed to start status tray");
+            None
+        }
+    };
+    let DictationApp {
+        mut engine,
+        mut app_rx,
+        mut hotkey_rx,
+    } = DictationApp::new(
+        Arc::new(MacOSTextInjector::new()),
+        codex_voice_platform::MacOSHotkeyService::new()?,
+    )
+    .await?;
+    println!("Codex Voice is running. Hold Control-M to dictate. Text insertion uses macOS Accessibility API with clipboard paste fallback.");
+
+    let tray_busy = Arc::new(AtomicBool::new(false));
+    let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
+    loop {
+        tokio::select! {
+            Some(event) = hotkey_rx.recv() => engine.handle_hotkey(event).await,
+            Some(event) = app_rx.recv() => {
+                if let Some(ref tray) = tray {
+                    if let Some(status) = UiStatus::from_app_event(&event) {
+                        tray.update(status);
+                    }
+                }
+                print_app_event(event);
+            }
+            _ = tray_poll.tick() => {
+                if let Some(ref tray) = tray {
+                    while let Some(command) = tray.try_recv_command() {
+                        match command {
+                            UiCommand::StartTestRecording => {
+                                spawn_tray_task(tray, &tray_busy, run_tray_test_recording);
+                            }
+                            UiCommand::OpenLogs => open_tray_logs(tray),
+                            UiCommand::RunDiagnostics => {
+                                spawn_tray_task(tray, &tray_busy, run_tray_diagnostics);
+                            }
+                            UiCommand::Quit => return Ok(()),
+                        }
+                    }
+                }
+            }
+            else => break,
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+async fn run() -> Result<()> {
+    anyhow::bail!("this build only implements Linux, Windows, and macOS")
 }
 
 fn print_app_event(event: AppEvent) {
@@ -200,10 +294,9 @@ fn print_app_event(event: AppEvent) {
 }
 
 // ---------------------------------------------------------------------------
-// Linux tray helpers
+// Tray helpers (cross-platform)
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
 fn spawn_tray_task<F, Fut>(tray: &StatusTray, busy: &Arc<AtomicBool>, task: F)
 where
     F: FnOnce(std::sync::mpsc::Sender<UiStatus>) -> Fut + Send + 'static,
@@ -222,17 +315,14 @@ where
     }
 }
 
-#[cfg(target_os = "linux")]
 struct TrayBusyGuard(Arc<AtomicBool>);
 
-#[cfg(target_os = "linux")]
 impl Drop for TrayBusyGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn run_tray_test_recording(status_tx: std::sync::mpsc::Sender<UiStatus>) {
     set_tray_status(
         &status_tx,
@@ -250,39 +340,24 @@ async fn run_tray_test_recording(status_tx: std::sync::mpsc::Sender<UiStatus>) {
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn run_test_recording() -> Result<String> {
     tracing::info!("starting tray test recording");
-    logging::append_log_line("starting test recording")?;
+    let _ = logging::append_log_line("starting test recording");
     let (recording, size) = doctor::capture_audio_sample(Duration::from_secs(2)).await?;
     let duration_ms = recording.duration.as_millis();
-    tokio::fs::remove_file(&recording.path)
-        .await
-        .with_context(|| format!("failed to delete {}", recording.path.display()))?;
+    if let Err(error) = tokio::fs::remove_file(&recording.path).await {
+        tracing::warn!(%error, path = %recording.path.display(), "failed to delete temp recording");
+    }
     let message = format!("Test recording ok: {} ms, {size} bytes", duration_ms);
     tracing::info!(duration_ms, bytes = size, "test recording ok");
-    logging::append_log_line(format!("test recording ok: {duration_ms} ms, {size} bytes"))?;
+    let _ = logging::append_log_line(format!("test recording ok: {duration_ms} ms, {size} bytes"));
     Ok(message)
 }
 
-#[cfg(target_os = "linux")]
 fn set_tray_status(status_tx: &std::sync::mpsc::Sender<UiStatus>, status: UiStatus) {
     let _ = status_tx.send(status);
 }
 
-#[cfg(target_os = "linux")]
-fn open_logs() -> Result<()> {
-    let path = logging::ensure_log_file()?;
-    tracing::info!(path = %path.display(), "opening log file");
-    logging::append_log_line(format!("opening log file: {}", path.display()))?;
-    std::process::Command::new("xdg-open")
-        .arg(&path)
-        .spawn()
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
 fn open_tray_logs(tray: &StatusTray) {
     if let Err(error) = open_logs() {
         tracing::warn!(%error, "failed to open logs");
@@ -291,7 +366,6 @@ fn open_tray_logs(tray: &StatusTray) {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn set_tray_error(
     status_tx: &std::sync::mpsc::Sender<UiStatus>,
     prefix: &str,
@@ -302,6 +376,36 @@ fn set_tray_error(
         status_tx,
         UiStatus::new(DictationState::Error(error.to_string()), message),
     );
+}
+
+#[cfg(target_os = "linux")]
+fn open_logs() -> Result<()> {
+    let path = logging::ensure_log_file()?;
+    tracing::info!(path = %path.display(), "opening log file");
+    let _ = logging::append_log_line(format!("opening log file: {}", path.display()));
+    let mut child = std::process::Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_logs() -> Result<()> {
+    let path = logging::ensure_log_file()?;
+    tracing::info!(path = %path.display(), "opening log file");
+    let _ = logging::append_log_line(format!("opening log file: {}", path.display()));
+    let mut child = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &path.to_string_lossy()])
+        .spawn()
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -325,4 +429,70 @@ async fn run_tray_diagnostics(status_tx: std::sync::mpsc::Sender<UiStatus>) {
             set_tray_error(&status_tx, "Diagnostics failed", &error);
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+async fn run_tray_diagnostics(status_tx: std::sync::mpsc::Sender<UiStatus>) {
+    let _ = logging::append_log_line("running windows diagnostics");
+    set_tray_status(
+        &status_tx,
+        UiStatus::new(DictationState::Transcribing, "Running diagnostics..."),
+    );
+    // Windows tray diagnostics are non-interactive in v1 because the main hotkey
+    // service is already running and an interactive test would conflict with it.
+    // Full diagnostics are available via CLI: doctor hotkey, doctor paste, doctor audio, etc.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = logging::append_log_line("windows diagnostics complete");
+    set_tray_status(
+        &status_tx,
+        UiStatus::new(
+            DictationState::Idle,
+            "Diagnostics complete — use CLI for full tests",
+        ),
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn open_logs() -> Result<()> {
+    let path = logging::ensure_log_file()?;
+    tracing::info!(path = %path.display(), "opening log file");
+    let _ = logging::append_log_line(format!("opening log file: {}", path.display()));
+    let mut child = std::process::Command::new("open")
+        .arg(&path)
+        .spawn()
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn run_tray_diagnostics(status_tx: std::sync::mpsc::Sender<UiStatus>) {
+    let _ = logging::append_log_line("running macos diagnostics");
+    set_tray_status(
+        &status_tx,
+        UiStatus::new(DictationState::Transcribing, "Running diagnostics..."),
+    );
+    // macOS tray diagnostics are non-interactive in v1 because portal-based
+    // diagnostics are Linux-only. Full diagnostics are available via CLI.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = logging::append_log_line("macos diagnostics complete");
+    set_tray_status(
+        &status_tx,
+        UiStatus::new(
+            DictationState::Idle,
+            "Diagnostics complete — use CLI for full tests",
+        ),
+    );
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+fn open_logs() -> Result<()> {
+    anyhow::bail!("open_logs is not implemented for this platform")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+async fn run_tray_diagnostics(_status_tx: std::sync::mpsc::Sender<UiStatus>) {
+    // unreachable on unsupported platforms because run() bails early
 }

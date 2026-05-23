@@ -31,7 +31,7 @@ pub enum UiCommand {
 }
 
 #[derive(Debug, Clone)]
-pub struct LinuxUiConfig {
+pub struct MacOSUiConfig {
     pub log_path: PathBuf,
 }
 
@@ -42,7 +42,7 @@ pub struct StatusTray {
 }
 
 impl StatusTray {
-    pub fn start(initial: UiStatus, config: LinuxUiConfig) -> Result<Self, String> {
+    pub fn start(initial: UiStatus, config: MacOSUiConfig) -> Result<Self, String> {
         let (status_tx, status_rx) = mpsc::channel();
         let (command_tx, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -70,7 +70,6 @@ impl StatusTray {
         self.command_rx.try_recv().ok()
     }
 
-    /// Returns a cloneable sender for updating the tray status.
     pub fn status_sender(&self) -> std::sync::mpsc::Sender<UiStatus> {
         self.status_tx.clone()
     }
@@ -78,7 +77,7 @@ impl StatusTray {
 
 fn run_tray(
     initial: UiStatus,
-    config: LinuxUiConfig,
+    config: MacOSUiConfig,
     status_rx: Receiver<UiStatus>,
     command_tx: Sender<UiCommand>,
     ready_tx: Sender<Result<(), String>>,
@@ -86,21 +85,17 @@ fn run_tray(
     let result = initialize_tray(initial, config, status_rx, command_tx, ready_tx.clone());
     if let Err(error) = result {
         let _ = ready_tx.send(Err(error.clone()));
-        // If startup has already been reported, the app can only learn about
-        // later tray-loop failures through logs in a future UI milestone.
         eprintln!("codex-voice tray stopped: {error}");
     }
 }
 
 fn initialize_tray(
     initial: UiStatus,
-    config: LinuxUiConfig,
+    config: MacOSUiConfig,
     status_rx: Receiver<UiStatus>,
     command_tx: Sender<UiCommand>,
     ready_tx: Sender<Result<(), String>>,
 ) -> Result<(), String> {
-    gtk::init().map_err(|error| format!("failed to initialize GTK: {error}"))?;
-
     let menu = Menu::new();
     let status_item = MenuItem::with_id(MENU_STATUS, initial.tray_label(), false, None);
     let test_recording_item =
@@ -132,23 +127,19 @@ fn initialize_tray(
         .with_tooltip("Codex Voice")
         .build()
         .map_err(|error| format!("failed to create tray icon: {error}"))?;
-    let mut hud = HudWindow::new();
-    let settings = SettingsWindow::new(&initial, &config);
 
     let _ = ready_tx.send(Ok(()));
+    let mut current_status = initial;
+    let mut hud = HudNotifier::new();
 
     loop {
-        while gtk::events_pending() {
-            gtk::main_iteration_do(false);
-        }
-
         while let Ok(status) = status_rx.try_recv() {
-            status_item.set_text(status.tray_label());
-            tray.set_title(Some(status.title()));
-            tray.set_icon(Some(icon_for_state(&icons, &status.state)))
+            current_status = status;
+            status_item.set_text(current_status.tray_label());
+            tray.set_title(Some(current_status.title()));
+            tray.set_icon(Some(icon_for_state(&icons, &current_status.state)))
                 .map_err(|error| format!("failed to update tray icon: {error}"))?;
-            hud.update(&status);
-            settings.update(&status);
+            hud.update(&current_status);
         }
 
         while let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -157,7 +148,7 @@ fn initialize_tray(
                     let _ = command_tx.send(UiCommand::StartTestRecording);
                 }
                 MENU_SETTINGS => {
-                    settings.show();
+                    show_settings_dialog(&config, &current_status);
                 }
                 MENU_LOGS => {
                     let _ = command_tx.send(UiCommand::OpenLogs);
@@ -177,21 +168,16 @@ fn initialize_tray(
     }
 }
 
-struct HudWindow {
-    replace_id: Option<String>,
+struct HudNotifier {
     last_message: Option<String>,
     available: bool,
 }
 
-impl HudWindow {
+impl HudNotifier {
     fn new() -> Self {
         Self {
-            replace_id: None,
             last_message: None,
-            available: Command::new("notify-send")
-                .arg("--version")
-                .output()
-                .is_ok(),
+            available: Command::new("osascript").arg("--version").output().is_ok(),
         }
     }
 
@@ -204,112 +190,44 @@ impl HudWindow {
             return;
         }
 
-        let timeout_ms = match status.state {
-            DictationState::Recording => "60000",
-            DictationState::Error(_) => "8000",
-            _ => "2500",
-        };
-        let urgency = match status.state {
-            DictationState::Error(_) => "critical",
-            _ => "low",
-        };
-        let mut command = Command::new("notify-send");
-        command
-            .arg("--print-id")
-            .arg("--transient")
-            .arg("--app-name=Codex Voice")
-            .arg("--category=status")
-            .arg("--urgency")
-            .arg(urgency)
-            .arg("--expire-time")
-            .arg(timeout_ms);
-        if let Some(replace_id) = &self.replace_id {
-            command.arg("--replace-id").arg(replace_id);
-        }
-        let output = command.arg("Codex Voice").arg(&status.message).output();
+        let title = status.title();
+
+        let script = format!(
+            "display notification \"{}\" with title \"Codex Voice – {}\" sound name \"Funk\"",
+            status.message.replace("\"", "\\\""),
+            title
+        );
+
+        let output = Command::new("osascript").arg("-e").arg(&script).output();
+
         match output {
-            Ok(output) if output.status.success() => {
-                let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !id.is_empty() {
-                    self.replace_id = Some(id);
-                }
+            Ok(out) if out.status.success() => {
                 self.last_message = Some(status.message.clone());
             }
             Ok(_) | Err(_) => {
+                // osascript failed — disable further attempts to avoid repeated spawns
                 self.available = false;
             }
         }
     }
 }
 
-struct SettingsWindow {
-    window: gtk::Window,
-    status_label: gtk::Label,
-}
+fn show_settings_dialog(config: &MacOSUiConfig, status: &UiStatus) {
+    let text = format!(
+        "Status: {}\n\nHotkeys: Control-M (global-hotkey / Carbon)\nInsertion: Accessibility selected-text replacement, fallback to clipboard + CGEvent paste\nTranscription: Codex auth from ~/.codex/auth.json\nTimeout: default runtime timeout\nDebug logs: set RUST_LOG before launching\n\nLog file: {}",
+        status.message,
+        config.log_path.display()
+    );
 
-impl SettingsWindow {
-    fn new(initial: &UiStatus, config: &LinuxUiConfig) -> Self {
-        use gtk::prelude::*;
+    let script = format!(
+        "tell app \"System Events\" to display dialog \"{}\" buttons {{\"OK\"}} default button \"OK\" with title \"Codex Voice Settings\"",
+        text.replace("\"", "\\\"")
+    );
 
-        let window = gtk::Window::new(gtk::WindowType::Toplevel);
-        window.set_title("Codex Voice Settings");
-        window.set_default_size(460, 280);
-
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        root.set_margin_top(18);
-        root.set_margin_bottom(18);
-        root.set_margin_start(18);
-        root.set_margin_end(18);
-
-        let heading = gtk::Label::new(Some("Codex Voice"));
-        heading.set_xalign(0.0);
-        heading.set_markup("<b>Codex Voice</b>");
-        root.pack_start(&heading, false, false, 0);
-
-        let status_label = gtk::Label::new(None);
-        status_label.set_xalign(0.0);
-        status_label.set_selectable(true);
-        root.pack_start(&status_label, false, false, 0);
-
-        for row in [
-            "Hotkeys: Control-M or keyboard dictation key (KDE GlobalShortcuts portal)",
-            "Insertion: Wayland RemoteDesktop portal paste",
-            "Transcription: Codex auth from ~/.codex/auth.json",
-            "Timeout: default runtime timeout",
-            "Debug logs: set RUST_LOG before launching",
-        ] {
-            let label = gtk::Label::new(Some(row));
-            label.set_xalign(0.0);
-            label.set_selectable(true);
-            root.pack_start(&label, false, false, 0);
-        }
-
-        let log_label = gtk::Label::new(Some(&format!("Log file: {}", config.log_path.display())));
-        log_label.set_xalign(0.0);
-        log_label.set_selectable(true);
-        root.pack_start(&log_label, false, false, 0);
-
-        window.add(&root);
-        let settings = Self {
-            window,
-            status_label,
-        };
-        settings.update(initial);
-        settings
-    }
-
-    fn show(&self) {
-        use gtk::prelude::*;
-
-        self.window.show_all();
-        self.window.present();
-    }
-
-    fn update(&self, status: &UiStatus) {
-        use gtk::prelude::*;
-
-        self.status_label
-            .set_label(&format!("Status: {}", status.message));
+    if let Ok(mut child) = Command::new("osascript").arg("-e").arg(&script).spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }
 

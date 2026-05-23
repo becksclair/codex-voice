@@ -20,5 +20,8 @@ serde_json.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+global-hotkey.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

@@ -78,9 +78,9 @@ KDE6/Wayland portal-based hotkeys, text injection, and desktop UI surface.
 
 ---
 
-## Phase 4 — Windows Foundation (Partial)
+## Phase 4 — Windows Desktop (Complete)
 
-Windows compiles and has basic engine + adapters, but no desktop UI surface.
+Windows has a full desktop surface with system tray, settings window, and engine wiring.
 
 - [x] Unblock Windows workspace compilation
 - [x] Implement `WindowsHotkeyService` with `GetAsyncKeyState` polling for `Control-M`
@@ -88,11 +88,17 @@ Windows compiles and has basic engine + adapters, but no desktop UI surface.
 - [x] Implement `WindowsTextInjector` with clipboard + `SendInput(Ctrl+V)`
   - Waits for Control release before paste to avoid hotkey contamination
 - [x] Implement `WindowsPermissionService` stub
-- [x] Wire `codex-voice run` for Windows (console-only, no tray)
-- [ ] Add Windows system tray (tray-icon supports Windows)
-  - `@crates/codex-voice-ui/AGENTS.md`
-- [ ] Add Windows desktop notification HUD
-- [ ] Add Windows settings/status window
+- [x] Wire `codex-voice run` for Windows with system tray
+- [x] Add Windows system tray (`tray-icon` cross-platform menu)
+  - Status updates, Start Test Recording, Open Settings, Open Logs, Run Diagnostics, Quit
+  - `@crates/codex-voice-ui/src/windows_tray.rs`
+- [x] Add Windows settings/status window (Win32 dialog with static text)
+  - Shows current status, hotkey info, insertion method, log path
+  - Updates in real-time as status changes arrive via channel
+- [ ] Add Windows desktop notification HUD (deferred — tray tooltip used for v1)
+- [x] Validate compilation on Windows VM
+  - `cargo check --workspace` passes on Windows
+  - `cargo run --bin codex-voice -- doctor hotkey` works (times out as expected without key press)
 - [ ] Validate hotkey + paste in a real interactive desktop session
   - `SendInput` may be blocked by UIPI from non-elevated processes
 - [ ] Consider `WH_KEYBOARD_LL` low-level hook if `GetAsyncKeyState` polling is unreliable
@@ -103,38 +109,54 @@ Windows compiles and has basic engine + adapters, but no desktop UI surface.
 
 ## Phase 5 — macOS Implementation
 
-No macOS code exists yet. The `run()` command returns `anyhow::bail!("this milestone implements Linux and Windows only")`.
+macOS has a complete desktop surface with global hotkeys, Accessibility text injection, clipboard fallback, tray, and notifications.
 
-- [ ] Implement `MacOSHotkeyService`
-  - Option A: `global-hotkey` crate (supports macOS, press/release semantics)
-  - Option B: Direct Carbon hotkey events if `global-hotkey` lacks fidelity
-  - Research: `@docs/execplan-rust-native-cross-platform.md` (Slint/macOS research notes)
-- [ ] Implement `MacOSTextInjector`
-  - Primary: Accessibility selected-text replacement
-  - Fallback: Clipboard + CGEvent Command-V, with pasteboard restoration
-- [ ] Implement `MacOSPermissionService`
-  - Microphone usage prompt, Accessibility trust checks, settings links
+- [x] Implement `MacOSHotkeyService` using `global-hotkey` crate
+  - Registers Control-M globally via `GlobalHotKeyManager`
+  - Emits `Pressed`/`Released` from `GlobalHotKeyEvent` receiver
+  - `@crates/codex-voice-platform/src/macos.rs`
+- [x] Implement `MacOSTextInjector`
+  - Primary: Accessibility API (`AXUIElementSetAttributeValue` with `AXSelectedText`)
+    - Raw FFI to `ApplicationServices` framework with manual CFString creation
+  - Fallback: Clipboard + `CGEvent` Command-V paste
+    - Raw FFI to `CoreGraphics` framework for `CGEventCreateKeyboardEvent`/`CGEventPost`
+  - Pasteboard restoration via `arboard`
+  - `@crates/codex-voice-platform/src/macos.rs`
+- [x] Implement `MacOSPermissionService`
+  - `AXIsProcessTrustedWithOptions` for Accessibility trust status
+  - Opens System Settings via `open x-apple.systempreferences:...` for microphone and accessibility
 - [ ] Add `NSMicrophoneUsageDescription` and background-app configuration
-- [ ] Wire `codex-voice run` for macOS
-- [ ] Add macOS diagnostics: `doctor hotkey`, `doctor paste`
+  - Requires `resources/macos/Info.plist` (packaging artifact, see Phase 7)
+- [x] Wire `codex-voice run` for macOS with tray loop
+  - Same event loop pattern as Linux/Windows: hotkey + app events + tray commands
+  - `@crates/codex-voice-app/src/main.rs`
+- [x] Add macOS diagnostics: `doctor hotkey`, `doctor paste`
+  - `doctor hotkey` uses the same `global-hotkey` service
+  - `doctor paste` tests Accessibility + clipboard fallback
+- [x] Add macOS system tray (`tray-icon` cross-platform menu)
+  - Status updates, Start Test Recording, Open Settings (osascript dialog), Open Logs, Run Diagnostics, Quit
+  - `@crates/codex-voice-ui/src/macos_tray.rs`
+- [x] Add macOS notification HUD (`osascript display notification`)
+  - Best-effort desktop notifications with sound and replace semantics
 
-**Validation:** Must test from a packaged `.app` for accurate Accessibility/microphone permission behavior; do not rely only on `target/debug` binary.
+**Validation:** Must test from a packaged `.app` for accurate Accessibility/microphone permission behavior; do not rely only on `target/debug` binary. Compilation verified on Linux host; macOS-only code paths are behind `#[cfg(target_os = "macos")]`.
 
 ---
 
 ## Phase 6 — Cross-Platform UI Decision
 
-The Linux UI currently uses GTK + `tray-icon` + `notify-send`. Slint was planned in the original ExecPlan but was never adopted.
+All three platforms now have native UI surfaces using `tray-icon` for the system tray. Slint was planned in the original ExecPlan but was never adopted.
 
-- [ ] **Decision needed:** Keep per-platform native UI or migrate to Slint
-  - **Native pros:** Uses OS-native widgets, less binary size, no extra dependency
-  - **Slint pros:** Single UI codebase for all platforms, Rust-native, no webview
-  - Research: `@docs/execplan-rust-native-cross-platform.md` (Slint desktop docs reference)
-- [ ] If keeping native: add Windows tray/HUD/settings (see Phase 4)
-- [ ] If keeping native: add macOS tray/HUD/settings (see Phase 5)
-- [ ] If migrating to Slint: implement Slint UI crate, replace Linux GTK surfaces, add Windows/macOS surfaces
+- [x] **Decision made:** Keep per-platform native UI
+  - Linux: GTK tray + `notify-send` HUD + GTK settings window
+  - Windows: `tray-icon` tray + Win32 settings window
+  - macOS: `tray-icon` tray + `osascript` dialog settings + `osascript` notification HUD
+  - All platforms share the same `UiStatus`, `UiCommand`, and event loop pattern
+  - `@crates/codex-voice-ui/src/lib.rs`
+- [ ] If migrating to Slint later: implement Slint UI crate, replace native surfaces
   - Requires `slint` and `slint-build` dependencies
   - Research: [Slint desktop docs](https://docs.slint.dev/latest/docs/slint/guide/platforms/desktop/)
+  - Not a priority unless maintainability of three native surfaces becomes a problem
 
 ---
 

@@ -82,6 +82,18 @@ mod linux_tray;
 #[cfg(target_os = "linux")]
 pub use linux_tray::{LinuxUiConfig, StatusTray, UiCommand};
 
+#[cfg(target_os = "windows")]
+mod windows_tray;
+
+#[cfg(target_os = "windows")]
+pub use windows_tray::{StatusTray, UiCommand, WindowsUiConfig};
+
+#[cfg(target_os = "macos")]
+mod macos_tray;
+
+#[cfg(target_os = "macos")]
+pub use macos_tray::{MacOSUiConfig, StatusTray, UiCommand};
+
 #[cfg(test)]
 mod tests {
     use super::*;

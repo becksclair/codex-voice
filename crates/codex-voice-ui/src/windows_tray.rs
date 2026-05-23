@@ -1,8 +1,9 @@
 use codex_voice_core::DictationState;
 use std::{
     collections::HashMap,
+    ffi::OsStr,
+    os::windows::ffi::OsStrExt,
     path::PathBuf,
-    process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::Duration,
@@ -10,6 +11,18 @@ use std::{
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     Icon, TrayIconBuilder,
+};
+use windows_sys::Win32::{
+    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    Graphics::Gdi::{GetStockObject, UpdateWindow, WHITE_BRUSH},
+    System::LibraryLoader::GetModuleHandleW,
+    System::SystemServices::SS_LEFT,
+    UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, IsWindow, PeekMessageW,
+        RegisterClassExW, SetForegroundWindow, SetWindowTextW, ShowWindow, TranslateMessage,
+        UnregisterClassW, CW_USEDEFAULT, MSG, PM_REMOVE, SW_SHOW, WM_CLOSE, WM_DESTROY,
+        WNDCLASSEXW, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    },
 };
 
 use crate::UiStatus;
@@ -21,6 +34,7 @@ const MENU_LOGS: &str = "logs";
 const MENU_DIAGNOSTICS: &str = "diagnostics";
 const MENU_QUIT: &str = "quit";
 const ICON_SIZE: u32 = 32;
+const SETTINGS_CLASS_NAME: &str = "CodexVoiceSettingsWindow";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiCommand {
@@ -31,7 +45,7 @@ pub enum UiCommand {
 }
 
 #[derive(Debug, Clone)]
-pub struct LinuxUiConfig {
+pub struct WindowsUiConfig {
     pub log_path: PathBuf,
 }
 
@@ -42,7 +56,7 @@ pub struct StatusTray {
 }
 
 impl StatusTray {
-    pub fn start(initial: UiStatus, config: LinuxUiConfig) -> Result<Self, String> {
+    pub fn start(initial: UiStatus, config: WindowsUiConfig) -> Result<Self, String> {
         let (status_tx, status_rx) = mpsc::channel();
         let (command_tx, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -70,7 +84,6 @@ impl StatusTray {
         self.command_rx.try_recv().ok()
     }
 
-    /// Returns a cloneable sender for updating the tray status.
     pub fn status_sender(&self) -> std::sync::mpsc::Sender<UiStatus> {
         self.status_tx.clone()
     }
@@ -78,7 +91,7 @@ impl StatusTray {
 
 fn run_tray(
     initial: UiStatus,
-    config: LinuxUiConfig,
+    config: WindowsUiConfig,
     status_rx: Receiver<UiStatus>,
     command_tx: Sender<UiCommand>,
     ready_tx: Sender<Result<(), String>>,
@@ -86,21 +99,17 @@ fn run_tray(
     let result = initialize_tray(initial, config, status_rx, command_tx, ready_tx.clone());
     if let Err(error) = result {
         let _ = ready_tx.send(Err(error.clone()));
-        // If startup has already been reported, the app can only learn about
-        // later tray-loop failures through logs in a future UI milestone.
         eprintln!("codex-voice tray stopped: {error}");
     }
 }
 
 fn initialize_tray(
     initial: UiStatus,
-    config: LinuxUiConfig,
+    config: WindowsUiConfig,
     status_rx: Receiver<UiStatus>,
     command_tx: Sender<UiCommand>,
     ready_tx: Sender<Result<(), String>>,
 ) -> Result<(), String> {
-    gtk::init().map_err(|error| format!("failed to initialize GTK: {error}"))?;
-
     let menu = Menu::new();
     let status_item = MenuItem::with_id(MENU_STATUS, initial.tray_label(), false, None);
     let test_recording_item =
@@ -132,23 +141,17 @@ fn initialize_tray(
         .with_tooltip("Codex Voice")
         .build()
         .map_err(|error| format!("failed to create tray icon: {error}"))?;
-    let mut hud = HudWindow::new();
-    let settings = SettingsWindow::new(&initial, &config);
 
     let _ = ready_tx.send(Ok(()));
+    let mut current_status = initial;
 
     loop {
-        while gtk::events_pending() {
-            gtk::main_iteration_do(false);
-        }
-
         while let Ok(status) = status_rx.try_recv() {
-            status_item.set_text(status.tray_label());
-            tray.set_title(Some(status.title()));
-            tray.set_icon(Some(icon_for_state(&icons, &status.state)))
+            current_status = status;
+            status_item.set_text(current_status.tray_label());
+            tray.set_title(Some(current_status.title()));
+            tray.set_icon(Some(icon_for_state(&icons, &current_status.state)))
                 .map_err(|error| format!("failed to update tray icon: {error}"))?;
-            hud.update(&status);
-            settings.update(&status);
         }
 
         while let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -157,7 +160,7 @@ fn initialize_tray(
                     let _ = command_tx.send(UiCommand::StartTestRecording);
                 }
                 MENU_SETTINGS => {
-                    settings.show();
+                    show_settings_window(&config, &current_status);
                 }
                 MENU_LOGS => {
                     let _ = command_tx.send(UiCommand::OpenLogs);
@@ -177,140 +180,148 @@ fn initialize_tray(
     }
 }
 
-struct HudWindow {
-    replace_id: Option<String>,
-    last_message: Option<String>,
-    available: bool,
+fn show_settings_window(config: &WindowsUiConfig, initial: &UiStatus) {
+    let config = config.clone();
+    let initial = initial.clone();
+    thread::spawn(move || {
+        let _ = run_settings_window(config, initial);
+    });
 }
 
-impl HudWindow {
-    fn new() -> Self {
-        Self {
-            replace_id: None,
-            last_message: None,
-            available: Command::new("notify-send")
-                .arg("--version")
-                .output()
-                .is_ok(),
-        }
+fn run_settings_window(config: WindowsUiConfig, initial: UiStatus) -> Result<(), String> {
+    let class_name = to_wide(SETTINGS_CLASS_NAME);
+    let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+
+    static REGISTER_ONCE: std::sync::Once = std::sync::Once::new();
+    REGISTER_ONCE.call_once(|| {
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: 0,
+            lpfnWndProc: Some(settings_wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinstance,
+            hIcon: std::ptr::null_mut(),
+            hCursor: std::ptr::null_mut(),
+            hbrBackground: unsafe { GetStockObject(WHITE_BRUSH) },
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+            hIconSm: std::ptr::null_mut(),
+        };
+        unsafe { RegisterClassExW(&wc) };
+    });
+
+    let title = to_wide("Codex Voice Settings");
+    let hwnd = unsafe {
+        CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            WS_OVERLAPPEDWINDOW & !0x00040000, // WS_THICKFRAME removed
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            480,
+            320,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            hinstance,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if hwnd == std::ptr::null_mut() {
+        unsafe { UnregisterClassW(class_name.as_ptr(), hinstance) };
+        return Err("failed to create settings window".to_string());
     }
 
-    fn update(&mut self, status: &UiStatus) {
-        if !self.available || status.state == DictationState::Idle {
-            self.last_message = None;
-            return;
-        }
-        if self.last_message.as_deref() == Some(status.message.as_str()) {
-            return;
-        }
+    // Create a multi-line static text control as a child window
+    let static_class = to_wide("STATIC");
+    let text_hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            static_class.as_ptr(),
+            std::ptr::null(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            12,
+            12,
+            440,
+            260,
+            hwnd,
+            std::ptr::null_mut(),
+            hinstance,
+            std::ptr::null_mut(),
+        )
+    };
 
-        let timeout_ms = match status.state {
-            DictationState::Recording => "60000",
-            DictationState::Error(_) => "8000",
-            _ => "2500",
-        };
-        let urgency = match status.state {
-            DictationState::Error(_) => "critical",
-            _ => "low",
-        };
-        let mut command = Command::new("notify-send");
-        command
-            .arg("--print-id")
-            .arg("--transient")
-            .arg("--app-name=Codex Voice")
-            .arg("--category=status")
-            .arg("--urgency")
-            .arg(urgency)
-            .arg("--expire-time")
-            .arg(timeout_ms);
-        if let Some(replace_id) = &self.replace_id {
-            command.arg("--replace-id").arg(replace_id);
-        }
-        let output = command.arg("Codex Voice").arg(&status.message).output();
-        match output {
-            Ok(output) if output.status.success() => {
-                let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !id.is_empty() {
-                    self.replace_id = Some(id);
-                }
-                self.last_message = Some(status.message.clone());
+    let initial_text = build_settings_text(&config, &initial);
+    let wide_text = to_wide(&initial_text);
+    unsafe { SetWindowTextW(text_hwnd, wide_text.as_ptr()) };
+
+    unsafe { ShowWindow(hwnd, SW_SHOW) };
+    unsafe { UpdateWindow(hwnd) };
+    unsafe { SetForegroundWindow(hwnd) };
+
+    let mut msg = MSG::default();
+    loop {
+        // Process window messages
+        while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            if msg.message == 0x0012 {
+                // WM_QUIT
+                break;
             }
-            Ok(_) | Err(_) => {
-                self.available = false;
-            }
+            unsafe { TranslateMessage(&msg) };
+            unsafe { DispatchMessageW(&msg) };
         }
+
+        // If window was destroyed, exit
+        if unsafe { IsWindow(hwnd) } == 0 {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Ok(())
+}
+
+extern "system" fn settings_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_CLOSE => {
+            unsafe { DestroyWindow(hwnd) };
+            0
+        }
+        WM_DESTROY => {
+            // Don't PostQuitMessage here — the outer loop checks IsWindow
+            0
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
-struct SettingsWindow {
-    window: gtk::Window,
-    status_label: gtk::Label,
+fn build_settings_text(config: &WindowsUiConfig, status: &UiStatus) -> String {
+    format!(
+        "Status: {}\r\n\r\n\
+         Hotkeys: Control-M (GetAsyncKeyState polling)\r\n\
+         Insertion: Clipboard + SendInput (Ctrl+V)\r\n\
+         Transcription: Codex auth from ~/.codex/auth.json\r\n\
+         Timeout: default runtime timeout\r\n\
+         Debug logs: set RUST_LOG before launching\r\n\r\n\
+         Log file: {}",
+        status.message,
+        config.log_path.display()
+    )
 }
 
-impl SettingsWindow {
-    fn new(initial: &UiStatus, config: &LinuxUiConfig) -> Self {
-        use gtk::prelude::*;
-
-        let window = gtk::Window::new(gtk::WindowType::Toplevel);
-        window.set_title("Codex Voice Settings");
-        window.set_default_size(460, 280);
-
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        root.set_margin_top(18);
-        root.set_margin_bottom(18);
-        root.set_margin_start(18);
-        root.set_margin_end(18);
-
-        let heading = gtk::Label::new(Some("Codex Voice"));
-        heading.set_xalign(0.0);
-        heading.set_markup("<b>Codex Voice</b>");
-        root.pack_start(&heading, false, false, 0);
-
-        let status_label = gtk::Label::new(None);
-        status_label.set_xalign(0.0);
-        status_label.set_selectable(true);
-        root.pack_start(&status_label, false, false, 0);
-
-        for row in [
-            "Hotkeys: Control-M or keyboard dictation key (KDE GlobalShortcuts portal)",
-            "Insertion: Wayland RemoteDesktop portal paste",
-            "Transcription: Codex auth from ~/.codex/auth.json",
-            "Timeout: default runtime timeout",
-            "Debug logs: set RUST_LOG before launching",
-        ] {
-            let label = gtk::Label::new(Some(row));
-            label.set_xalign(0.0);
-            label.set_selectable(true);
-            root.pack_start(&label, false, false, 0);
-        }
-
-        let log_label = gtk::Label::new(Some(&format!("Log file: {}", config.log_path.display())));
-        log_label.set_xalign(0.0);
-        log_label.set_selectable(true);
-        root.pack_start(&log_label, false, false, 0);
-
-        window.add(&root);
-        let settings = Self {
-            window,
-            status_label,
-        };
-        settings.update(initial);
-        settings
-    }
-
-    fn show(&self) {
-        use gtk::prelude::*;
-
-        self.window.show_all();
-        self.window.present();
-    }
-
-    fn update(&self, status: &UiStatus) {
-        use gtk::prelude::*;
-
-        self.status_label
-            .set_label(&format!("Status: {}", status.message));
-    }
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn build_icon_cache() -> Result<HashMap<DictationState, Icon>, String> {
