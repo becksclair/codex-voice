@@ -126,11 +126,13 @@ impl ElevenLabsSpeechClient {
     }
 }
 
-/// Clamp and round ElevenLabs speed to avoid f32 serialization artifacts
-/// (e.g. 1.2 → 1.2000000476837158) that its strict validator rejects.
-fn normalize_speed(speed: f32) -> f32 {
-    let clamped = speed.clamp(0.7, 1.2);
-    (clamped * 100.0).round() / 100.0
+/// Clamp and round ElevenLabs speed, then cast to f64 so serde_json
+/// serializes it cleanly (f32 produces epsilon artifacts like
+/// 1.2000000476837158 that ElevenLabs' strict validator rejects).
+fn normalize_speed(speed: f32) -> f64 {
+    let clamped = speed.clamp(0.7_f32, 1.2_f32);
+    let rounded = (clamped * 100.0).round() / 100.0;
+    rounded as f64
 }
 
 fn resolve_model_id(model_hint: &str, configured: &str) -> SpeechResult<String> {
