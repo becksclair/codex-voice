@@ -42,10 +42,12 @@ impl ElevenLabsSpeechClient {
         let model_id = resolve_model_id(&request.model_hint, &self.config.model_id)?;
 
         let persona_settings = persona.and_then(|p| p.elevenlabs.as_ref());
-        let speed = request
-            .speed
-            .or_else(|| persona_settings.map(|e| e.voice_settings.speed as f32))
-            .unwrap_or(1.0);
+        let speed = normalize_speed(
+            request
+                .speed
+                .or_else(|| persona_settings.map(|e| e.voice_settings.speed as f32))
+                .unwrap_or(1.0),
+        );
 
         let voice_settings = if let Some(e) = persona_settings {
             serde_json::json!({
@@ -122,6 +124,13 @@ impl ElevenLabsSpeechClient {
 
         convert_speech(native, request.format).await
     }
+}
+
+/// Clamp and round ElevenLabs speed to avoid f32 serialization artifacts
+/// (e.g. 1.2 → 1.2000000476837158) that its strict validator rejects.
+fn normalize_speed(speed: f32) -> f32 {
+    let clamped = speed.clamp(0.7, 1.2);
+    (clamped * 100.0).round() / 100.0
 }
 
 fn resolve_model_id(model_hint: &str, configured: &str) -> SpeechResult<String> {
