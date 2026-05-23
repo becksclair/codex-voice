@@ -1,3 +1,5 @@
+> **ARCHIVED** — This document is preserved for historical research and detailed platform-specific API references. The active plan of record is `@ROADMAP.md`.
+
 # Reimplement Codex Voice as a Rust-Native Cross-Platform Desktop App
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds.
@@ -26,8 +28,11 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - [x] (2026-04-24) Unblocked Windows workspace compilation, added Windows Control-M polling, Windows clipboard plus `SendInput` paste, and Windows CLI wiring.
 - [x] (2026-05-04) Added a localhost OpenAI-compatible transcriber service for `summarize`, service discovery, GUI runtime fallback to direct Codex transcription, and explicit long-audio chunking behavior.
 - [x] (2026-05-19) Added unified `codex-voice server` OpenAI-compatible audio service with transcription and TTS endpoints, Google Gemini TTS and ElevenLabs backends, persona-aware provider fallback, config loading from `~/.codex/read-aloud-defaults.json`, `doctor tts`, and systemd user service setup via `mise run setup`.
-- [ ] Add cross-platform Slint settings/HUD UI if GTK remains Linux-only after macOS/Windows adapters.
-- [ ] Add packaging with `cargo-packager`.
+- [x] (2026-05-23) Fixed `RuntimeTranscriptionClient` Codex fallback: 5xx errors from the local transcriber service now correctly fall back to direct Codex instead of being treated as non-retryable.
+- [ ] Add macOS platform adapters (hotkey, text injection, permissions) and a macOS `run()` implementation.
+- [ ] Add Windows tray/UI surface (currently Windows has engine + adapters but no tray, HUD, or settings window).
+- [ ] Add cross-platform Slint settings/HUD UI if GTK remains Linux-only after macOS/Windows adapters. Currently the Linux surface uses GTK + `tray-icon`, not Slint.
+- [ ] Add packaging with `cargo-packager` (no `[package.metadata.packager]`, `Packager.toml`, or `resources/` exist yet).
 - [ ] Validate end-to-end on macOS, Linux KDE6/Wayland, and Windows 11.
 
 ## Surprises & Discoveries
@@ -76,6 +81,9 @@ The existing Swift app remains a behavioral reference only. The new implementati
 - Observation: ElevenLabs has no available credits for live validation, so the implementation must treat ElevenLabs as optional and use Google as the first proven lane and fallback.
   Evidence: User confirmed ElevenLabs account has no credits; Google Gemini TTS is accessible with a valid API key.
 
+- Observation: `RuntimeTranscriptionClient` was treating all `TranscriptionError::Service` errors as non-retryable, which blocked the Codex fallback when the local transcriber service returned 5xx errors (e.g. 502 Bad Gateway from backend ASR failure).
+  Evidence: `doctor transcribe --file /tmp/sample.wav` with a local service at `100.120.202.119:3845` returned 502; the direct Codex fallback was skipped because the match arm caught `TranscriptionError::Service { .. }` unconditionally. The fix narrows the non-retryable guard to 4xx client errors only.
+
 ## Decision Log
 
 - Decision: Build a greenfield Rust workspace instead of porting Swift code.
@@ -122,15 +130,27 @@ The existing Swift app remains a behavioral reference only. The new implementati
   Rationale: The config has `speechPrep` (LLM text rewrite before TTS), but it adds a second model-provider/auth path, increases latency/cost, and makes output less deterministic. Google persona prompting is already a soft prompt; stacking another LLM rewrite on top is premature.
   Date/Author: 2026-05-19 / Bex + Codex
 
+- Decision: Retry local-transcriber 5xx errors through the direct Codex fallback, but do not retry 4xx client errors.
+  Rationale: A 5xx from the local service means the service itself is struggling (e.g. backend ASR failure); direct Codex may still succeed. A 4xx means the request is malformed or rejected by the service (e.g. invalid audio format, bad token), and repeating it to Codex would likely produce the same result.
+  Date/Author: 2026-05-23 / Bex + Codex
+
 - Decision: Embed Mermaid diagrams in the ExecPlan.
   Rationale: The implementation spans multiple crates, platform adapters, runtime event flow, and installer outputs. Diagrams reduce ambiguity for future agents without replacing the prose requirements.
   Date/Author: 2026-04-24 / Codex
 
 ## Outcomes & Retrospective
 
-Initial Linux implementation is in place. The workspace builds, the core state machine has unit coverage for short-recording discard behavior, CPAL writes temporary mono WAV files, Codex auth/transcription compatibility is isolated in its own crate, and the Linux app exposes diagnostic commands.
+Linux implementation is complete and validated. The workspace builds, the core state machine has unit coverage, CPAL writes temporary mono WAV files, Codex auth/transcription compatibility is isolated in its own crate, and the Linux app exposes a full diagnostic and desktop surface.
 
-The Linux portal path has live proof for KDE/Wayland hotkey and paste behavior, including the keyboard dictation media key, and the app now exposes the Linux tray, notification HUD, settings/status, logging, diagnostic surface, and shared local transcriber service. Cleanup and repeated review passes fixed the concrete issues found in the Linux surface and left the current workspace checks green. Cross-platform UI polish can still move to Slint later if needed. macOS, Windows, and packaging remain deferred.
+The Linux portal path has live proof for KDE/Wayland hotkey and paste behavior, including the keyboard dictation media key, and the app exposes a GTK-based tray (via `tray-icon`), notification HUD (via `notify-send`), settings/status window (via GTK), logging, diagnostics, test recording, and the shared local transcriber service. Note that the Linux UI uses GTK, not Slint; Slint was planned but never adopted.
+
+Windows has compilable engine + platform adapters (`GetAsyncKeyState` hotkey polling, clipboard + `SendInput` paste), but no tray, HUD, settings window, or packaged installer. The Windows `run()` command starts the engine but prints events to the console only.
+
+macOS has no implementation; the `run()` command returns `anyhow::bail!("this milestone implements Linux and Windows only")`.
+
+Packaging (`cargo-packager`) is entirely deferred. No `[package.metadata.packager]`, `Packager.toml`, `resources/icons`, or `resources/macos/Info.plist` exist. The only install path is `mise run setup`, which installs a release binary and systemd user units on Linux.
+
+TTS (Google Gemini + ElevenLabs backends) and the unified `codex-voice server` are fully implemented and validated for Google. The transcription fallback bug (5xx local-service errors blocking direct Codex fallback) was fixed on 2026-05-23.
 
 ## Context and Orientation
 

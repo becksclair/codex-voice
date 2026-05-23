@@ -62,8 +62,12 @@ impl TranscriptionClient for RuntimeTranscriptionClient {
         match self {
             Self::Local { client, fallback } => match client.transcribe(recording).await {
                 Ok(text) => Ok(text),
-                // Service errors (e.g. 4xx/5xx from the local endpoint) are not retryable.
-                Err(error @ TranscriptionError::Service { .. }) => Err(error),
+                // Client errors (4xx) from the local endpoint are not retryable;
+                // server errors (5xx) indicate the local service is struggling
+                // and direct Codex may still succeed.
+                Err(error @ TranscriptionError::Service { status, .. }) if status < 500 => {
+                    Err(error)
+                }
                 Err(error) => {
                     tracing::warn!(%error, "local transcriber failed, attempting direct Codex fallback");
                     if let Some(direct) = fallback {
