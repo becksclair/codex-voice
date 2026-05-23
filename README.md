@@ -102,6 +102,11 @@ provider-native voice identifier for the selected/default provider. If a persona
 is configured, the service uses the persona's primary provider and preserves
 persona context (scene, style, pace) across fallback to the other provider.
 
+Google Gemini TTS voice names use star/planet identifiers such as `zephyr`,
+`aoede`, `callirrhoe`, `charon`, `gacrux`, `orion`, and `puck`. OpenAI-style
+names like `alloy`, `echo`, and `fable` are **not** supported by the Google
+backend and will return `400 INVALID_ARGUMENT`.
+
 `doctor tts` tests TTS config loading and optionally performs a live synthesis:
 
 ```bash
