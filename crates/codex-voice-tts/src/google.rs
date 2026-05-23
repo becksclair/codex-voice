@@ -109,24 +109,26 @@ impl GoogleSpeechClient {
                 SpeechError::Request("Google TTS response missing content parts".into())
             })?;
 
-        let mut audio_bytes = Vec::new();
+        let mut audio_bytes = bytes::Bytes::new();
         let mut mime_type = "audio/wav".to_string();
 
         for part in parts {
             if let Some(inline) = part.get("inlineData") {
                 if let Some(data) = inline.get("data").and_then(|d| d.as_str()) {
-                    audio_bytes =
+                    audio_bytes = bytes::Bytes::from(
                         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
                             .map_err(|e| {
                                 SpeechError::Request(format!(
                                     "failed to decode base64 audio: {}",
                                     e
                                 ))
-                            })?;
+                            })?,
+                    );
                 }
                 if let Some(mt) = inline.get("mimeType").and_then(|m| m.as_str()) {
                     mime_type = mt.to_string();
                 }
+                break;
             }
         }
 
@@ -153,47 +155,56 @@ fn build_prompt(
     persona: Option<&ResolvedPersona>,
     instructions: Option<&str>,
 ) -> String {
-    let mut lines = Vec::new();
-    lines.push("Read the following text aloud.".to_string());
-    lines.push(String::new());
+    let mut prompt = String::with_capacity(text.len() + 512);
+    prompt.push_str("Read the following text aloud.\n\n");
 
     if let Some(p) = persona {
-        lines.push("Delivery profile:".to_string());
+        prompt.push_str("Delivery profile:\n");
         if let Some(scene) = &p.prompt_scene {
-            lines.push(format!("- scene: {}", scene));
+            prompt.push_str("- scene: ");
+            prompt.push_str(scene);
+            prompt.push('\n');
         }
         if let Some(style) = &p.prompt_style {
-            lines.push(format!("- style: {}", style));
+            prompt.push_str("- style: ");
+            prompt.push_str(style);
+            prompt.push('\n');
         }
         if let Some(pacing) = &p.prompt_pacing {
-            lines.push(format!("- pace: {}", pacing));
+            prompt.push_str("- pace: ");
+            prompt.push_str(pacing);
+            prompt.push('\n');
         }
         for constraint in &p.prompt_constraints {
-            lines.push(format!("- constraint: {}", constraint));
+            prompt.push_str("- constraint: ");
+            prompt.push_str(constraint);
+            prompt.push('\n');
         }
-        lines.push(String::new());
+        prompt.push('\n');
 
         if let Some(sample) = &p.prompt_sample_context {
-            lines.push(format!("Sample context: {}", sample));
-            lines.push(String::new());
+            prompt.push_str("Sample context: ");
+            prompt.push_str(sample);
+            prompt.push_str("\n\n");
         }
     }
 
     if let Some(instr) = instructions {
-        lines.push("Additional delivery hints:".to_string());
-        lines.push(format!("- {}", instr));
-        lines.push(String::new());
+        prompt.push_str("Additional delivery hints:\n");
+        prompt.push_str("- ");
+        prompt.push_str(instr);
+        prompt.push_str("\n\n");
     }
 
-    lines.push("Important:".to_string());
-    lines.push("- speak the text exactly as written".to_string());
-    lines.push("- do not add narration or commentary".to_string());
-    lines.push("- do not change wording or paraphrase".to_string());
-    lines.push(String::new());
-    lines.push("Text:".to_string());
-    lines.push(format!("\"\"\"{}\"\"\"", text));
+    prompt.push_str("Important:\n");
+    prompt.push_str("- speak the text exactly as written\n");
+    prompt.push_str("- do not add narration or commentary\n");
+    prompt.push_str("- do not change wording or paraphrase\n\n");
+    prompt.push_str("Text:\n\"\"\"");
+    prompt.push_str(text);
+    prompt.push_str("\"\"\"");
 
-    lines.join("\n")
+    prompt
 }
 
 fn guess_format_from_mime(mime: &str) -> Option<SpeechFormat> {

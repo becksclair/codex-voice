@@ -15,7 +15,7 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file /tmp/
 cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice portal paste test"
 cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello world"
 cargo run -p codex-voice-app --bin codex-voice -- server
-cargo run -p codex-voice-app --bin codex-voice -- server --no-auth
+cargo run -p codex-voice-app --bin codex-voice -- server
 cargo run -p codex-voice-app --bin codex-voice -- transcriber probe-limits --file /tmp/sample.wav
 cargo check -p codex-voice-app
 ```
@@ -24,7 +24,7 @@ cargo check -p codex-voice-app
 
 - CLI definitions live in `src/main.rs` using `clap` derive types (`Cli`, `Command`, `DoctorCommand`).
 - Keep the public binary name `codex-voice` in `Cargo.toml`; the package remains `codex-voice-app`.
-- The local transcriber service, service discovery, service client, and runtime fallback live in `src/transcriber.rs`.
+- The local transcriber service, service discovery, service client, and runtime fallback live in `crates/codex-voice-transcriber/`.
 - ✅ DO: Add diagnostic commands by extending `DoctorCommand` in `src/main.rs` and wiring the match in `main()`.
 - ✅ DO: Keep `server` OpenAI-compatible with `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, and JSON `{ "text": ... }` transcription responses.
 - ✅ DO: Preserve the direct Codex fallback when the GUI cannot probe a healthy local transcriber service.
@@ -39,7 +39,7 @@ cargo check -p codex-voice-app
 ## Touch Points / Key Files
 
 - CLI and diagnostics: `src/main.rs`
-- Local transcriber service/client/discovery: `src/transcriber.rs`
+- Local transcriber service/client/discovery: `crates/codex-voice-transcriber/`
 - TTS diagnostic wiring: `src/tts.rs`
 - Binary name: `Cargo.toml`
 - Core state integration: `crates/codex-voice-core/src/engine.rs`
@@ -61,7 +61,7 @@ rg -n "redact|access_token|preview|transcript_chars" src/main.rs
 - `doctor transcribe` requires `--file`; do not change it back to a positional file without updating docs.
 - `doctor paste` requires `--text`; this is intentionally documented in the ExecPlan.
 - `server` writes `${XDG_STATE_HOME:-~/.local/state}/codex-voice/transcriber.json`; keep it private and do not log the bearer token.
-- `server --no-auth` skips Codex auth for OpenAI-compatible clients that bring their own token; the service still enforces a bearer token on every request, it just does not require a valid Codex session.
+- `server` runs without bearer token authentication by default. Use `--require-auth` to enforce bearer token authentication on every request.
 - The GUI probes the discovery file or `CODEX_VOICE_TRANSCRIBER_URL` once at startup, then uses direct Codex transcription if the service is stale, unhealthy, or unauthorized.
 - Oversized service uploads require `ffmpeg` for chunking; without it, return a clear `413` instead of sending an unsafe oversized Codex request.
 - Linux `run` binds Control-M plus the keyboard dictation key through the GlobalShortcuts portal; approval may be prompted by the desktop.

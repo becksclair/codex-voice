@@ -463,26 +463,16 @@ name = "codex-voice-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "axum",
  "clap",
  "codex-voice-audio",
  "codex-voice-codex",
  "codex-voice-core",
  "codex-voice-platform",
+ "codex-voice-transcriber",
  "codex-voice-tts",
  "codex-voice-ui",
  "dirs",
- "hex",
- "hound",
- "rand",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
  "tokio",
- "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
 ]
@@ -494,8 +484,11 @@ dependencies = [
  "async-trait",
  "codex-voice-core",
  "cpal",
+ "crossbeam-channel",
  "hound",
+ "serde",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -509,6 +502,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -516,6 +510,7 @@ name = "codex-voice-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -533,9 +528,33 @@ dependencies = [
  "futures-util",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "codex-voice-transcriber"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "codex-voice-codex",
+ "codex-voice-core",
+ "dirs",
+ "hex",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
 ]
 
 [[package]]
@@ -544,6 +563,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "bytes",
  "codex-voice-core",
  "dirs",
  "hound",

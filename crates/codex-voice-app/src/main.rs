@@ -1,167 +1,94 @@
-mod transcriber;
+mod cli;
+mod doctor;
+mod logging;
 mod tts;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::Parser;
 use codex_voice_audio::CpalWavRecorder;
-use codex_voice_codex::{CodexAuthService, CodexTranscriptionClient};
-
 #[cfg(target_os = "linux")]
 use codex_voice_core::DictationState;
-use codex_voice_core::{
-    AppEvent, AudioRecorder, DictationEngine, HotkeyService, PermissionService, RecordedAudio,
-    TextInjector, TranscriptionClient,
-};
+use codex_voice_core::{AppEvent, DictationEngine, HotkeyEvent, HotkeyService, TextInjector};
 #[cfg(target_os = "linux")]
-use codex_voice_platform::{LinuxHotkeyService, LinuxPermissionService, LinuxTextInjector};
+use codex_voice_platform::LinuxTextInjector;
 #[cfg(target_os = "windows")]
-use codex_voice_platform::{WindowsHotkeyService, WindowsPermissionService, WindowsTextInjector};
+use codex_voice_platform::WindowsTextInjector;
+use codex_voice_transcriber::RuntimeTranscriptionClient;
 #[cfg(target_os = "linux")]
 use codex_voice_ui::{LinuxUiConfig, StatusTray, UiCommand, UiStatus};
-#[cfg(target_os = "linux")]
-use std::process::Command as ProcessCommand;
-use std::{
-    io::Write,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "codex-voice",
-    version,
-    about = "Hold-to-dictate desktop utility backed by local Codex auth"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    Run,
-    Server(ServerArgs),
-    Doctor {
-        #[command(subcommand)]
-        command: Option<DoctorCommand>,
-    },
-    Transcriber {
-        #[command(subcommand)]
-        command: TranscriberCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum DoctorCommand {
-    Audio(AudioDoctor),
-    CodexAuth,
-    Transcribe(TranscribeDoctor),
-    Tts(tts::TtsDoctor),
-    Hotkey,
-    Paste(PasteDoctor),
-    LinuxPortals,
-}
-
-#[derive(Debug, Args)]
-struct AudioDoctor {
-    #[arg(long, default_value_t = 2)]
-    seconds: u64,
-    #[arg(long)]
-    keep: bool,
-}
-
-#[derive(Debug, Args)]
-struct TranscribeDoctor {
-    #[arg(long)]
-    file: PathBuf,
-}
-
-#[derive(Debug, Args)]
-struct PasteDoctor {
-    #[arg(long)]
-    text: String,
-}
-
-#[derive(Debug, Subcommand)]
-enum TranscriberCommand {
-    ProbeLimits(TranscriberProbeLimitsArgs),
-}
-
-#[derive(Debug, Args)]
-struct ServerArgs {
-    #[arg(long, default_value = "127.0.0.1:3845")]
-    bind: SocketAddr,
-    #[arg(long, default_value_t = 24)]
-    codex_upload_limit_mib: u64,
-    #[arg(long, default_value_t = 512)]
-    client_upload_limit_mib: u64,
-    #[arg(long, default_value_t = 600)]
-    chunk_seconds: u64,
-    #[arg(long, default_value = "CODEX_VOICE_TRANSCRIBER_TOKEN")]
-    token_env: String,
-    #[arg(long, default_value = "ffmpeg")]
-    ffmpeg_binary: String,
-    #[arg(long, help = "Disable bearer token authentication")]
-    no_auth: bool,
-}
-
-#[derive(Debug, Args)]
-struct TranscriberProbeLimitsArgs {
-    #[arg(long)]
-    file: PathBuf,
-    #[arg(long, default_value_t = 24)]
-    codex_upload_limit_mib: u64,
-    #[arg(long, default_value_t = 600)]
-    chunk_seconds: u64,
-    #[arg(long, default_value_t = 1)]
-    max_chunks: usize,
-    #[arg(long)]
-    include_oversized: bool,
-    #[arg(long, default_value = "ffmpeg")]
-    ffmpeg_binary: String,
-}
+use cli::{Cli, Command, DoctorCommand, TranscriberCommand};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing()?;
+    logging::init_tracing()?;
 
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => run().await,
-        Command::Server(args) => transcriber::serve(args.try_into()?).await,
+        Command::Server(args) => {
+            let config: codex_voice_transcriber::ServeConfig = args.try_into()?;
+            let speech = match tts::load_speech_client(None) {
+                Ok(client) => {
+                    tracing::info!("TTS client loaded successfully");
+                    Some(Arc::new(client) as Arc<dyn codex_voice_core::SpeechClient>)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "TTS client not available; speech endpoint will return 503");
+                    None
+                }
+            };
+            codex_voice_transcriber::serve(config, speech).await
+        }
         Command::Doctor { command } => match command.unwrap_or(DoctorCommand::LinuxPortals) {
-            DoctorCommand::Audio(args) => doctor_audio(args).await,
-            DoctorCommand::CodexAuth => doctor_codex_auth(),
-            DoctorCommand::Transcribe(args) => doctor_transcribe(args.file).await,
+            DoctorCommand::Audio(args) => doctor::doctor_audio(args).await,
+            DoctorCommand::CodexAuth => doctor::doctor_codex_auth().await,
+            DoctorCommand::Transcribe(args) => doctor::doctor_transcribe(args.file).await,
             DoctorCommand::Tts(args) => tts::doctor_tts(args).await,
-            DoctorCommand::Hotkey => doctor_hotkey().await,
-            DoctorCommand::Paste(args) => doctor_paste(args.text).await,
-            DoctorCommand::LinuxPortals => doctor_linux_portals().await,
+            DoctorCommand::Hotkey => doctor::doctor_hotkey().await,
+            DoctorCommand::Paste(args) => doctor::doctor_paste(args.text).await,
+            DoctorCommand::LinuxPortals => doctor::doctor_portals().await,
         },
         Command::Transcriber { command } => match command {
             TranscriberCommand::ProbeLimits(args) => {
-                transcriber::probe_limits(args.try_into()?).await
+                codex_voice_transcriber::probe_limits(args.try_into()?).await
             }
         },
     }
 }
 
+struct DictationApp<I: TextInjector> {
+    engine: DictationEngine<CpalWavRecorder, RuntimeTranscriptionClient, I>,
+    app_rx: mpsc::Receiver<AppEvent>,
+    hotkey_rx: mpsc::Receiver<HotkeyEvent>,
+}
+
+impl<I: TextInjector> DictationApp<I> {
+    async fn new(injector: Arc<I>, hotkey_service: impl HotkeyService) -> Result<Self> {
+        let audio = Arc::new(CpalWavRecorder::new());
+        let resolved = codex_voice_transcriber::resolve_transcription_backend().await?;
+        tracing::info!(backend = resolved.label, "selected transcription backend");
+        logging::append_log_line(format!("transcription_backend={}", resolved.label))?;
+        println!("transcription backend: {}", resolved.label);
+        let transcription = Arc::new(resolved.client);
+        let (app_tx, app_rx) = mpsc::channel(64);
+        let (hotkey_tx, hotkey_rx) = mpsc::channel(16);
+        hotkey_service.start(hotkey_tx)?;
+        let engine = DictationEngine::new(audio, transcription, injector, app_tx);
+        Ok(Self {
+            engine,
+            app_rx,
+            hotkey_rx,
+        })
+    }
+}
+
 #[cfg(target_os = "linux")]
 async fn run() -> Result<()> {
-    let audio = Arc::new(CpalWavRecorder::new());
-    let resolved = transcriber::resolve_transcription_backend().await?;
-    tracing::info!(backend = resolved.label, "selected transcription backend");
-    append_log_line(format!("transcription_backend={}", resolved.label))?;
-    println!("transcription backend: {}", resolved.label);
-    let transcription = Arc::new(resolved.client);
-    let injector = Arc::new(LinuxTextInjector::new());
-    let (app_tx, mut app_rx) = mpsc::channel(64);
-    let (hotkey_tx, mut hotkey_rx) = mpsc::channel(16);
-    LinuxHotkeyService::new().start(hotkey_tx)?;
-    let log_path = log_file_path();
+    let log_path = logging::log_file_path();
     let tray = match StatusTray::start(UiStatus::idle(), LinuxUiConfig { log_path }) {
         Ok(tray) => Some(tray),
         Err(error) => {
@@ -169,29 +96,41 @@ async fn run() -> Result<()> {
             None
         }
     };
-    let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
-
-    let mut engine = DictationEngine::new(audio, transcription, injector, app_tx);
+    let DictationApp {
+        mut engine,
+        mut app_rx,
+        mut hotkey_rx,
+    } = DictationApp::new(
+        Arc::new(LinuxTextInjector::new()),
+        codex_voice_platform::LinuxHotkeyService::new(),
+    )
+    .await?;
     println!("Codex Voice is running. Hold Control-M or the keyboard dictation key to dictate through the KDE/Wayland GlobalShortcuts portal.");
 
+    let tray_busy = Arc::new(AtomicBool::new(false));
+    let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
             Some(event) = hotkey_rx.recv() => engine.handle_hotkey(event).await,
             Some(event) = app_rx.recv() => {
-                if let Some(status) = UiStatus::from_app_event(&event) {
-                    if let Some(tray) = &tray {
+                if let Some(ref tray) = tray {
+                    if let Some(status) = UiStatus::from_app_event(&event) {
                         tray.update(status);
                     }
                 }
                 print_app_event(event);
             }
             _ = tray_poll.tick() => {
-                if let Some(status_tray) = &tray {
-                    while let Some(command) = status_tray.try_recv_command() {
+                if let Some(ref tray) = tray {
+                    while let Some(command) = tray.try_recv_command() {
                         match command {
-                            UiCommand::StartTestRecording => run_tray_test_recording(&tray).await,
-                            UiCommand::OpenLogs => open_tray_logs(&tray),
-                            UiCommand::RunDiagnostics => run_tray_diagnostics(&tray).await,
+                            UiCommand::StartTestRecording => {
+                                spawn_tray_task(tray, &tray_busy, run_tray_test_recording);
+                            }
+                            UiCommand::OpenLogs => open_tray_logs(tray),
+                            UiCommand::RunDiagnostics => {
+                                spawn_tray_task(tray, &tray_busy, run_tray_diagnostics);
+                            }
                             UiCommand::Quit => return Ok(()),
                         }
                     }
@@ -203,110 +142,17 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
-impl TryFrom<ServerArgs> for transcriber::ServeConfig {
-    type Error = anyhow::Error;
-
-    fn try_from(value: ServerArgs) -> Result<Self> {
-        if !value.bind.ip().is_loopback() {
-            anyhow::bail!(
-                "server must bind to a loopback address (e.g. 127.0.0.1); {} is not allowed",
-                value.bind.ip()
-            );
-        }
-        Ok(Self {
-            bind: value.bind,
-            codex_upload_limit_bytes: mib_to_bytes(value.codex_upload_limit_mib)?,
-            client_upload_limit_bytes: mib_to_bytes(value.client_upload_limit_mib)?,
-            chunk_seconds: value.chunk_seconds,
-            token_env: value.token_env,
-            ffmpeg_binary: value.ffmpeg_binary,
-            no_auth: value.no_auth,
-        })
-    }
-}
-
-impl TryFrom<TranscriberProbeLimitsArgs> for transcriber::ProbeLimitsConfig {
-    type Error = anyhow::Error;
-
-    fn try_from(value: TranscriberProbeLimitsArgs) -> Result<Self> {
-        Ok(Self {
-            file: value.file,
-            codex_upload_limit_bytes: mib_to_bytes(value.codex_upload_limit_mib)?,
-            chunk_seconds: value.chunk_seconds,
-            max_chunks: value.max_chunks,
-            include_oversized: value.include_oversized,
-            ffmpeg_binary: value.ffmpeg_binary,
-        })
-    }
-}
-
-fn mib_to_bytes(mib: u64) -> Result<u64> {
-    let bytes = mib
-        .checked_mul(1024 * 1024)
-        .context("MiB value is too large")?;
-    anyhow::ensure!(bytes > 0, "MiB value must be greater than zero");
-    Ok(bytes)
-}
-
-fn init_tracing() -> Result<()> {
-    let log_path = ensure_log_file()?;
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        "codex_voice_app=info,codex_voice_audio=info,codex_voice_platform=info,info".into()
-    });
-
-    tracing_subscriber::fmt().with_env_filter(filter).init();
-
-    append_log_line(format!("logging initialized: {}", log_path.display()))?;
-    Ok(())
-}
-
-fn log_file_path() -> PathBuf {
-    dirs::state_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("codex-voice")
-        .join("codex-voice.log")
-}
-
-fn append_log_line(message: impl AsRef<str>) -> Result<()> {
-    let path = ensure_log_file()?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut file = open_log_append(&path)?;
-    writeln!(file, "{timestamp} {}", message.as_ref())
-        .with_context(|| format!("failed to write log file {}", path.display()))?;
-    Ok(())
-}
-
-fn ensure_log_file() -> Result<PathBuf> {
-    let path = log_file_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create log directory {}", parent.display()))?;
-    }
-    open_log_append(&path)?;
-    Ok(path)
-}
-
-fn open_log_append(path: &PathBuf) -> Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("failed to open log file {}", path.display()))
-}
-
 #[cfg(target_os = "windows")]
 async fn run() -> Result<()> {
-    let audio = Arc::new(CpalWavRecorder::new());
-    let auth = CodexAuthService::new()?;
-    let transcription = Arc::new(CodexTranscriptionClient::new(auth)?);
-    let injector = Arc::new(WindowsTextInjector::new());
-    let (app_tx, mut app_rx) = mpsc::channel(64);
-    let (hotkey_tx, mut hotkey_rx) = mpsc::channel(16);
-    WindowsHotkeyService::new().start(hotkey_tx)?;
-    let mut engine = DictationEngine::new(audio, transcription, injector, app_tx);
+    let DictationApp {
+        mut engine,
+        mut app_rx,
+        mut hotkey_rx,
+    } = DictationApp::new(
+        Arc::new(WindowsTextInjector::new()),
+        codex_voice_platform::WindowsHotkeyService::new(),
+    )
+    .await?;
     println!("Codex Voice is running. Hold Control-M to dictate. Paste insertion uses clipboard plus SendInput and may be blocked for elevated target apps.");
 
     loop {
@@ -324,295 +170,11 @@ async fn run() -> Result<()> {
     anyhow::bail!("this milestone implements Linux and Windows only")
 }
 
-async fn doctor_audio(args: AudioDoctor) -> Result<()> {
-    println!("starting audio capture for {} second(s)...", args.seconds);
-    println!("recording...");
-    let (recording, size) = capture_audio_sample(Duration::from_secs(args.seconds)).await?;
-    println!("stopping audio capture...");
-    println!("path: {}", recording.path.display());
-    println!("duration_ms: {}", recording.duration.as_millis());
-    println!("content_type: {}", recording.content_type);
-    println!("bytes: {size}");
-    if !args.keep {
-        std::fs::remove_file(&recording.path)
-            .with_context(|| format!("failed to delete {}", recording.path.display()))?;
-        println!("deleted: true");
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-async fn run_tray_test_recording(tray: &Option<StatusTray>) {
-    if let Err(error) = run_test_recording(tray).await {
-        tracing::warn!(%error, "tray test recording failed");
-    }
-}
-
-#[cfg(target_os = "linux")]
-async fn run_test_recording(tray: &Option<StatusTray>) -> Result<()> {
-    set_tray_status(
-        tray,
-        UiStatus::new(DictationState::Recording, "Running test recording..."),
-    );
-    tracing::info!("starting tray test recording");
-    append_log_line("starting test recording")?;
-    let result = capture_audio_sample(Duration::from_secs(2)).await;
-
-    match result {
-        Ok((recording, size)) => {
-            let duration_ms = recording.duration.as_millis();
-            let cleanup = std::fs::remove_file(&recording.path)
-                .with_context(|| format!("failed to delete {}", recording.path.display()));
-            if let Err(error) = cleanup {
-                set_test_recording_error(tray, &error);
-                return Err(error);
-            }
-            let message = format!("Test recording ok: {} ms, {size} bytes", duration_ms);
-            tracing::info!(duration_ms, bytes = size, "test recording ok");
-            if let Err(error) =
-                append_log_line(format!("test recording ok: {duration_ms} ms, {size} bytes"))
-            {
-                set_test_recording_error(tray, &error);
-                return Err(error);
-            }
-            set_tray_status(tray, UiStatus::new(DictationState::Idle, message));
-            Ok(())
-        }
-        Err(error) => {
-            set_test_recording_error(tray, &error);
-            Err(error)
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn set_test_recording_error(tray: &Option<StatusTray>, error: &anyhow::Error) {
-    let message = format!("Test recording failed: {error:#}");
-    tracing::warn!(error = %error, "test recording failed");
-    let _ = append_log_line(format!("test recording failed: {error:#}"));
-    set_tray_status(
-        tray,
-        UiStatus::new(DictationState::Error(error.to_string()), message),
-    );
-}
-
-async fn capture_audio_sample(duration: Duration) -> Result<(RecordedAudio, u64)> {
-    let recorder = CpalWavRecorder::new();
-    recorder
-        .start()
-        .await
-        .context("failed to start audio capture")?;
-    tokio::time::sleep(duration).await;
-    let recording = recorder
-        .stop()
-        .await
-        .context("failed to stop audio capture")?
-        .context("audio recorder returned no recording")?;
-    let size = match std::fs::metadata(&recording.path) {
-        Ok(metadata) => metadata.len(),
-        Err(error) => {
-            let _ = std::fs::remove_file(&recording.path);
-            return Err(error)
-                .with_context(|| format!("failed to stat {}", recording.path.display()));
-        }
-    };
-    Ok((recording, size))
-}
-
-#[cfg(target_os = "linux")]
-fn set_tray_status(tray: &Option<StatusTray>, status: UiStatus) {
-    if let Some(tray) = tray {
-        tray.update(status);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn open_logs() -> Result<()> {
-    let path = ensure_log_file()?;
-    tracing::info!(path = %path.display(), "opening log file");
-    append_log_line(format!("opening log file: {}", path.display()))?;
-    ProcessCommand::new("xdg-open")
-        .arg(&path)
-        .spawn()
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn open_tray_logs(tray: &Option<StatusTray>) {
-    if let Err(error) = open_logs() {
-        tracing::warn!(%error, "failed to open logs");
-        set_tray_error(tray, format!("Open logs failed: {error:#}"), error);
-    }
-}
-
-#[cfg(target_os = "linux")]
-async fn run_tray_diagnostics(tray: &Option<StatusTray>) {
-    let _ = append_log_line("running linux portal diagnostics");
-    set_tray_status(
-        tray,
-        UiStatus::new(DictationState::Transcribing, "Running diagnostics..."),
-    );
-    match doctor_linux_portals().await {
-        Ok(()) => {
-            let _ = append_log_line("linux portal diagnostics complete");
-            set_tray_status(
-                tray,
-                UiStatus::new(DictationState::Idle, "Diagnostics complete"),
-            );
-        }
-        Err(error) => {
-            tracing::warn!(%error, "tray diagnostics failed");
-            let _ = append_log_line(format!("linux portal diagnostics failed: {error:#}"));
-            set_tray_error(tray, format!("Diagnostics failed: {error:#}"), error);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn set_tray_error(tray: &Option<StatusTray>, message: String, error: anyhow::Error) {
-    set_tray_status(
-        tray,
-        UiStatus::new(DictationState::Error(error.to_string()), message),
-    );
-}
-
-fn doctor_codex_auth() -> Result<()> {
-    let auth_service = CodexAuthService::new()?;
-    let auth = auth_service.read_or_refresh()?;
-    println!("auth_path: {}", auth_service.auth_path().display());
-    println!("access_token: present_redacted");
-    println!(
-        "account_id: {}",
-        auth.account_id
-            .as_deref()
-            .map(redact_account)
-            .unwrap_or_else(|| "absent".into())
-    );
-    Ok(())
-}
-
-async fn doctor_transcribe(file: PathBuf) -> Result<()> {
-    let duration = wav_duration(&file).unwrap_or_default();
-    let recording = codex_voice_core::RecordedAudio {
-        filename: file
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("input.wav")
-            .to_string(),
-        path: file,
-        content_type: "audio/wav".into(),
-        duration,
-    };
-    let client = CodexTranscriptionClient::new(CodexAuthService::new()?)?;
-    let transcript = client.transcribe(&recording).await?;
-    let preview: String = transcript.chars().take(80).collect();
-    println!("transcript_chars: {}", transcript.chars().count());
-    println!("preview: {}", preview.replace('\n', " "));
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-async fn doctor_hotkey() -> Result<()> {
-    let (tx, mut rx) = mpsc::channel(8);
-    LinuxHotkeyService::new().start(tx)?;
-    println!("Waiting for hotkey events. Hold and release Control-M or the keyboard dictation key after approving the KDE/Wayland GlobalShortcuts portal prompt.");
-    for _ in 0..2 {
-        let event = tokio::time::timeout(Duration::from_secs(30), rx.recv())
-            .await
-            .context("timed out waiting for hotkey event")?
-            .context("hotkey listener stopped before emitting the expected events")?;
-        println!("{event:?}");
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-async fn doctor_hotkey() -> Result<()> {
-    let (tx, mut rx) = mpsc::channel(8);
-    WindowsHotkeyService::new().start(tx)?;
-    println!("Waiting for hotkey events. Hold and release Control-M within 30 seconds.");
-    for _ in 0..2 {
-        let event = tokio::time::timeout(Duration::from_secs(30), rx.recv())
-            .await
-            .context("timed out waiting for hotkey event")?
-            .context("hotkey listener stopped before emitting the expected events")?;
-        println!("{event:?}");
-    }
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-async fn doctor_hotkey() -> Result<()> {
-    anyhow::bail!("hotkey diagnostics are implemented for Linux and Windows only")
-}
-
-#[cfg(target_os = "linux")]
-async fn doctor_paste(text: String) -> Result<()> {
-    let report = LinuxTextInjector::new().insert_text(&text).await?;
-    println!("method: {:?}", report.method);
-    println!("restored_clipboard: {}", report.restored_clipboard);
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-async fn doctor_paste(text: String) -> Result<()> {
-    let report = WindowsTextInjector::new().insert_text(&text).await?;
-    println!("method: {:?}", report.method);
-    println!("restored_clipboard: {}", report.restored_clipboard);
-    println!(
-        "note: SendInput may be blocked when targeting elevated apps from a non-elevated process"
-    );
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-async fn doctor_paste(_text: String) -> Result<()> {
-    anyhow::bail!("paste diagnostics are implemented for Linux and Windows only")
-}
-
-#[cfg(target_os = "linux")]
-async fn doctor_linux_portals() -> Result<()> {
-    println!(
-        "XDG_SESSION_TYPE: {}",
-        std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unset".into())
-    );
-    println!(
-        "XDG_CURRENT_DESKTOP: {}",
-        std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unset".into())
-    );
-    for status in LinuxPermissionService::new().check().await? {
-        println!(
-            "{:?}: available={} granted={:?} detail={}",
-            status.kind, status.available, status.granted, status.detail
-        );
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn doctor_linux_portals() -> Result<()> {
-    #[cfg(not(target_os = "windows"))]
-    anyhow::bail!("linux portal diagnostics are implemented for Linux only");
-
-    #[cfg(target_os = "windows")]
-    println!("linux portal diagnostics are not applicable on Windows");
-    #[cfg(target_os = "windows")]
-    for status in WindowsPermissionService::new().check().await? {
-        println!(
-            "{:?}: available={} granted={:?} detail={}",
-            status.kind, status.available, status.granted, status.detail
-        );
-    }
-    #[cfg(target_os = "windows")]
-    Ok(())
-}
-
 fn print_app_event(event: AppEvent) {
     match event {
         AppEvent::TranscriptReady { chars } => {
             tracing::info!(target: "codex_voice_app", chars, "transcript ready");
-            let _ = append_log_line(format!("transcript ready: {chars} chars"));
+            let _ = logging::append_log_line("transcript ready");
             println!("transcript ready: {chars} chars");
         }
         AppEvent::Inserted(report) => {
@@ -622,14 +184,12 @@ fn print_app_event(event: AppEvent) {
                 restored_clipboard = report.restored_clipboard,
                 "inserted transcript"
             );
-            let _ = append_log_line(format!(
-                "inserted transcript: method={:?} restored_clipboard={}",
-                report.method, report.restored_clipboard
-            ));
+            let _ = logging::append_log_line("inserted transcript");
             println!("inserted via {:?}", report.method);
         }
         AppEvent::Error(message) => {
             tracing::error!(target: "codex_voice_app", %message, "app event error");
+            let _ = logging::append_log_line("dictation error");
             println!("dictation error occurred; see logs for details");
         }
         other => {
@@ -639,60 +199,130 @@ fn print_app_event(event: AppEvent) {
     }
 }
 
-fn redact_account(account_id: &str) -> String {
-    let mut chars = account_id.chars();
-    let prefix: String = chars.by_ref().take(6).collect();
-    if account_id.chars().count() <= 6 {
-        "present_redacted".into()
-    } else {
-        format!("{prefix}...")
+// ---------------------------------------------------------------------------
+// Linux tray helpers
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn spawn_tray_task<F, Fut>(tray: &StatusTray, busy: &Arc<AtomicBool>, task: F)
+where
+    F: FnOnce(std::sync::mpsc::Sender<UiStatus>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    if busy
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        let status_tx = tray.status_sender();
+        let busy = busy.clone();
+        tokio::spawn(async move {
+            let _guard = TrayBusyGuard(busy);
+            task(status_tx).await;
+        });
     }
 }
 
-fn wav_duration(path: &PathBuf) -> Result<Duration> {
-    let reader = hound::WavReader::open(path)?;
-    let spec = reader.spec();
-    let samples = reader.duration();
-    Ok(Duration::from_secs_f64(
-        samples as f64 / spec.sample_rate.max(1) as f64,
-    ))
+#[cfg(target_os = "linux")]
+struct TrayBusyGuard(Arc<AtomicBool>);
+
+#[cfg(target_os = "linux")]
+impl Drop for TrayBusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn server_args(bind: SocketAddr) -> ServerArgs {
-        ServerArgs {
-            bind,
-            codex_upload_limit_mib: 24,
-            client_upload_limit_mib: 512,
-            chunk_seconds: 600,
-            token_env: "CODEX_VOICE_TRANSCRIBER_TOKEN".to_string(),
-            ffmpeg_binary: "ffmpeg".to_string(),
-            no_auth: false,
+#[cfg(target_os = "linux")]
+async fn run_tray_test_recording(status_tx: std::sync::mpsc::Sender<UiStatus>) {
+    set_tray_status(
+        &status_tx,
+        UiStatus::new(DictationState::Recording, "Running test recording..."),
+    );
+    match run_test_recording().await {
+        Ok(message) => {
+            set_tray_status(&status_tx, UiStatus::new(DictationState::Idle, message));
+        }
+        Err(error) => {
+            tracing::warn!(%error, "tray test recording failed");
+            let _ = logging::append_log_line(format!("test recording failed: {error:#}"));
+            set_tray_error(&status_tx, "Test recording failed", &error);
         }
     }
+}
 
-    #[test]
-    fn server_config_rejects_non_loopback_bind() {
-        let bind = "0.0.0.0:3845".parse().expect("socket addr");
+#[cfg(target_os = "linux")]
+async fn run_test_recording() -> Result<String> {
+    tracing::info!("starting tray test recording");
+    logging::append_log_line("starting test recording")?;
+    let (recording, size) = doctor::capture_audio_sample(Duration::from_secs(2)).await?;
+    let duration_ms = recording.duration.as_millis();
+    tokio::fs::remove_file(&recording.path)
+        .await
+        .with_context(|| format!("failed to delete {}", recording.path.display()))?;
+    let message = format!("Test recording ok: {} ms, {size} bytes", duration_ms);
+    tracing::info!(duration_ms, bytes = size, "test recording ok");
+    logging::append_log_line(format!("test recording ok: {duration_ms} ms, {size} bytes"))?;
+    Ok(message)
+}
 
-        let error = transcriber::ServeConfig::try_from(server_args(bind))
-            .expect_err("non-loopback bind should fail");
+#[cfg(target_os = "linux")]
+fn set_tray_status(status_tx: &std::sync::mpsc::Sender<UiStatus>, status: UiStatus) {
+    let _ = status_tx.send(status);
+}
 
-        assert!(error
-            .to_string()
-            .contains("server must bind to a loopback address"));
+#[cfg(target_os = "linux")]
+fn open_logs() -> Result<()> {
+    let path = logging::ensure_log_file()?;
+    tracing::info!(path = %path.display(), "opening log file");
+    logging::append_log_line(format!("opening log file: {}", path.display()))?;
+    std::process::Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn open_tray_logs(tray: &StatusTray) {
+    if let Err(error) = open_logs() {
+        tracing::warn!(%error, "failed to open logs");
+        let status_tx = tray.status_sender();
+        set_tray_error(&status_tx, "Open logs failed", &error);
     }
+}
 
-    #[test]
-    fn server_config_accepts_loopback_bind() {
-        let bind = "127.0.0.1:3845".parse().expect("socket addr");
+#[cfg(target_os = "linux")]
+fn set_tray_error(
+    status_tx: &std::sync::mpsc::Sender<UiStatus>,
+    prefix: &str,
+    error: &anyhow::Error,
+) {
+    let message = format!("{prefix}: {error:#}");
+    set_tray_status(
+        status_tx,
+        UiStatus::new(DictationState::Error(error.to_string()), message),
+    );
+}
 
-        let config = transcriber::ServeConfig::try_from(server_args(bind))
-            .expect("loopback bind should succeed");
-
-        assert_eq!(config.bind, bind);
+#[cfg(target_os = "linux")]
+async fn run_tray_diagnostics(status_tx: std::sync::mpsc::Sender<UiStatus>) {
+    let _ = logging::append_log_line("running portal diagnostics");
+    set_tray_status(
+        &status_tx,
+        UiStatus::new(DictationState::Transcribing, "Running diagnostics..."),
+    );
+    match doctor::doctor_portals().await {
+        Ok(()) => {
+            let _ = logging::append_log_line("portal diagnostics complete");
+            set_tray_status(
+                &status_tx,
+                UiStatus::new(DictationState::Idle, "Diagnostics complete"),
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "tray diagnostics failed");
+            let _ = logging::append_log_line(format!("portal diagnostics failed: {error:#}"));
+            set_tray_error(&status_tx, "Diagnostics failed", &error);
+        }
     }
 }

@@ -1,6 +1,6 @@
 use codex_voice_core::{SpeechClient, SpeechError, SpeechRequest, SpeechResult, SynthesizedSpeech};
 
-use crate::config::{ProviderKind, ResolvedPersona, ResolvedTtsConfig};
+use crate::config::{FallbackPolicy, ProviderKind, ResolvedPersona, ResolvedTtsConfig};
 use crate::elevenlabs::ElevenLabsSpeechClient;
 use crate::google::GoogleSpeechClient;
 
@@ -77,15 +77,21 @@ impl ConfiguredSpeechClient {
     pub fn has_any_provider(&self) -> bool {
         self.google.is_some() || self.elevenlabs.is_some()
     }
-}
 
-#[async_trait::async_trait]
-impl SpeechClient for ConfiguredSpeechClient {
-    async fn synthesize(&self, request: &SpeechRequest) -> SpeechResult<SynthesizedSpeech> {
-        let (primary_provider, persona, native_voice) = self.resolve_request(request)?;
+    /// Access the resolved TTS configuration.
+    pub fn config(&self) -> &ResolvedTtsConfig {
+        &self.config
+    }
 
-        // Try primary provider first.
-        let primary_result = match primary_provider {
+    /// Dispatch synthesis to the requested provider.
+    async fn synthesize_with(
+        &self,
+        provider: ProviderKind,
+        request: &SpeechRequest,
+        persona: Option<&ResolvedPersona>,
+        native_voice: Option<&str>,
+    ) -> SpeechResult<SynthesizedSpeech> {
+        match provider {
             ProviderKind::Google => {
                 if let Some(client) = &self.google {
                     client.synthesize(request, persona, native_voice).await
@@ -102,7 +108,18 @@ impl SpeechClient for ConfiguredSpeechClient {
                     ))
                 }
             }
-        };
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SpeechClient for ConfiguredSpeechClient {
+    async fn synthesize(&self, request: &SpeechRequest) -> SpeechResult<SynthesizedSpeech> {
+        let (primary_provider, persona, native_voice) = self.resolve_request(request)?;
+
+        let primary_result = self
+            .synthesize_with(primary_provider, request, persona, native_voice)
+            .await;
 
         let primary_err = match primary_result {
             Ok(speech) => return Ok(speech),
@@ -114,34 +131,16 @@ impl SpeechClient for ConfiguredSpeechClient {
 
         // Fallback: try the other provider if persona allows it.
         if let Some(persona) = persona {
-            if persona.fallback_policy == "preserve-persona" {
+            if persona.fallback_policy == FallbackPolicy::PreservePersona {
                 let fallback_provider = match primary_provider {
                     ProviderKind::Google => ProviderKind::ElevenLabs,
                     ProviderKind::ElevenLabs => ProviderKind::Google,
                 };
 
-                let fallback_result = match fallback_provider {
-                    ProviderKind::Google => {
-                        if let Some(client) = &self.google {
-                            client.synthesize(request, Some(persona), None).await
-                        } else {
-                            Err(SpeechError::Unavailable(
-                                "Google TTS not configured for fallback".into(),
-                            ))
-                        }
-                    }
-                    ProviderKind::ElevenLabs => {
-                        if let Some(client) = &self.elevenlabs {
-                            client.synthesize(request, Some(persona), None).await
-                        } else {
-                            Err(SpeechError::Unavailable(
-                                "ElevenLabs TTS not configured for fallback".into(),
-                            ))
-                        }
-                    }
-                };
-
-                match fallback_result {
+                match self
+                    .synthesize_with(fallback_provider, request, Some(persona), None)
+                    .await
+                {
                     Ok(speech) => return Ok(speech),
                     Err(e) => {
                         tracing::warn!(%e, provider = ?fallback_provider, "fallback TTS provider also failed");

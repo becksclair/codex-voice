@@ -110,6 +110,9 @@ impl LinuxHotkeyService {
 }
 
 impl HotkeyService for LinuxHotkeyService {
+    /// Spawns an OS thread and builds a dedicated `current_thread` Tokio runtime
+    /// to run the GlobalShortcuts portal listener.  Callers that are already
+    /// inside a Tokio runtime should expect this side effect.
     fn start(&self, events: mpsc::Sender<HotkeyEvent>) -> PlatformResult<()> {
         if env::var("XDG_SESSION_TYPE").unwrap_or_default() != "wayland" {
             return Err(PlatformError::Unavailable(

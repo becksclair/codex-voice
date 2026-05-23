@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+bytes.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

@@ -7,7 +7,27 @@ cargo build --release -p codex-voice-app --bin codex-voice
 sudo install -Dm755 target/release/codex-voice /usr/local/bin/codex-voice
 
 install -Dm644 packaging/systemd/user/codex-voice.service "$HOME/.config/systemd/user/codex-voice.service"
-install -Dm644 packaging/systemd/user/codex-voice-server.service "$HOME/.config/systemd/user/codex-voice-server.service"
+
+# Detect Tailscale IP and configure the server to bind to it when available.
+TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
+if [ -n "$TAILSCALE_IP" ]; then
+    BIND_ADDR="${TAILSCALE_IP}:3845"
+    sed "s|ExecStart=.*|ExecStart=/usr/local/bin/codex-voice-wrapper server --bind ${BIND_ADDR}|" \
+        packaging/systemd/user/codex-voice-server.service \
+        > "$HOME/.config/systemd/user/codex-voice-server.service"
+    echo "Configured codex-voice-server to bind on Tailscale address: ${BIND_ADDR}"
+else
+    install -Dm644 packaging/systemd/user/codex-voice-server.service "$HOME/.config/systemd/user/codex-voice-server.service"
+    echo "Tailscale not available; codex-voice-server will bind on 127.0.0.1:3845"
+fi
+
+# Remove legacy socat proxy service if it exists.
+if [ -f "$HOME/.config/systemd/user/codex-voice-proxy.service" ]; then
+    systemctl --user stop codex-voice-proxy.service 2>/dev/null || true
+    systemctl --user disable codex-voice-proxy.service 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/codex-voice-proxy.service"
+    echo "Removed legacy codex-voice-proxy.service"
+fi
 
 systemctl --user daemon-reload
 systemctl --user enable --now codex-voice-server.service

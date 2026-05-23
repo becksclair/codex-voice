@@ -2,11 +2,12 @@ use crate::{
     AudioRecorder, HotkeyEvent, InsertReport, RecordedAudio, TextInjector, TranscriptionClient,
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
+use tokio::fs as tokio_fs;
 use tokio::sync::mpsc;
 
 const MIN_RECORDING: Duration = Duration::from_millis(120);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DictationState {
     Idle,
     Recording,
@@ -84,7 +85,7 @@ where
                 self.process_recording(recording).await
             }
             Ok(Some(recording)) => {
-                let _ = std::fs::remove_file(&recording.path);
+                let _ = tokio_fs::remove_file(&recording.path).await;
                 let _ = self
                     .events
                     .send(AppEvent::RecordingDiscarded {
@@ -99,10 +100,10 @@ where
     }
 
     async fn process_recording(&mut self, recording: RecordedAudio) {
-        let path = recording.path.clone();
         self.set_state(DictationState::Transcribing).await;
         let transcript = self.transcription.transcribe(&recording).await;
-        let _ = std::fs::remove_file(&path);
+        let path = recording.path;
+        let _ = tokio_fs::remove_file(&path).await;
         let _ = self.events.send(AppEvent::RecordingDeleted { path }).await;
 
         match transcript {
@@ -129,8 +130,7 @@ where
     }
 
     async fn fail(&mut self, message: String) {
-        let _ = self.events.send(AppEvent::Error(message.clone())).await;
-        self.set_state(DictationState::Error(message)).await;
+        let _ = self.events.send(AppEvent::Error(message)).await;
         self.set_state(DictationState::Idle).await;
     }
 }
@@ -247,7 +247,7 @@ mod tests {
 
         let mut saw_error = false;
         while let Ok(event) = rx.try_recv() {
-            saw_error |= matches!(event, AppEvent::StateChanged(DictationState::Error(_)));
+            saw_error |= matches!(event, AppEvent::Error(_));
         }
         assert!(saw_error);
         assert_eq!(engine.state(), &DictationState::Idle);

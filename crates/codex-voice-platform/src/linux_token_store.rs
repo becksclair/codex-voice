@@ -1,10 +1,14 @@
+use codex_voice_core::{fs::set_owner_only_directory_permissions, PlatformError, PlatformResult};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fmt::Display,
+    fs, io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static TOKEN_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedPortalToken {
@@ -20,10 +24,16 @@ pub struct PortalTokenStore {
     path: PathBuf,
 }
 
+/// Wrap an error with context into a `PlatformError::Message`.
+fn ctx(context: impl Into<String>, source: impl Display) -> PlatformError {
+    PlatformError::Message(format!("{}: {source}", context.into()))
+}
+
 impl PortalTokenStore {
-    pub fn new() -> io::Result<Self> {
+    pub fn new() -> PlatformResult<Self> {
         Ok(Self {
-            path: portal_tokens_path()?,
+            path: portal_tokens_path()
+                .map_err(|e| ctx("failed to resolve portal token path", e))?,
         })
     }
 
@@ -36,51 +46,40 @@ impl PortalTokenStore {
         &self.path
     }
 
-    pub fn load(&self) -> io::Result<Option<PersistedPortalToken>> {
+    pub fn load(&self) -> PlatformResult<Option<PersistedPortalToken>> {
         match fs::read_to_string(&self.path) {
             Ok(raw) => {
-                let parsed =
-                    serde_json::from_str::<PersistedPortalToken>(&raw).map_err(|error| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "failed to parse persisted portal token file {}: {error}",
-                                self.path.display()
-                            ),
-                        )
-                    })?;
+                let parsed = serde_json::from_str::<PersistedPortalToken>(&raw).map_err(|e| {
+                    ctx(
+                        format!(
+                            "failed to parse persisted portal token file {}",
+                            self.path.display()
+                        ),
+                        e,
+                    )
+                })?;
                 Ok(Some(parsed))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
+            Err(error) => Err(ctx(
+                format!("failed to read portal token file {}", self.path.display()),
+                error,
+            )),
         }
     }
 
-    pub fn save(&self, record: &PersistedPortalToken) -> io::Result<()> {
+    pub fn save(&self, record: &PersistedPortalToken) -> PlatformResult<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-            set_owner_only_directory_permissions(parent)?;
+            fs::create_dir_all(parent).map_err(|e| ctx("failed to create portal token dir", e))?;
+            set_owner_only_directory_permissions(parent)
+                .map_err(|e| ctx("failed to restrict portal token dir", e))?;
         }
 
-        let payload = serde_json::to_vec_pretty(record).map_err(io::Error::other)?;
-        let tmp_path = self
-            .path
-            .with_extension(format!("{}.tmp", std::process::id()));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-
-            options.mode(0o600);
-        }
-        let mut tmp_file = options.open(&tmp_path)?;
-        tmp_file.write_all(&payload)?;
-        tmp_file.sync_all()?;
-        drop(tmp_file);
-        set_owner_only_file_permissions(&tmp_path)?;
-        fs::rename(&tmp_path, &self.path)?;
-        set_owner_only_file_permissions(&self.path)?;
+        let payload = serde_json::to_vec_pretty(record)
+            .map_err(|e| ctx("failed to serialize portal token", e))?;
+        let tmp_path = self.path.with_extension(format!("{}.tmp", temp_suffix()));
+        codex_voice_core::fs::write_private_file_atomic(&self.path, &tmp_path, &payload)
+            .map_err(|e| ctx("failed to write portal token file", e))?;
         Ok(())
     }
 }
@@ -117,6 +116,11 @@ fn portal_tokens_path() -> io::Result<PathBuf> {
     Ok(base.join("codex-voice").join("portal-tokens.json"))
 }
 
+fn temp_suffix() -> String {
+    let counter = TOKEN_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{counter}", std::process::id())
+}
+
 fn compositor_hint() -> Option<String> {
     let xdg_current_desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
     let desktop_session = std::env::var("DESKTOP_SESSION").ok();
@@ -132,28 +136,6 @@ fn compositor_hint() -> Option<String> {
         (None, Some(session), _) => Some(session),
         _ => None,
     }
-}
-
-fn set_owner_only_directory_permissions(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-
-    Ok(())
-}
-
-fn set_owner_only_file_permissions(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

@@ -41,25 +41,23 @@ impl ElevenLabsSpeechClient {
 
         let model_id = resolve_model_id(&request.model_hint, &self.config.model_id)?;
 
-        let mut voice_settings = persona
-            .and_then(|p| p.elevenlabs.as_ref())
-            .map(|e| {
-                serde_json::json!({
-                    "stability": e.voice_settings.stability,
-                    "similarity_boost": e.voice_settings.similarity_boost,
-                    "style": e.voice_settings.style,
-                    "use_speaker_boost": e.voice_settings.use_speaker_boost,
-                    "speed": e.voice_settings.speed,
-                })
-            })
-            .unwrap_or_else(|| serde_json::json!({}));
+        let persona_settings = persona.and_then(|p| p.elevenlabs.as_ref());
+        let speed = request
+            .speed
+            .or_else(|| persona_settings.map(|e| e.voice_settings.speed as f32))
+            .unwrap_or(1.0);
 
-        // Override speed from request if present
-        if let Some(speed) = request.speed {
-            if let Some(obj) = voice_settings.as_object_mut() {
-                obj.insert("speed".to_string(), serde_json::json!(speed));
-            }
-        }
+        let voice_settings = if let Some(e) = persona_settings {
+            serde_json::json!({
+                "stability": e.voice_settings.stability,
+                "similarity_boost": e.voice_settings.similarity_boost,
+                "style": e.voice_settings.style,
+                "use_speaker_boost": e.voice_settings.use_speaker_boost,
+                "speed": speed,
+            })
+        } else {
+            serde_json::json!({ "speed": speed })
+        };
 
         let body = serde_json::json!({
             "text": sanitized,
@@ -103,13 +101,9 @@ impl ElevenLabsSpeechClient {
             });
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| {
-                SpeechError::Request(format!("failed to read ElevenLabs audio bytes: {}", e))
-            })?
-            .to_vec();
+        let bytes = response.bytes().await.map_err(|e| {
+            SpeechError::Request(format!("failed to read ElevenLabs audio bytes: {}", e))
+        })?;
 
         if bytes.is_empty() {
             return Err(SpeechError::Request(

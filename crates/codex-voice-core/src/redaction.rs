@@ -2,6 +2,11 @@
 /// Uses an index-based scan so it always advances past each replacement.
 pub fn redact_bearer_tokens(text: &str) -> String {
     let mut result = text.to_string();
+    redact_bearer_tokens_in_place(&mut result);
+    result
+}
+
+fn redact_bearer_tokens_in_place(result: &mut String) {
     let prefix = "Bearer ";
     let mut pos = 0;
     while let Some(found) = result[pos..].find(prefix) {
@@ -18,13 +23,17 @@ pub fn redact_bearer_tokens(text: &str) -> String {
             pos = token_start + 1;
         }
     }
-    result
 }
 
 /// Redact JWTs in text by replacing the full JWT with `[jwt_redacted]`.
 /// Uses an index-based scan so it always advances past each match, including malformed ones.
 pub fn redact_jwts(text: &str) -> String {
     let mut result = text.to_string();
+    redact_jwts_in_place(&mut result);
+    result
+}
+
+fn redact_jwts_in_place(result: &mut String) {
     let mut pos = 0;
     while let Some(found) = result[pos..].find("eyJ") {
         let start = pos + found;
@@ -43,6 +52,21 @@ pub fn redact_jwts(text: &str) -> String {
         }
         pos = start + 1;
     }
+}
+
+/// Redact sensitive tokens and auth-related strings from diagnostic text.
+///
+/// Replaces `access_token`, `Authorization`, Bearer tokens, and JWTs.
+/// Does NOT truncate; let callers handle length limits since they vary by domain.
+pub fn redact_diagnostics(text: &str) -> String {
+    let mut result = text.to_string();
+    // Replace literal keywords first so the in-place scanners see the redacted forms.
+    result = result.replace("access_token", "access_token(redacted)");
+    result = result.replace("Authorization", "Authorization(redacted)");
+    // Scan in reverse order so each replacement shortens the string and avoids
+    // repeated memmoves of already-processed trailing bytes.
+    redact_jwts_in_place(&mut result);
+    redact_bearer_tokens_in_place(&mut result);
     result
 }
 
@@ -90,5 +114,20 @@ mod tests {
     fn redacts_multiple_jwts() {
         let input = "eyJhbGci.a.b eyJhbGci.c.d";
         assert_eq!(redact_jwts(input), "[jwt_redacted] [jwt_redacted]");
+    }
+
+    #[test]
+    fn redact_diagnostics_strips_access_token_and_auth() {
+        let input = "access_token=secret&Authorization=Bearer abc123";
+        assert_eq!(
+            redact_diagnostics(input),
+            "access_token(redacted)=secret&Authorization(redacted)=Bearer [redacted]"
+        );
+    }
+
+    #[test]
+    fn redact_diagnostics_redacts_jwt() {
+        let input = "token=eyJhbGci.a.b";
+        assert_eq!(redact_diagnostics(input), "token=[jwt_redacted]");
     }
 }

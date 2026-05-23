@@ -40,6 +40,10 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"
 - Diagnostics may print token presence, redacted account IDs, transcript length, and short previews only.
 - Temp WAV files must be deleted unless the user explicitly asks to keep a diagnostic recording.
 
+## Deployment Context
+
+- This project is private and local-only, accessed behind Tailscale. The local transcriber service bearer token is for basic request identification within the trusted network, not for strong authentication.
+
 ## JIT Index
 
 ### Package Structure
@@ -49,6 +53,7 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"
 - Audio capture: `crates/codex-voice-audio/` -> [see AGENTS.md](crates/codex-voice-audio/AGENTS.md)
 - Codex auth/transcription: `crates/codex-voice-codex/` -> [see AGENTS.md](crates/codex-voice-codex/AGENTS.md)
 - TTS (Google Gemini + ElevenLabs): `crates/codex-voice-tts/` -> [see AGENTS.md](crates/codex-voice-tts/AGENTS.md)
+- Transcriber service/client/discovery: `crates/codex-voice-transcriber/` -> [see AGENTS.md](crates/codex-voice-transcriber/AGENTS.md)
 - Platform adapters: `crates/codex-voice-platform/` -> [see AGENTS.md](crates/codex-voice-platform/AGENTS.md)
 - UI placeholder: `crates/codex-voice-ui/` -> [see AGENTS.md](crates/codex-voice-ui/AGENTS.md)
 - Architecture plan: `docs/execplan-rust-native-cross-platform.md`
@@ -60,7 +65,7 @@ rg -n "DictationEngine|HotkeyEvent|TextInjector|AudioRecorder|TranscriptionClien
 rg -n "doctor|Parser|Subcommand" crates/codex-voice-app/src
 rg -n "cpal|WavWriter|RecordedAudio" crates/codex-voice-audio/src
 rg -n "auth|transcribe|TRANSCRIBE_URL|account/read" crates/codex-voice-codex/src
-rg -n "tts|speech|synthesize|ProviderKind|ReadAloudConfig" crates/codex-voice-tts/src
+rg -n "tts|speech|synthesize|ProviderKind|FallbackPolicy|ReadAloudConfig" crates/codex-voice-tts/src
 rg -n "GlobalShortcuts|RemoteDesktop|Clipboard|PortalTokenStore|PortalPaste" crates/codex-voice-platform/src
 find crates -name '*test*' -o -name '*.rs'
 ```

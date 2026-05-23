@@ -21,23 +21,38 @@ pub struct TtsDoctor {
     pub read_aloud_config: Option<PathBuf>,
 }
 
-pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
-    let config_path = match args.read_aloud_config {
+/// Load TTS configuration and build a configured speech client.
+///
+/// Resolves the config path (explicit or default), loads the config,
+/// creates the client, and verifies that at least one provider is usable.
+pub fn load_speech_client(path: Option<PathBuf>) -> Result<ConfiguredSpeechClient> {
+    let config_path = match path {
         Some(p) => p,
         None => ReadAloudConfigLoader::default_path()
             .context("failed to resolve default read-aloud config path")?,
     };
 
-    println!("config_path: {}", config_path.display());
+    let loader = ReadAloudConfigLoader::new(config_path);
+    let config = loader.load().context("failed to load read-aloud config")?;
+    let client = ConfiguredSpeechClient::try_new(config)
+        .context("failed to create TTS client from config")?;
+    if !client.has_any_provider() {
+        return Err(anyhow::anyhow!(
+            "TTS config parsed but no usable provider is configured"
+        ));
+    }
+    Ok(client)
+}
 
-    let loader = ReadAloudConfigLoader::new(config_path.clone());
-    let config = match loader.load() {
-        Ok(c) => c,
-        Err(e) => {
-            println!("config_load: failed ({e})");
-            return Err(anyhow::anyhow!("failed to load TTS config: {e}"));
-        }
-    };
+pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
+    let client = load_speech_client(args.read_aloud_config.clone())?;
+    let config = client.config();
+
+    if let Some(ref path) = args.read_aloud_config {
+        println!("config_path: {}", path.display());
+    } else if let Ok(default) = ReadAloudConfigLoader::default_path() {
+        println!("config_path: {}", default.display());
+    }
 
     println!("config_load: ok");
     println!("default_provider: {:?}", config.default_provider);
@@ -54,9 +69,6 @@ pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
         return Ok(());
     };
 
-    let client = ConfiguredSpeechClient::try_new(config)
-        .context("failed to create TTS client from config")?;
-
     let format = match args.response_format.as_deref() {
         None | Some("") => SpeechFormat::Mp3,
         Some(format) => SpeechFormat::from_openai(format).ok_or_else(|| {
@@ -67,7 +79,7 @@ pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
     };
 
     let request = SpeechRequest {
-        input: text.clone(),
+        input: text,
         model_hint: "gpt-4o-mini-tts".to_string(),
         voice_hint: args.voice,
         instructions: None,
@@ -100,12 +112,14 @@ pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
         std::env::temp_dir().join(format!("codex-voice-tts-{}.{ext}", std::process::id()))
     });
 
-    std::fs::write(&out_path, &speech.bytes)
+    tokio::fs::write(&out_path, &speech.bytes)
+        .await
         .with_context(|| format!("failed to write audio to {}", out_path.display()))?;
     println!("out_path: {}", out_path.display());
 
     if !args.keep {
-        std::fs::remove_file(&out_path)
+        tokio::fs::remove_file(&out_path)
+            .await
             .with_context(|| format!("failed to delete {}", out_path.display()))?;
         println!("deleted: true");
     } else {

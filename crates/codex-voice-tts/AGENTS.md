@@ -22,7 +22,7 @@ cargo test -p codex-voice-tts google_live_synthesize -- --ignored
 
 ## Patterns & Conventions
 
-- Config loading and persona resolution: `src/config.rs` (`ReadAloudConfigLoader`, `ResolvedTtsConfig`).
+- Config loading and persona resolution: `src/config/` (`ReadAloudConfigLoader`, `ResolvedTtsConfig`).
 - Orchestration and fallback: `src/client.rs` (`ConfiguredSpeechClient`).
 - Google Gemini client: `src/google.rs` (`GoogleSpeechClient`).
 - ElevenLabs client: `src/elevenlabs.rs` (`ElevenLabsSpeechClient`).
@@ -41,19 +41,19 @@ cargo test -p codex-voice-tts google_live_synthesize -- --ignored
 ## Touch Points / Key Files
 
 - Orchestrator: `src/client.rs`
-- Config loader: `src/config.rs`
+- Config loader: `src/config/mod.rs`
 - Google client: `src/google.rs`
 - ElevenLabs client: `src/elevenlabs.rs`
 - Format conversion: `src/convert.rs`
 - Core speech trait: `crates/codex-voice-core/src/speech.rs`
 - CLI diagnostic: `crates/codex-voice-app/src/tts.rs`
-- Service wiring: `crates/codex-voice-app/src/transcriber.rs`
+- Service wiring: `crates/codex-voice-transcriber/src/server.rs`
 
 ## JIT Index Hints
 
 ```bash
 rg -n "ConfiguredSpeechClient|SpeechClient|synthesize" src/client.rs
-rg -n "ReadAloudConfigLoader|ResolvedTtsConfig|ProviderKind|persona" src/config.rs
+rg -n "ReadAloudConfigLoader|ResolvedTtsConfig|ProviderKind|FallbackPolicy|persona" src/config/
 rg -n "GoogleSpeechClient|generateContent|responseModalities" src/google.rs
 rg -n "ElevenLabsSpeechClient|/v1/text-to-speech" src/elevenlabs.rs
 rg -n "convert_speech|pcm_to_wav|ffmpeg" src/convert.rs

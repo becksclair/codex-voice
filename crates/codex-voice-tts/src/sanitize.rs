@@ -8,22 +8,33 @@ use codex_voice_core::SpeechError;
 /// - Rejects empty input after trim
 /// - Enforces max text length
 pub fn sanitize_for_tts(input: &str, max_length: usize) -> Result<String, SpeechError> {
-    let mut cleaned = input.trim().replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = input.trim();
+    let mut cleaned = String::with_capacity(trimmed.len());
+    let mut chars = trimmed.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            // \r\n → single \n; lone \r → \n
+            cleaned.push('\n');
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+        } else if !c.is_control() || c == '\n' || c == '\t' {
+            cleaned.push(c);
+        }
+    }
 
-    cleaned.retain(|c| !c.is_control() || c == '\n' || c == '\t');
-    cleaned = cleaned.trim().to_string();
-
+    cleaned.truncate(cleaned.trim_end().len());
     if cleaned.is_empty() {
         return Err(SpeechError::Unsupported(
             "input text is empty after sanitization".into(),
         ));
     }
 
-    if cleaned.chars().count() > max_length {
+    let char_count = cleaned.chars().count();
+    if char_count > max_length {
         return Err(SpeechError::Unsupported(format!(
             "input text is {} characters, above max {}",
-            cleaned.chars().count(),
-            max_length
+            char_count, max_length
         )));
     }
 

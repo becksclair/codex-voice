@@ -119,7 +119,7 @@ installs two systemd user units, reloads systemd, enables both services, and sta
 the background server immediately:
 
 - `codex-voice.service` runs `codex-voice run` after the graphical session is available; setup enables it but does not start it immediately.
-- `codex-voice-server.service` runs `codex-voice server --no-auth` as a background user service, so any OpenAI-compatible client on the same machine can use it without configuring a bearer token.
+- `codex-voice-server.service` runs `codex-voice server` as a background user service without bearer token authentication, so any OpenAI-compatible client on the same machine can use it.
 
 ```bash
 mise run setup
@@ -173,7 +173,7 @@ Description=Codex Voice local OpenAI-compatible audio server
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/codex-voice-wrapper server --no-auth --bind 0.0.0.0:3845
+ExecStart=/usr/local/bin/codex-voice-wrapper server --bind 0.0.0.0:3845
 Restart=on-failure
 RestartSec=2
 Environment=PATH=/usr/local/bin:/usr/bin:/bin

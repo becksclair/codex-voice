@@ -59,7 +59,7 @@ pub struct SpeechRequest {
 
 #[derive(Debug, Clone)]
 pub struct SynthesizedSpeech {
-    pub bytes: Vec<u8>,
+    pub bytes: bytes::Bytes,
     pub format: SpeechFormat,
     pub mime_type: String,
 }
