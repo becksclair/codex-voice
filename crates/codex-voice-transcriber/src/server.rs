@@ -267,6 +267,8 @@ struct OpenAiSpeechRequest {
     response_format: Option<String>,
     #[serde(default)]
     speed: Option<f32>,
+    #[serde(default)]
+    rate: Option<f32>,
 }
 
 async fn speech(State(state): State<ServiceState>, request: Request) -> Result<Response, ApiError> {
@@ -305,7 +307,7 @@ async fn speech(State(state): State<ServiceState>, request: Request) -> Result<R
         voice_hint: Some(voice),
         instructions: body.instructions,
         format,
-        speed: body.speed,
+        speed: body.speed.or(body.rate),
     };
 
     let synthesized = speech_client
@@ -506,6 +508,7 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use axum::body;
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -599,6 +602,46 @@ mod tests {
             assert_eq!(&bytes[..], b"fake audio bytes");
             assert_eq!(content_type, "audio/wav");
         }
+    }
+
+    #[tokio::test]
+    async fn speech_route_accepts_openchamber_rate_alias() {
+        let speech = Arc::new(FakeSpeechBackend::default());
+        let app = service_router(test_state_with_speech_backend(1024, Some(speech.clone())));
+
+        let response = app
+            .oneshot(speech_request(
+                "/v1/audio/speech",
+                r#"{"model":"gpt-4o-mini-tts","voice":"sky","input":"hello","rate":1.2}"#,
+                Some("test-token"),
+            ))
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let seen = speech.seen.lock().expect("fake speech lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].speed, Some(1.2_f32));
+    }
+
+    #[tokio::test]
+    async fn speech_route_prefers_speed_over_rate_alias() {
+        let speech = Arc::new(FakeSpeechBackend::default());
+        let app = service_router(test_state_with_speech_backend(1024, Some(speech.clone())));
+
+        let response = app
+            .oneshot(speech_request(
+                "/v1/audio/speech",
+                r#"{"model":"gpt-4o-mini-tts","voice":"sky","input":"hello","speed":0.9,"rate":1.2}"#,
+                Some("test-token"),
+            ))
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let seen = speech.seen.lock().expect("fake speech lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].speed, Some(0.9_f32));
     }
 
     #[tokio::test]

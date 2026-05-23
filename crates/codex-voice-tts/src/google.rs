@@ -209,15 +209,61 @@ fn build_prompt(
 
 fn guess_format_from_mime(mime: &str) -> Option<SpeechFormat> {
     // Strip parameters (e.g. "audio/L16;codec=pcm;rate=24000" -> "audio/L16")
-    let base = mime.split(';').next().unwrap_or(mime).trim();
-    match base {
+    let base = mime
+        .split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
         "audio/mpeg" | "audio/mp3" => Some(SpeechFormat::Mp3),
         "audio/wav" | "audio/x-wav" | "audio/wave" => Some(SpeechFormat::Wav),
         "audio/opus" => Some(SpeechFormat::Opus),
         "audio/aac" => Some(SpeechFormat::Aac),
         "audio/flac" => Some(SpeechFormat::Flac),
-        "audio/L16" | "audio/pcm" => Some(SpeechFormat::Pcm),
+        "audio/l16" | "audio/pcm" => Some(SpeechFormat::Pcm),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guess_format_from_mime;
+    use codex_voice_core::SpeechFormat;
+
+    #[test]
+    fn guess_format_handles_lowercase_l16() {
+        assert_eq!(
+            guess_format_from_mime("audio/l16; rate=24000; channels=1"),
+            Some(SpeechFormat::Pcm)
+        );
+    }
+
+    #[test]
+    fn guess_format_handles_uppercase_l16() {
+        assert_eq!(
+            guess_format_from_mime("audio/L16;codec=pcm;rate=24000"),
+            Some(SpeechFormat::Pcm)
+        );
+    }
+
+    #[test]
+    fn guess_format_handles_wav_variants() {
+        assert_eq!(guess_format_from_mime("audio/wav"), Some(SpeechFormat::Wav));
+        assert_eq!(
+            guess_format_from_mime("audio/x-wav"),
+            Some(SpeechFormat::Wav)
+        );
+        assert_eq!(
+            guess_format_from_mime("audio/wave"),
+            Some(SpeechFormat::Wav)
+        );
+    }
+
+    #[test]
+    fn guess_format_returns_none_for_unknown() {
+        assert_eq!(guess_format_from_mime("audio/ogg"), None);
+        assert_eq!(guess_format_from_mime("text/plain"), None);
     }
 }
 
