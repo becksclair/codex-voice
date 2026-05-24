@@ -5,6 +5,7 @@ pub mod elevenlabs;
 pub mod google;
 pub mod sanitize;
 pub mod secret;
+mod speech_prep;
 
 pub use client::ConfiguredSpeechClient;
 pub use config::{ProviderKind, ReadAloudConfigLoader, ResolvedPersona, ResolvedTtsConfig};

@@ -3,10 +3,12 @@ use codex_voice_core::{SpeechClient, SpeechError, SpeechRequest, SpeechResult, S
 use crate::config::{FallbackPolicy, ProviderKind, ResolvedPersona, ResolvedTtsConfig};
 use crate::elevenlabs::ElevenLabsSpeechClient;
 use crate::google::GoogleSpeechClient;
+use crate::speech_prep::SpeechPrepClient;
 
 /// Orchestrates TTS synthesis across configured providers with persona-aware fallback.
 pub struct ConfiguredSpeechClient {
     config: ResolvedTtsConfig,
+    speech_prep: Option<SpeechPrepClient>,
     google: Option<GoogleSpeechClient>,
     elevenlabs: Option<ElevenLabsSpeechClient>,
 }
@@ -25,8 +27,15 @@ impl ConfiguredSpeechClient {
             .map(|cfg| ElevenLabsSpeechClient::new(cfg.clone()))
             .transpose()?;
 
+        let speech_prep = config
+            .speech_prep
+            .as_ref()
+            .map(|cfg| SpeechPrepClient::new(cfg.clone()))
+            .transpose()?;
+
         Ok(Self {
             config,
+            speech_prep,
             google,
             elevenlabs,
         })
@@ -115,6 +124,32 @@ impl ConfiguredSpeechClient {
 #[async_trait::async_trait]
 impl SpeechClient for ConfiguredSpeechClient {
     async fn synthesize(&self, request: &SpeechRequest) -> SpeechResult<SynthesizedSpeech> {
+        let prepared_request;
+        let request = match &self.speech_prep {
+            Some(prep) if prep.should_prepare(&request.input) => {
+                match prep.prepare(&request.input).await {
+                    Ok(Some(input)) => {
+                        tracing::info!(
+                            original_chars = request.input.chars().count(),
+                            prepared_chars = input.chars().count(),
+                            "prepared TTS text before synthesis"
+                        );
+                        prepared_request = SpeechRequest {
+                            input,
+                            ..request.clone()
+                        };
+                        &prepared_request
+                    }
+                    Ok(None) => request,
+                    Err(error) => {
+                        tracing::warn!(%error, "speech prep failed; using original TTS text");
+                        request
+                    }
+                }
+            }
+            _ => request,
+        };
+
         let (primary_provider, persona, native_voice) = self.resolve_request(request)?;
 
         let primary_result = self

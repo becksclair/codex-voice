@@ -9,6 +9,7 @@ use codex_voice_core::SpeechError;
 pub use models::{
     ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ElevenLabsVoiceSettings, FallbackPolicy,
     GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, ResolvedTtsConfig,
+    SpeechPrepConfig,
 };
 
 #[derive(Debug, Clone)]
@@ -195,5 +196,186 @@ mod tests {
         let loader = ReadAloudConfigLoader::new(path);
         let resolved = loader.load().unwrap();
         assert_eq!(resolved.max_text_length, 1000);
+    }
+
+    #[test]
+    fn provider_timeout_is_capped_to_thirty_seconds() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "google",
+                    "timeoutMs": 120000,
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_TIMEOUT_CAP" },
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var("TEST_GOOGLE_KEY_TIMEOUT_CAP", "test-google-key-value");
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+
+        assert_eq!(resolved.timeout, std::time::Duration::from_secs(30));
+        assert_eq!(
+            resolved.google.unwrap().timeout,
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn parses_google_speech_prep_config() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "google",
+                    "speechPrep": {
+                        "enabled": true,
+                        "provider": "google",
+                        "model": "google/gemini-3-flash-preview",
+                        "timeoutMs": 20000,
+                        "threshold": 700,
+                        "maxInputLength": 9000,
+                        "maxLength": 420
+                    },
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_SPEECH_PREP" },
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var("TEST_GOOGLE_KEY_SPEECH_PREP", "test-google-key-value");
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+        let speech_prep = resolved.speech_prep.expect("speech prep missing");
+
+        assert_eq!(speech_prep.provider, ProviderKind::Google);
+        assert_eq!(speech_prep.model, "google/gemini-3-flash-preview");
+        assert_eq!(speech_prep.threshold, 700);
+        assert_eq!(speech_prep.max_input_length, 9000);
+        assert_eq!(speech_prep.max_length, 420);
+        assert_eq!(speech_prep.timeout, std::time::Duration::from_secs(20));
+    }
+
+    #[test]
+    fn speech_prep_inherits_google_provider_credentials_and_base_url() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "google",
+                    "speechPrep": {
+                        "enabled": true,
+                        "provider": "google"
+                    },
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_SPEECH_PREP_INHERIT" },
+                            "baseUrl": "https://google.example.test/v1beta",
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var(
+            "TEST_GOOGLE_KEY_SPEECH_PREP_INHERIT",
+            "test-google-key-value",
+        );
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+        let speech_prep = resolved.speech_prep.expect("speech prep missing");
+
+        assert_eq!(speech_prep.api_key, "test-google-key-value");
+        assert_eq!(speech_prep.base_url, "https://google.example.test/v1beta");
+    }
+
+    #[test]
+    fn speech_prep_output_length_is_capped_to_tts_max_text_length() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "google",
+                    "maxTextLength": 300,
+                    "speechPrep": {
+                        "enabled": true,
+                        "provider": "google",
+                        "maxLength": 800
+                    },
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_SPEECH_PREP_OUTPUT_CAP" },
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var(
+            "TEST_GOOGLE_KEY_SPEECH_PREP_OUTPUT_CAP",
+            "test-google-key-value",
+        );
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+        let speech_prep = resolved.speech_prep.expect("speech prep missing");
+
+        assert_eq!(resolved.max_text_length, 300);
+        assert_eq!(speech_prep.max_length, 300);
+    }
+
+    #[test]
+    fn speech_prep_threshold_is_capped_to_tts_max_text_length() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "google",
+                    "maxTextLength": 300,
+                    "speechPrep": {
+                        "enabled": true,
+                        "provider": "google"
+                    },
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_SPEECH_PREP_THRESHOLD_CAP" },
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var(
+            "TEST_GOOGLE_KEY_SPEECH_PREP_THRESHOLD_CAP",
+            "test-google-key-value",
+        );
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+        let speech_prep = resolved.speech_prep.expect("speech prep missing");
+
+        assert_eq!(resolved.max_text_length, 300);
+        assert_eq!(speech_prep.threshold, 300);
     }
 }

@@ -5,7 +5,7 @@ use std::process::Stdio;
 use codex_voice_core::{SpeechError, SpeechFormat, SpeechResult, SynthesizedSpeech};
 use tokio::{io::AsyncWriteExt, process::Command, time};
 
-const FFMPEG_CONVERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const FFMPEG_CONVERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy)]
 struct PcmSpec {
@@ -65,6 +65,13 @@ fn pcm_to_wav(speech: SynthesizedSpeech) -> SpeechResult<SynthesizedSpeech> {
     })
 }
 
+async fn convert_encoded_with_ffmpeg(
+    speech: SynthesizedSpeech,
+    target: SpeechFormat,
+) -> SpeechResult<SynthesizedSpeech> {
+    run_ffmpeg(speech.bytes, vec!["-i", "pipe:0"], target).await
+}
+
 async fn convert_pcm_with_ffmpeg(
     speech: SynthesizedSpeech,
     target: SpeechFormat,
@@ -83,13 +90,6 @@ async fn convert_pcm_with_ffmpeg(
         "pipe:0",
     ];
     run_ffmpeg(speech.bytes, input_args, target).await
-}
-
-async fn convert_encoded_with_ffmpeg(
-    speech: SynthesizedSpeech,
-    target: SpeechFormat,
-) -> SpeechResult<SynthesizedSpeech> {
-    run_ffmpeg(speech.bytes, vec!["-i", "pipe:0"], target).await
 }
 
 async fn run_ffmpeg(
@@ -118,25 +118,34 @@ async fn run_ffmpeg(
         ))
     })?;
 
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        SpeechError::Request("failed to open ffmpeg stdin for TTS conversion".into())
-    })?;
-    stdin
-        .write_all(&input)
-        .await
-        .map_err(|e| SpeechError::Request(format!("failed to write TTS audio to ffmpeg: {e}")))?;
-    drop(stdin);
+    let output = time::timeout(FFMPEG_CONVERSION_TIMEOUT, async move {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            SpeechError::Request("failed to open ffmpeg stdin for TTS conversion".into())
+        })?;
+        let write_input = async move {
+            stdin.write_all(&input).await.map_err(|e| {
+                SpeechError::Request(format!("failed to write TTS audio to ffmpeg: {e}"))
+            })?;
+            drop(stdin);
+            Ok::<(), SpeechError>(())
+        };
+        let wait_output = async move {
+            child.wait_with_output().await.map_err(|e| {
+                SpeechError::Request(format!("failed to wait for ffmpeg conversion: {e}"))
+            })
+        };
 
-    let output = time::timeout(FFMPEG_CONVERSION_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| {
-            SpeechError::Request(format!(
-                "ffmpeg timed out converting TTS audio to {} after {}s",
-                target.to_openai(),
-                FFMPEG_CONVERSION_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|e| SpeechError::Request(format!("failed to wait for ffmpeg conversion: {e}")))?;
+        let (_, output) = tokio::try_join!(write_input, wait_output)?;
+        Ok::<_, SpeechError>(output)
+    })
+    .await
+    .map_err(|_| {
+        SpeechError::Request(format!(
+            "ffmpeg timed out converting TTS audio to {} after {}s",
+            target.to_openai(),
+            FFMPEG_CONVERSION_TIMEOUT.as_secs()
+        ))
+    })??;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

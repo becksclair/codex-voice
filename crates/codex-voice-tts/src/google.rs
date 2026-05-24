@@ -68,83 +68,97 @@ impl GoogleSpeechClient {
 
         tracing::debug!(base_url = %self.config.base_url, model = %model, "sending Google TTS request");
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-goog-api-key", &self.config.api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| SpeechError::Request(format!("Google TTS request failed: {}", e)))?;
+        let native = tokio::time::timeout(self.config.timeout, async {
+            let response = self
+                .client
+                .post(&url)
+                .header("x-goog-api-key", &self.config.api_key)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| SpeechError::Request(format!("Google TTS request failed: {}", e)))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(SpeechError::Service {
-                status: status.as_u16(),
-                message: format!("Google TTS error: {}", text),
-            });
-        }
+            let status = response.status();
+            if !status.is_success() {
+                let text = response.text().await.unwrap_or_default();
+                return Err(SpeechError::Service {
+                    status: status.as_u16(),
+                    message: format!("Google TTS error: {}", text),
+                });
+            }
 
-        let json: serde_json::Value = response.json().await.map_err(|e| {
-            SpeechError::Request(format!("failed to parse Google TTS response: {}", e))
-        })?;
-
-        // Extract inlineData from candidates[0].content.parts
-        let candidates = json
-            .get("candidates")
-            .and_then(|c| c.as_array())
-            .ok_or_else(|| SpeechError::Request("Google TTS response missing candidates".into()))?;
-
-        let first = candidates
-            .first()
-            .ok_or_else(|| SpeechError::Request("Google TTS response has no candidates".into()))?;
-
-        let parts = first
-            .get("content")
-            .and_then(|c| c.get("parts"))
-            .and_then(|p| p.as_array())
-            .ok_or_else(|| {
-                SpeechError::Request("Google TTS response missing content parts".into())
+            let json: serde_json::Value = response.json().await.map_err(|e| {
+                SpeechError::Request(format!("failed to parse Google TTS response: {}", e))
             })?;
 
-        let mut audio_bytes = bytes::Bytes::new();
-        let mut mime_type = "audio/wav".to_string();
+            // Extract inlineData from candidates[0].content.parts
+            let candidates = json
+                .get("candidates")
+                .and_then(|c| c.as_array())
+                .ok_or_else(|| {
+                    SpeechError::Request("Google TTS response missing candidates".into())
+                })?;
 
-        for part in parts {
-            if let Some(inline) = part.get("inlineData") {
-                if let Some(data) = inline.get("data").and_then(|d| d.as_str()) {
-                    audio_bytes = bytes::Bytes::from(
-                        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+            let first = candidates.first().ok_or_else(|| {
+                SpeechError::Request("Google TTS response has no candidates".into())
+            })?;
+
+            let parts = first
+                .get("content")
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array())
+                .ok_or_else(|| {
+                    SpeechError::Request("Google TTS response missing content parts".into())
+                })?;
+
+            let mut audio_bytes = bytes::Bytes::new();
+            let mut mime_type = "audio/wav".to_string();
+
+            for part in parts {
+                if let Some(inline) = part.get("inlineData") {
+                    if let Some(data) = inline.get("data").and_then(|d| d.as_str()) {
+                        audio_bytes = bytes::Bytes::from(
+                            base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                data,
+                            )
                             .map_err(|e| {
                                 SpeechError::Request(format!(
                                     "failed to decode base64 audio: {}",
                                     e
                                 ))
                             })?,
-                    );
+                        );
+                    }
+                    if let Some(mt) = inline.get("mimeType").and_then(|m| m.as_str()) {
+                        mime_type = mt.to_string();
+                    }
+                    break;
                 }
-                if let Some(mt) = inline.get("mimeType").and_then(|m| m.as_str()) {
-                    mime_type = mt.to_string();
-                }
-                break;
             }
-        }
 
-        if audio_bytes.is_empty() {
-            return Err(SpeechError::Request(
-                "Google TTS returned empty audio".into(),
-            ));
-        }
+            if audio_bytes.is_empty() {
+                return Err(SpeechError::Request(
+                    "Google TTS returned empty audio".into(),
+                ));
+            }
 
-        let format = guess_format_from_mime(&mime_type).unwrap_or(SpeechFormat::Wav);
+            let format = guess_format_from_mime(&mime_type).unwrap_or(SpeechFormat::Wav);
 
-        let native = SynthesizedSpeech {
-            bytes: audio_bytes,
-            format,
-            mime_type,
-        };
+            Ok(SynthesizedSpeech {
+                bytes: audio_bytes,
+                format,
+                mime_type,
+            })
+        })
+        .await
+        .map_err(|_| {
+            SpeechError::Request(format!(
+                "Google TTS request timed out after {}s",
+                self.config.timeout.as_secs()
+            ))
+        })??;
 
         convert_speech(native, request.format).await
     }

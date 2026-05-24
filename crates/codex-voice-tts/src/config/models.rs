@@ -43,9 +43,22 @@ pub struct ResolvedTtsConfig {
     pub default_persona: Option<String>,
     pub max_text_length: usize,
     pub timeout: Duration,
+    pub speech_prep: Option<SpeechPrepConfig>,
     pub google: Option<GoogleRuntimeConfig>,
     pub elevenlabs: Option<ElevenLabsRuntimeConfig>,
     pub personas: HashMap<String, ResolvedPersona>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpeechPrepConfig {
+    pub provider: ProviderKind,
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+    pub threshold: usize,
+    pub max_input_length: usize,
+    pub max_length: usize,
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone)]

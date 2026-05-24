@@ -55,39 +55,48 @@ impl ElevenLabsSpeechClient {
 
         tracing::debug!(url = %url, voice_id = %voice_id, "sending ElevenLabs TTS request");
 
-        let response = self
-            .client
-            .post(&url)
-            .query(&[("output_format", &self.config.output_format)])
-            .header("xi-api-key", &self.config.api_key)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| SpeechError::Request(format!("ElevenLabs request failed: {}", e)))?;
+        let bytes = tokio::time::timeout(self.config.timeout, async {
+            let response = self
+                .client
+                .post(&url)
+                .query(&[("output_format", &self.config.output_format)])
+                .header("xi-api-key", &self.config.api_key)
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| SpeechError::Request(format!("ElevenLabs request failed: {}", e)))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            if status.as_u16() == 429 || text.contains("quota_exceeded") {
-                return Err(SpeechError::RateLimited(format!(
-                    "ElevenLabs quota/rate limit error: {text}"
-                )));
+            let status = response.status();
+            if !status.is_success() {
+                let text = response.text().await.unwrap_or_default();
+                if status.as_u16() == 429 || text.contains("quota_exceeded") {
+                    return Err(SpeechError::RateLimited(format!(
+                        "ElevenLabs quota/rate limit error: {text}"
+                    )));
+                }
+                if status.as_u16() == 401 || status.as_u16() == 403 {
+                    return Err(SpeechError::Auth(format!(
+                        "ElevenLabs authentication error: {text}"
+                    )));
+                }
+                return Err(SpeechError::Service {
+                    status: status.as_u16(),
+                    message: format!("ElevenLabs error: {}", text),
+                });
             }
-            if status.as_u16() == 401 || status.as_u16() == 403 {
-                return Err(SpeechError::Auth(format!(
-                    "ElevenLabs authentication error: {text}"
-                )));
-            }
-            return Err(SpeechError::Service {
-                status: status.as_u16(),
-                message: format!("ElevenLabs error: {}", text),
-            });
-        }
 
-        let bytes = response.bytes().await.map_err(|e| {
-            SpeechError::Request(format!("failed to read ElevenLabs audio bytes: {}", e))
-        })?;
+            response.bytes().await.map_err(|e| {
+                SpeechError::Request(format!("failed to read ElevenLabs audio bytes: {}", e))
+            })
+        })
+        .await
+        .map_err(|_| {
+            SpeechError::Request(format!(
+                "ElevenLabs request timed out after {}s",
+                self.config.timeout.as_secs()
+            ))
+        })??;
 
         if bytes.is_empty() {
             return Err(SpeechError::Request(

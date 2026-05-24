@@ -4,7 +4,13 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::models::{ProviderKind, ResolvedTtsConfig};
-use super::provider::{resolve_elevenlabs_config, resolve_google_config, validate_default_path};
+use super::provider::{
+    resolve_elevenlabs_config, resolve_google_config, resolve_speech_prep_config,
+    validate_default_path,
+};
+
+const DEFAULT_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 pub struct ReadAloudDefaultsFile {
@@ -29,6 +35,8 @@ pub struct TtsDefaultsConfig {
     pub max_text_length: Option<usize>,
     #[serde(rename = "timeoutMs", default)]
     pub timeout_ms: Option<u64>,
+    #[serde(rename = "speechPrep", default)]
+    pub speech_prep: Option<serde_json::Value>,
     #[serde(default)]
     pub providers: Option<HashMap<String, serde_json::Value>>,
     #[serde(default)]
@@ -93,11 +101,21 @@ impl ReadAloudDefaultsFile {
             })?;
 
         let max_text_length = tts.max_text_length.unwrap_or(1000);
-        let timeout = Duration::from_millis(tts.timeout_ms.unwrap_or(120_000));
+        let requested_timeout = tts
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_PROVIDER_TIMEOUT);
+        let timeout = requested_timeout.min(MAX_PROVIDER_TIMEOUT);
 
         let providers = tts.providers.unwrap_or_default();
         let models = self.models.and_then(|m| m.providers).unwrap_or_default();
 
+        let speech_prep = resolve_speech_prep_config(
+            tts.speech_prep.as_ref(),
+            &providers,
+            &models,
+            max_text_length,
+        )?;
         let google = resolve_google_config(&providers, &models, max_text_length, timeout)?;
         let elevenlabs = resolve_elevenlabs_config(&providers, &models, max_text_length, timeout)?;
 
@@ -124,6 +142,7 @@ impl ReadAloudDefaultsFile {
             default_persona: tts.persona,
             max_text_length,
             timeout,
+            speech_prep,
             google,
             elevenlabs,
             personas,

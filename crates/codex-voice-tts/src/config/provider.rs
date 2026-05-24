@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::models::{
     ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ElevenLabsVoiceSettings, FallbackPolicy,
-    GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona,
+    GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, SpeechPrepConfig,
 };
 use serde_json::Value;
 
@@ -70,6 +70,13 @@ fn json_f64(value: &Value, key: &str) -> Option<f64> {
 
 fn json_bool(value: &Value, key: &str) -> Option<bool> {
     value.get(key).and_then(Value::as_bool)
+}
+
+fn json_usize(value: &Value, key: &str) -> Option<usize> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
 }
 
 fn json_string(value: &Value, key: &str, default: &str) -> String {
@@ -151,6 +158,74 @@ pub fn resolve_google_config(
         style,
         pace,
         constraints,
+    }))
+}
+
+pub fn resolve_speech_prep_config(
+    raw: Option<&Value>,
+    providers: &HashMap<String, Value>,
+    models: &HashMap<String, super::serde::ProviderModelConfig>,
+    max_text_length: usize,
+) -> Result<Option<SpeechPrepConfig>, codex_voice_core::SpeechError> {
+    let Some(val) = raw else {
+        return Ok(None);
+    };
+
+    if val.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return Ok(None);
+    }
+
+    let provider_name = json_str(val, "provider").unwrap_or("google");
+    let provider = ProviderKind::from_name(provider_name).ok_or_else(|| {
+        codex_voice_core::SpeechError::Config(format!(
+            "invalid speechPrep provider: {provider_name}"
+        ))
+    })?;
+    if provider != ProviderKind::Google {
+        return Err(codex_voice_core::SpeechError::Config(
+            "speechPrep currently supports only the google provider".into(),
+        ));
+    }
+
+    let google_provider = providers.get("google");
+    let api_key = crate::secret::resolve_secret(
+        val.get("apiKey")
+            .or_else(|| google_provider.and_then(|provider| provider.get("apiKey"))),
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+    )?;
+    let base_url = json_str(val, "baseUrl")
+        .or_else(|| google_provider.and_then(|provider| json_str(provider, "baseUrl")))
+        .or_else(|| models.get("google").and_then(|m| m.base_url.as_deref()))
+        .unwrap_or("https://generativelanguage.googleapis.com/v1beta")
+        .to_string();
+    let model = json_string(val, "model", "gemini-3-flash-preview");
+    let threshold = json_usize(val, "threshold")
+        .unwrap_or(500)
+        .min(max_text_length);
+    let max_input_length = json_usize(val, "maxInputLength")
+        .unwrap_or(12_000)
+        .max(threshold);
+    let max_length = json_usize(val, "maxLength")
+        .unwrap_or(500)
+        .max(80)
+        .min(max_text_length);
+    let timeout = val
+        .get("timeoutMs")
+        .and_then(Value::as_u64)
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(20))
+        .min(Duration::from_secs(30));
+
+    Ok(Some(SpeechPrepConfig {
+        provider,
+        api_key,
+        base_url,
+        model,
+        threshold,
+        max_input_length,
+        max_length,
+        timeout,
     }))
 }
 
