@@ -9,7 +9,10 @@ use enumflags2::BitFlags;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
-use crate::linux_token_store::{new_token_record, PersistedPortalToken, PortalTokenStore};
+use crate::{
+    linux_portal_identity::register_portal_app,
+    linux_token_store::{new_token_record, PersistedPortalToken, PortalTokenStore},
+};
 
 const SESSION_START_TIMEOUT: Duration = Duration::from_secs(12);
 const KEYCODE_CONTROL_LEFT: i32 = 29;
@@ -122,6 +125,7 @@ async fn start_session_once(
     stored_token: Option<&PersistedPortalToken>,
     token_store: Option<&PortalTokenStore>,
 ) -> PlatformResult<ActiveRemoteDesktopSession> {
+    register_portal_app().await?;
     let remote_desktop = RemoteDesktop::new().await.map_err(|error| {
         PlatformError::Unavailable(format!(
             "failed to create RemoteDesktop portal proxy: {error}"

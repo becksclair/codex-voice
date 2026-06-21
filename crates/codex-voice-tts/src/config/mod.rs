@@ -307,6 +307,42 @@ mod tests {
     }
 
     #[test]
+    fn speech_prep_default_output_length_tracks_tts_max_text_length() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "google",
+                    "maxTextLength": 3000,
+                    "speechPrep": {
+                        "enabled": true,
+                        "provider": "google"
+                    },
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_SPEECH_PREP_DEFAULT_LENGTH" },
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var(
+            "TEST_GOOGLE_KEY_SPEECH_PREP_DEFAULT_LENGTH",
+            "test-google-key-value",
+        );
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+        let speech_prep = resolved.speech_prep.expect("speech prep missing");
+
+        assert_eq!(resolved.max_text_length, 3000);
+        assert_eq!(speech_prep.max_length, 3000);
+    }
+
+    #[test]
     fn speech_prep_output_length_is_capped_to_tts_max_text_length() {
         let config = r#"
         {

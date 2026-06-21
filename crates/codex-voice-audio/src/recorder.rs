@@ -144,17 +144,10 @@ impl AudioRecorder for CpalWavRecorder {
         let Some(capture) = capture else {
             return Ok(None);
         };
-        let _ = capture.stream.pause();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        let duration = capture.started_at.elapsed();
-
-        // Drop the data sender so the writer thread's recv() returns Err(Disconnected).
-        drop(capture.data_tx);
+        let (writer_thread, path, duration, sample_rate) = close_capture(capture);
 
         let sample_count = tokio::task::spawn_blocking(move || {
-            capture
-                .writer_thread
-                .expect("writer thread is always present")
+            writer_thread
                 .join()
                 .map_err(|_| AudioError::Message("wav writer thread panicked".into()))?
         })
@@ -164,18 +157,18 @@ impl AudioRecorder for CpalWavRecorder {
         })??;
 
         let duration = if sample_count > 0 {
-            Duration::from_secs_f64(sample_count as f64 / capture.sample_rate.max(1) as f64)
+            Duration::from_secs_f64(sample_count as f64 / sample_rate.max(1) as f64)
         } else {
             duration
         };
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("codex-voice.wav")
+            .to_string();
         Ok(Some(RecordedAudio {
-            filename: capture
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("codex-voice.wav")
-                .to_string(),
-            path: capture.path,
+            filename,
+            path,
             content_type: "audio/wav".into(),
             duration,
         }))
@@ -187,4 +180,34 @@ impl AudioRecorder for CpalWavRecorder {
         }
         Ok(())
     }
+}
+
+fn close_capture(
+    capture: CaptureState,
+) -> (
+    std::thread::JoinHandle<AudioResult<u64>>,
+    std::path::PathBuf,
+    Duration,
+    u32,
+) {
+    let CaptureState {
+        stream,
+        data_tx,
+        writer_thread,
+        path,
+        started_at,
+        sample_rate,
+    } = capture;
+
+    // Drop the stream before joining the writer so callback-owned sender clones close too.
+    let _ = stream.pause();
+    drop(stream);
+    drop(data_tx);
+
+    (
+        writer_thread.expect("writer thread is always present"),
+        path,
+        started_at.elapsed(),
+        sample_rate,
+    )
 }

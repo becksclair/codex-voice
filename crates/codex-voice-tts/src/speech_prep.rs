@@ -21,7 +21,8 @@ impl SpeechPrepClient {
     }
 
     pub fn should_prepare(&self, text: &str) -> bool {
-        text.chars().count() > self.config.threshold
+        let chars = text.chars().count();
+        chars > self.config.threshold && chars > self.config.max_length
     }
 
     pub async fn prepare(&self, text: &str) -> SpeechResult<Option<String>> {
@@ -96,7 +97,7 @@ impl SpeechPrepClient {
 
 fn build_prompt(text: &str, max_length: usize) -> String {
     format!(
-        "Condense this text for text-to-speech playback. Preserve the core meaning, key facts, and decisions. Remove repetition, code blocks, URLs, file paths, and formatting noise. Return only natural speakable prose, no markdown, no preamble, no labels. Keep it under {max_length} characters.\n\nText:\n\"\"\"{text}\"\"\""
+        "Prepare this text for text-to-speech playback. Preserve the user's meaning, key facts, decisions, and the full requested message. Shorten only when necessary to stay under {max_length} characters. Remove repetition, code blocks, URLs, file paths, and formatting noise. Return only natural speakable prose, no markdown, no preamble, no labels.\n\nText:\n\"\"\"{text}\"\"\""
     )
 }
 
@@ -186,6 +187,23 @@ mod tests {
         let client = SpeechPrepClient::new(config).unwrap();
 
         assert!(client.should_prepare(&"x".repeat(701)));
+    }
+
+    #[test]
+    fn speech_prep_skips_text_that_already_fits_output_limit() {
+        let config = SpeechPrepConfig {
+            provider: crate::config::ProviderKind::Google,
+            api_key: "key".to_string(),
+            base_url: "https://example.test".to_string(),
+            model: "gemini-3-flash-preview".to_string(),
+            threshold: 500,
+            max_input_length: 12_000,
+            max_length: 3000,
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let client = SpeechPrepClient::new(config).unwrap();
+
+        assert!(!client.should_prepare(&"x".repeat(700)));
     }
 
     #[test]

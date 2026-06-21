@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Codex Voice
+Comment=Hold-to-dictate desktop utility
+Exec=/usr/local/bin/codex-voice-wrapper run
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;Accessibility;
+StartupNotify=false
+X-GNOME-UsesNotifications=true

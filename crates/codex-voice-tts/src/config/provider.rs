@@ -207,7 +207,7 @@ pub fn resolve_speech_prep_config(
         .unwrap_or(12_000)
         .max(threshold);
     let max_length = json_usize(val, "maxLength")
-        .unwrap_or(500)
+        .unwrap_or(max_text_length)
         .max(80)
         .min(max_text_length);
     let timeout = val

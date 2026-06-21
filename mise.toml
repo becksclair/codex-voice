@@ -5,7 +5,9 @@ set -eu
 
 cargo build --release -p codex-voice-app --bin codex-voice
 sudo install -Dm755 target/release/codex-voice /usr/local/bin/codex-voice
+sudo install -Dm755 packaging/codex-voice-wrapper.sh /usr/local/bin/codex-voice-wrapper
 
+install -Dm644 packaging/applications/com.heliasar.CodexVoice.desktop "$HOME/.local/share/applications/com.heliasar.CodexVoice.desktop"
 install -Dm644 packaging/systemd/user/codex-voice.service "$HOME/.config/systemd/user/codex-voice.service"
 
 # Detect Tailscale IP and configure the server to bind to it when available.

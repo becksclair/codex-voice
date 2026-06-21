@@ -8,7 +8,11 @@ use futures_util::StreamExt;
 use std::{env, process::Command, sync::mpsc as std_mpsc, thread, time::Duration};
 use tokio::sync::mpsc;
 
-use crate::{linux_clipboard::LinuxClipboard, linux_remote_desktop::RemoteDesktopSessionManager};
+use crate::{
+    linux_clipboard::LinuxClipboard,
+    linux_portal_identity::{register_portal_app, PORTAL_APP_ID},
+    linux_remote_desktop::RemoteDesktopSessionManager,
+};
 
 const HOTKEY_ID: &str = "codex-voice-hold-to-dictate";
 const MEDIA_HOTKEY_ID: &str = "codex-voice-media-dictation";
@@ -199,6 +203,7 @@ async fn run_global_shortcut_listener(
     events: mpsc::Sender<HotkeyEvent>,
     startup: std_mpsc::Sender<PlatformResult<()>>,
 ) -> PlatformResult<()> {
+    register_portal_app().await?;
     let portal = GlobalShortcuts::new().await.map_err(|error| {
         PlatformError::Unavailable(format!(
             "failed to create GlobalShortcuts portal proxy: {error}"
@@ -237,6 +242,7 @@ async fn run_global_shortcut_listener(
         preferred_trigger = HOTKEY_TRIGGER,
         media_shortcut_id = MEDIA_HOTKEY_ID,
         media_preferred_trigger = MEDIA_HOTKEY_TRIGGER,
+        app_id = PORTAL_APP_ID,
         "GlobalShortcuts portal listener started"
     );
 

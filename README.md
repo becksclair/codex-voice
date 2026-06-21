@@ -120,11 +120,13 @@ provider fallback.
 ## User Service Setup
 
 `mise run setup` builds the release binary, installs it to `/usr/local/bin/codex-voice`,
-installs two systemd user units, reloads systemd, enables both services, and starts
-the background server immediately:
+installs the wrapper script, installs the `com.heliasar.CodexVoice.desktop`
+desktop entry used for portal identity, installs two systemd user units, reloads
+systemd, enables both services, and starts the background server immediately:
 
 - `codex-voice.service` runs `codex-voice run` after the graphical session is available; setup enables it but does not start it immediately.
 - `codex-voice-server.service` runs `codex-voice server` as a background user service without bearer token authentication, so any OpenAI-compatible client on the same machine can use it.
+- The Linux desktop process registers `com.heliasar.CodexVoice` with the host portal before opening GlobalShortcuts or RemoteDesktop sessions; keep that app id and the installed desktop filename in sync.
 
 ```bash
 mise run setup
