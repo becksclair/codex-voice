@@ -32,7 +32,7 @@ impl UiStatus {
                 DictationState::Inserting,
                 format!("Inserted via {}", insert_method_label(report.method)),
             )),
-            AppEvent::Error(message) => Some(Self::new(
+            AppEvent::Error { message, .. } => Some(Self::new(
                 DictationState::Error(message.clone()),
                 format!("Error: {message}"),
             )),

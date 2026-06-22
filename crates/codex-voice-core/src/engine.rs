@@ -16,6 +16,25 @@ pub enum DictationState {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorStage {
+    AudioStart,
+    AudioStop,
+    Transcription,
+    Insertion,
+}
+
+impl ErrorStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AudioStart => "audio start failed",
+            Self::AudioStop => "audio stop failed",
+            Self::Transcription => "transcription failed",
+            Self::Insertion => "insertion failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
     StateChanged(DictationState),
@@ -23,7 +42,7 @@ pub enum AppEvent {
     RecordingDeleted { path: PathBuf },
     TranscriptReady { chars: usize },
     Inserted(InsertReport),
-    Error(String),
+    Error { stage: ErrorStage, message: String },
 }
 
 pub struct DictationEngine<A, T, I>
@@ -75,7 +94,7 @@ where
     async fn start(&mut self) {
         match self.audio.start().await {
             Ok(()) => self.set_state(DictationState::Recording).await,
-            Err(error) => self.fail(error.to_string()).await,
+            Err(error) => self.fail(ErrorStage::AudioStart, error.to_string()).await,
         }
     }
 
@@ -95,7 +114,7 @@ where
                 self.set_state(DictationState::Idle).await;
             }
             Ok(None) => self.set_state(DictationState::Idle).await,
-            Err(error) => self.fail(error.to_string()).await,
+            Err(error) => self.fail(ErrorStage::AudioStop, error.to_string()).await,
         }
     }
 
@@ -117,10 +136,13 @@ where
                         let _ = self.events.send(AppEvent::Inserted(report)).await;
                         self.set_state(DictationState::Idle).await;
                     }
-                    Err(error) => self.fail(error.to_string()).await,
+                    Err(error) => self.fail(ErrorStage::Insertion, error.to_string()).await,
                 }
             }
-            Err(error) => self.fail(error.to_string()).await,
+            Err(error) => {
+                self.fail(ErrorStage::Transcription, error.to_string())
+                    .await
+            }
         }
     }
 
@@ -129,8 +151,8 @@ where
         let _ = self.events.send(AppEvent::StateChanged(state)).await;
     }
 
-    async fn fail(&mut self, message: String) {
-        let _ = self.events.send(AppEvent::Error(message)).await;
+    async fn fail(&mut self, stage: ErrorStage, message: String) {
+        let _ = self.events.send(AppEvent::Error { stage, message }).await;
         self.set_state(DictationState::Idle).await;
     }
 }
@@ -247,7 +269,13 @@ mod tests {
 
         let mut saw_error = false;
         while let Ok(event) = rx.try_recv() {
-            saw_error |= matches!(event, AppEvent::Error(_));
+            saw_error |= matches!(
+                event,
+                AppEvent::Error {
+                    stage: ErrorStage::AudioStart,
+                    ..
+                }
+            );
         }
         assert!(saw_error);
         assert_eq!(engine.state(), &DictationState::Idle);

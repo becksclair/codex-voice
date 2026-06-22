@@ -281,9 +281,9 @@ fn print_app_event(event: AppEvent) {
             let _ = logging::append_log_line("inserted transcript");
             println!("inserted via {:?}", report.method);
         }
-        AppEvent::Error(message) => {
-            tracing::error!(target: "codex_voice_app", %message, "app event error");
-            let _ = logging::append_log_line("dictation error");
+        AppEvent::Error { stage, message: _ } => {
+            tracing::error!(target: "codex_voice_app", stage = %stage.label(), "app event error");
+            let _ = logging::append_log_line(format!("dictation error: {}", stage.label()));
             println!("dictation error occurred; see logs for details");
         }
         other => {
