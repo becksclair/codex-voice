@@ -572,6 +572,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64",
  "bytes",
  "codex-voice-codex",
  "codex-voice-core",

@@ -2,10 +2,12 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State},
     http::{header, HeaderMap, Method, StatusCode},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use base64::Engine;
+use bytes::Bytes;
 use codex_voice_codex::{CodexAuthService, CodexTranscriptionClient};
 use codex_voice_core::{SpeechClient, SpeechFormat, SpeechRequest, TranscriptionClient};
 
@@ -23,6 +25,411 @@ use super::upload::{self, Upload};
 
 const SPEECH_BODY_LIMIT_BYTES: usize = 64 * 1024;
 const MULTIPART_OVERHEAD_BYTES: u64 = 64 * 1024;
+const WEB_ICON_192: &[u8] = include_bytes!("../assets/web/icon-192.png");
+const WEB_ICON_512: &[u8] = include_bytes!("../assets/web/icon-512.png");
+const WEB_ICON_MASKABLE_512: &[u8] = include_bytes!("../assets/web/icon-maskable-512.png");
+const WEB_APPLE_TOUCH_ICON: &[u8] = include_bytes!("../assets/web/apple-touch-icon.png");
+const WEB_MANIFEST: &str = r##"{
+  "name": "Codex Voice",
+  "short_name": "Voice",
+  "description": "Quick text-to-speech for Codex Voice.",
+  "id": "/web",
+  "start_url": "/web",
+  "scope": "/web",
+  "display": "standalone",
+  "background_color": "#101214",
+  "theme_color": "#101214",
+  "icons": [
+    {
+      "src": "/web/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/web/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/web/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}"##;
+const WEB_SW_JS: &str = r#"const CACHE_NAME = 'codex-voice-web-v2';
+const SHELL_ASSETS = [
+  '/web',
+  '/web/manifest.webmanifest',
+  '/web/icon-192.png',
+  '/web/icon-512.png',
+  '/web/icon-maskable-512.png',
+  '/web/apple-touch-icon.png'
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then((cache) => cache.addAll(SHELL_ASSETS))
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((names) => Promise.all(
+        names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))
+      ))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  if (request.method !== 'GET') return;
+
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+
+  if (request.mode === 'navigate' && url.pathname === '/web') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put('/web', copy));
+          return response;
+        })
+        .catch(() => caches.match('/web'))
+    );
+    return;
+  }
+
+  if (SHELL_ASSETS.includes(url.pathname)) {
+    event.respondWith(
+      caches.match(request)
+        .then((cached) => cached || fetch(request))
+    );
+  }
+});
+"#;
+const WEB_APP_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101214">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Codex Voice">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/web/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="/web/icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="/web/icon-512.png">
+  <link rel="apple-touch-icon" href="/web/apple-touch-icon.png">
+  <title>Codex Voice</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #191d21;
+      --text: #f2f5f7;
+      --muted: #a8b0b8;
+      --line: #30363d;
+      --accent: #5dc7b7;
+      --accent-strong: #78e0d0;
+      --danger: #ff8f8f;
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    main {
+      min-height: 100dvh;
+      display: grid;
+      grid-template-rows: auto minmax(280px, 1fr) auto;
+      gap: 14px;
+      padding: max(18px, env(safe-area-inset-top)) 16px max(18px, env(safe-area-inset-bottom));
+      max-width: 760px;
+      margin: 0 auto;
+    }
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 14px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.35rem;
+      font-weight: 700;
+    }
+    #count {
+      color: var(--muted);
+      font-size: 0.92rem;
+      white-space: nowrap;
+    }
+    textarea {
+      width: 100%;
+      min-height: 0;
+      resize: none;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      font-size: 1.08rem;
+      line-height: 1.45;
+      outline: none;
+    }
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(93, 199, 183, 0.18);
+    }
+    .controls {
+      display: grid;
+      gap: 14px;
+    }
+    .buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    button {
+      min-height: 54px;
+      border: 0;
+      border-radius: 8px;
+      color: #081110;
+      background: var(--accent);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    button.secondary {
+      color: var(--text);
+      background: #252b31;
+      border: 1px solid var(--line);
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent-strong);
+    }
+    .time {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      font-size: 0.95rem;
+    }
+    #status {
+      min-height: 1.4em;
+      color: var(--muted);
+      font-size: 0.98rem;
+    }
+    #status.error { color: var(--danger); }
+    @media (max-width: 420px) {
+      main { padding-left: 12px; padding-right: 12px; }
+      .buttons { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Codex Voice</h1>
+      <span id="count">0 chars</span>
+    </header>
+    <textarea id="text" autocomplete="off" autocapitalize="sentences" spellcheck="true" placeholder="Type something to hear it spoken..."></textarea>
+    <section class="controls">
+      <div class="buttons">
+        <button id="generate" type="button">Generate</button>
+        <button id="play" type="button" class="secondary" disabled>Play</button>
+      </div>
+      <input id="seek" type="range" min="0" max="1000" value="0" disabled aria-label="Audio position">
+      <div class="time">
+        <span id="elapsed">0:00</span>
+        <span id="duration">0:00</span>
+      </div>
+      <div id="status" role="status" aria-live="polite">Ready</div>
+    </section>
+  </main>
+  <script>
+    const text = document.getElementById('text');
+    const generate = document.getElementById('generate');
+    const play = document.getElementById('play');
+    const seek = document.getElementById('seek');
+    const elapsed = document.getElementById('elapsed');
+    const duration = document.getElementById('duration');
+    const status = document.getElementById('status');
+    const count = document.getElementById('count');
+    const storageKey = 'codex-voice.web.text';
+    let audio = new Audio();
+    let objectUrl = null;
+    let seeking = false;
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/web-sw.js', { scope: '/web' }).catch(() => {});
+      });
+    }
+
+    text.value = localStorage.getItem(storageKey) || '';
+    updateCount();
+
+    function setStatus(message, isError = false) {
+      status.textContent = message;
+      status.classList.toggle('error', isError);
+    }
+
+    function formatTime(seconds) {
+      if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
+      const whole = Math.floor(seconds);
+      const minutes = Math.floor(whole / 60);
+      return `${minutes}:${String(whole % 60).padStart(2, '0')}`;
+    }
+
+    function updateCount() {
+      const chars = Array.from(text.value).length;
+      count.textContent = `${chars} ${chars === 1 ? 'char' : 'chars'}`;
+    }
+
+    function updatePosition() {
+      const total = audio.duration || 0;
+      if (!seeking && total > 0) {
+        seek.value = Math.round((audio.currentTime / total) * 1000);
+      }
+      elapsed.textContent = formatTime(audio.currentTime);
+      duration.textContent = formatTime(total);
+    }
+
+    function resetAudio() {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+      play.disabled = true;
+      play.textContent = 'Play';
+      seek.disabled = true;
+      seek.value = 0;
+      elapsed.textContent = '0:00';
+      duration.textContent = '0:00';
+    }
+
+    function audioBlobFromBase64(base64Audio, mimeType) {
+      const binary = atob(base64Audio);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return new Blob([bytes], { type: mimeType || 'audio/wav' });
+    }
+
+    text.addEventListener('input', () => {
+      localStorage.setItem(storageKey, text.value);
+      updateCount();
+    });
+
+    generate.addEventListener('click', async () => {
+      const input = text.value.trim();
+      if (!input) {
+        setStatus('Enter some text first.', true);
+        return;
+      }
+      generate.disabled = true;
+      play.disabled = true;
+      setStatus('Generating...');
+      try {
+        const response = await fetch('/web/speech', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input })
+        });
+        if (!response.ok) {
+          let message = `TTS failed (${response.status})`;
+          try {
+            const json = await response.json();
+            message = json?.error?.message || message;
+          } catch (_) {}
+          throw new Error(message);
+        }
+        resetAudio();
+        const result = await response.json();
+        if (typeof result.input === 'string' && result.input !== text.value) {
+          text.value = result.input;
+          localStorage.setItem(storageKey, text.value);
+          updateCount();
+        }
+        const blob = audioBlobFromBase64(result.audio_base64, result.mime_type);
+        objectUrl = URL.createObjectURL(blob);
+        audio.src = objectUrl;
+        audio.load();
+        play.disabled = false;
+        seek.disabled = false;
+        setStatus(result.input_changed ? 'Ready to play. Tags added.' : 'Ready to play.');
+      } catch (error) {
+        resetAudio();
+        setStatus(error.message || 'TTS failed.', true);
+      } finally {
+        generate.disabled = false;
+      }
+    });
+
+    play.addEventListener('click', async () => {
+      if (!audio.src) return;
+      if (audio.paused) {
+        try {
+          await audio.play();
+        } catch (error) {
+          setStatus(error.message || 'Playback failed.', true);
+        }
+      } else {
+        audio.pause();
+      }
+    });
+
+    seek.addEventListener('input', () => {
+      seeking = true;
+      const total = audio.duration || 0;
+      if (total > 0) {
+        audio.currentTime = (Number(seek.value) / 1000) * total;
+        updatePosition();
+      }
+      seeking = false;
+    });
+
+    audio.addEventListener('loadedmetadata', updatePosition);
+    audio.addEventListener('timeupdate', updatePosition);
+    audio.addEventListener('play', () => {
+      play.textContent = 'Pause';
+      setStatus('Playing.');
+    });
+    audio.addEventListener('pause', () => {
+      play.textContent = 'Play';
+      if (audio.src) setStatus('Paused.');
+    });
+    audio.addEventListener('ended', () => {
+      play.textContent = 'Play';
+      setStatus('Done.');
+      updatePosition();
+    });
+  </script>
+</body>
+</html>"##;
 
 #[derive(Clone)]
 pub(crate) struct ServiceState {
@@ -108,10 +515,19 @@ fn service_router(state: ServiceState) -> Router {
     let health_routes = get(health);
     let transcribe_routes = post(transcribe);
     let speech_routes = post(speech).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
+    let web_speech_routes = post(web_speech).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
 
     Router::new()
         .route("/healthz", health_routes.clone())
         .route("/v1/healthz", health_routes)
+        .route("/web", get(web_app))
+        .route("/web/manifest.webmanifest", get(web_manifest))
+        .route("/web-sw.js", get(web_service_worker))
+        .route("/web/icon-192.png", get(web_icon_192))
+        .route("/web/icon-512.png", get(web_icon_512))
+        .route("/web/icon-maskable-512.png", get(web_icon_maskable_512))
+        .route("/web/apple-touch-icon.png", get(web_apple_touch_icon))
+        .route("/web/speech", web_speech_routes)
         .route("/audio/transcriptions", transcribe_routes.clone())
         .route("/v1/audio/transcriptions", transcribe_routes)
         .layer(DefaultBodyLimit::max(transcription_body_limit))
@@ -159,6 +575,56 @@ async fn transcribe(
             ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response()
         }
     })
+}
+
+async fn web_app() -> Html<&'static str> {
+    Html(WEB_APP_HTML)
+}
+
+async fn web_manifest() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/manifest+json"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        WEB_MANIFEST,
+    )
+}
+
+async fn web_service_worker() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        WEB_SW_JS,
+    )
+}
+
+fn web_png_response(bytes: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        Bytes::from_static(bytes),
+    )
+}
+
+async fn web_icon_192() -> impl IntoResponse {
+    web_png_response(WEB_ICON_192)
+}
+
+async fn web_icon_512() -> impl IntoResponse {
+    web_png_response(WEB_ICON_512)
+}
+
+async fn web_icon_maskable_512() -> impl IntoResponse {
+    web_png_response(WEB_ICON_MASKABLE_512)
+}
+
+async fn web_apple_touch_icon() -> impl IntoResponse {
+    web_png_response(WEB_APPLE_TOUCH_ICON)
 }
 
 async fn transcribe_upload(state: &ServiceState, upload: &Upload) -> Result<String, ApiError> {
@@ -271,6 +737,62 @@ struct OpenAiSpeechRequest {
     rate: Option<f32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct WebSpeechRequest {
+    input: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WebSpeechResponse {
+    input: String,
+    input_changed: bool,
+    audio_base64: String,
+    mime_type: String,
+    format: String,
+}
+
+async fn web_speech(
+    State(state): State<ServiceState>,
+    Json(body): Json<WebSpeechRequest>,
+) -> Result<Json<WebSpeechResponse>, ApiError> {
+    let speech_client = state
+        .speech
+        .as_ref()
+        .ok_or_else(|| ApiError::service_unavailable("TTS service is not configured"))?;
+
+    if body.input.trim().is_empty() {
+        return Err(ApiError::bad_request("input is required"));
+    }
+
+    let request = SpeechRequest {
+        input: body.input,
+        model_hint: "gpt-4o-mini-tts".to_string(),
+        voice_hint: None,
+        instructions: None,
+        format: SpeechFormat::Wav,
+        speed: None,
+    };
+
+    let original_input = request.input.clone();
+    let synthesized = speech_client
+        .synthesize(&request)
+        .await
+        .map_err(ApiError::from_speech_error)?;
+    let input = synthesized
+        .prepared_input
+        .clone()
+        .unwrap_or_else(|| original_input.clone());
+    let input_changed = input != original_input;
+
+    Ok(Json(WebSpeechResponse {
+        input,
+        input_changed,
+        audio_base64: base64::engine::general_purpose::STANDARD.encode(&synthesized.bytes),
+        mime_type: synthesized.mime_type,
+        format: synthesized.format.to_openai().to_string(),
+    }))
+}
+
 async fn speech(State(state): State<ServiceState>, request: Request) -> Result<Response, ApiError> {
     authorize(request.headers(), &state.auth)?;
 
@@ -307,8 +829,15 @@ async fn speech(State(state): State<ServiceState>, request: Request) -> Result<R
         speed: body.speed.or(body.rate),
     };
 
+    synthesize_response(speech_client.as_ref(), &request).await
+}
+
+async fn synthesize_response(
+    speech_client: &dyn SpeechClient,
+    request: &SpeechRequest,
+) -> Result<Response, ApiError> {
     let synthesized = speech_client
-        .synthesize(&request)
+        .synthesize(request)
         .await
         .map_err(ApiError::from_speech_error)?;
 
@@ -556,6 +1085,260 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("http://localhost:5173")
         );
+    }
+
+    #[tokio::test]
+    async fn web_app_returns_phone_tts_shell() {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/web")
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/html")),
+            "web app should return text/html"
+        );
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let html = std::str::from_utf8(&bytes).expect("html is utf-8");
+        assert!(html.contains("<textarea id=\"text\""));
+        assert!(html.contains("id=\"generate\""));
+        assert!(html.contains("id=\"seek\""));
+        assert!(html.contains("'/web/speech'"));
+        assert!(html.contains(r#"<link rel="manifest" href="/web/manifest.webmanifest">"#));
+        assert!(html.contains(r##"<meta name="theme-color" content="#101214">"##));
+        assert!(html.contains(r#"<link rel="apple-touch-icon" href="/web/apple-touch-icon.png">"#));
+        assert!(html.contains("navigator.serviceWorker.register('/web-sw.js'"));
+    }
+
+    #[tokio::test]
+    async fn web_manifest_returns_install_metadata() {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/web/manifest.webmanifest")
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/manifest+json"
+        );
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("manifest is valid json");
+
+        assert_eq!(manifest["name"], "Codex Voice");
+        assert_eq!(manifest["short_name"], "Voice");
+        assert_eq!(manifest["start_url"], "/web");
+        assert_eq!(manifest["scope"], "/web");
+        assert_eq!(manifest["display"], "standalone");
+        assert_eq!(manifest["theme_color"], "#101214");
+        assert_eq!(manifest["background_color"], "#101214");
+        let icons = manifest["icons"].as_array().expect("icons array");
+        assert!(icons.iter().any(|icon| {
+            icon["src"] == "/web/icon-192.png"
+                && icon["sizes"] == "192x192"
+                && icon["type"] == "image/png"
+        }));
+        assert!(icons.iter().any(|icon| {
+            icon["src"] == "/web/icon-512.png"
+                && icon["sizes"] == "512x512"
+                && icon["purpose"] == "any"
+        }));
+        assert!(icons.iter().any(|icon| {
+            icon["src"] == "/web/icon-maskable-512.png"
+                && icon["sizes"] == "512x512"
+                && icon["purpose"] == "maskable"
+        }));
+    }
+
+    #[tokio::test]
+    async fn web_service_worker_returns_install_and_fetch_handlers() {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/web-sw.js")
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let script = std::str::from_utf8(&bytes).expect("script is utf-8");
+        assert!(script.contains("self.addEventListener('install'"));
+        assert!(script.contains("self.addEventListener('fetch'"));
+        assert!(script.contains("request.method !== 'GET'"));
+        assert!(script.contains("'/web/icon-maskable-512.png'"));
+    }
+
+    #[tokio::test]
+    async fn web_icon_routes_return_png_assets() {
+        for path in [
+            "/web/icon-192.png",
+            "/web/icon-512.png",
+            "/web/icon-maskable-512.png",
+            "/web/apple-touch-icon.png",
+        ] {
+            let app = service_router(test_state_with_speech(1024));
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(body::Body::empty())
+                        .expect("request builds"),
+                )
+                .await
+                .expect("request succeeds");
+
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "image/png",
+                "{path}"
+            );
+            let bytes = body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body reads");
+            assert!(
+                bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "{path} should return a PNG"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn web_speech_is_public_and_uses_service_defaults() {
+        let speech = Arc::new(FakeSpeechBackend::default());
+        let app = service_router(test_state_with_speech_backend(1024, Some(speech.clone())));
+
+        let response = app
+            .oneshot(speech_request(
+                "/web/speech",
+                r#"{"input":"hello from phone"}"#,
+                None,
+            ))
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json response");
+        assert_eq!(json["input"], "hello from phone");
+        assert_eq!(json["input_changed"], false);
+        assert_eq!(json["mime_type"], "audio/wav");
+        assert_eq!(json["format"], "wav");
+        assert_eq!(json["audio_base64"], "ZmFrZSBhdWRpbyBieXRlcw==");
+        let seen = speech.seen.lock().expect("fake speech lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].input, "hello from phone");
+        assert_eq!(seen[0].model_hint, "gpt-4o-mini-tts");
+        assert_eq!(seen[0].voice_hint, None);
+        assert_eq!(seen[0].instructions, None);
+        assert_eq!(seen[0].format, SpeechFormat::Wav);
+        assert_eq!(seen[0].speed, None);
+    }
+
+    #[tokio::test]
+    async fn web_speech_returns_prepared_input_for_visible_tag_edits() {
+        let speech = Arc::new(FakeSpeechBackend {
+            prepared_input: Some("[softly] hello from phone".to_string()),
+            ..Default::default()
+        });
+        let app = service_router(test_state_with_speech_backend(1024, Some(speech)));
+
+        let response = app
+            .oneshot(speech_request(
+                "/web/speech",
+                r#"{"input":"hello from phone"}"#,
+                None,
+            ))
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json response");
+        assert_eq!(json["input"], "[softly] hello from phone");
+        assert_eq!(json["input_changed"], true);
+        assert_eq!(json["audio_base64"], "ZmFrZSBhdWRpbyBieXRlcw==");
+    }
+
+    #[tokio::test]
+    async fn web_speech_public_access_does_not_change_api_auth() {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(speech_request(
+                "/v1/audio/speech",
+                r#"{"model":"gpt-4o-mini-tts","input":"hello"}"#,
+                None,
+            ))
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn web_speech_rejects_empty_input() {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(speech_request("/web/speech", r#"{"input":"   "}"#, None))
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn web_speech_returns_503_when_tts_not_configured() {
+        let app = service_router(test_state(1024));
+        let response = app
+            .oneshot(speech_request("/web/speech", r#"{"input":"hello"}"#, None))
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

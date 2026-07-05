@@ -7,6 +7,7 @@ edition.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
+base64.workspace = true
 bytes.workspace = true
 codex-voice-codex = { path = "../codex-voice-codex" }
 codex-voice-core = { path = "../codex-voice-core" }
