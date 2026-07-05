@@ -1,15 +1,18 @@
 use async_trait::async_trait;
+use bytes::Bytes;
 use codex_voice_core::{
-    RecordedAudio, TranscriptionClient, TranscriptionError, TranscriptionResult,
+    RecordedAudio, SpeechError, SpeechFormat, SpeechResult, SynthesizedSpeech, TranscriptionClient,
+    TranscriptionError, TranscriptionResult,
 };
 use reqwest::multipart;
+use serde::Serialize;
 use std::{path::Path, time::Duration};
 use tokio::time;
 
 use super::discovery;
 use super::upload;
 
-const MAX_PROBE_BYTES: u64 = 8 * 1024;
+const MAX_PROBE_BYTES: usize = 8 * 1024;
 
 #[derive(Clone)]
 pub struct LocalTranscriberClient {
@@ -66,6 +69,84 @@ impl LocalTranscriberClient {
             }
         }
     }
+
+    pub async fn synthesize_speech(&self, input: &str) -> SpeechResult<SynthesizedSpeech> {
+        if input.trim().is_empty() {
+            return Err(SpeechError::Unsupported("input is required".into()));
+        }
+        let url = discovery::speech_url(&self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&LocalSpeechRequest {
+                model: "gpt-4o-mini-tts",
+                input,
+                response_format: "wav",
+            })
+            .send()
+            .await
+            .map_err(|error| SpeechError::Request(format!("request to {url} failed: {error}")))?;
+        let status = response.status();
+        let format = response
+            .headers()
+            .get("X-Codex-Voice-Format")
+            .and_then(|value| value.to_str().ok())
+            .and_then(SpeechFormat::from_openai)
+            .unwrap_or(SpeechFormat::Wav);
+        let mime_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or(format.mime_type())
+            .to_string();
+        let body = response.bytes().await.map_err(|error| {
+            SpeechError::Request(format!("failed to read response body: {error}"))
+        })?;
+        if !status.is_success() {
+            let message = response_body_preview(&body);
+            return Err(SpeechError::Service {
+                status: status.as_u16(),
+                message: format!("local speech endpoint returned {status}: {message}"),
+            });
+        }
+        Ok(SynthesizedSpeech {
+            bytes: body,
+            format,
+            mime_type,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct LocalSpeechRequest<'a> {
+    model: &'static str,
+    input: &'a str,
+    response_format: &'static str,
+}
+
+fn response_body_preview(body: &Bytes) -> String {
+    let text = String::from_utf8_lossy(body);
+    let redacted = codex_voice_core::redact_diagnostics(&text);
+    if redacted.len() > MAX_PROBE_BYTES {
+        format!(
+            "{}... (truncated)",
+            truncate_utf8(&redacted, MAX_PROBE_BYTES)
+        )
+    } else {
+        redacted
+    }
+}
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 #[async_trait]
@@ -99,8 +180,8 @@ impl TranscriptionClient for LocalTranscriberClient {
             TranscriptionError::Request(format!("failed to read response body: {error}"))
         })?;
         if !status.is_success() {
-            let message = if body.len() > MAX_PROBE_BYTES as usize {
-                format!("{}... (truncated)", &body[..MAX_PROBE_BYTES as usize])
+            let message = if body.len() > MAX_PROBE_BYTES {
+                format!("{}... (truncated)", truncate_utf8(&body, MAX_PROBE_BYTES))
             } else {
                 body
             };
@@ -133,10 +214,12 @@ pub async fn transcribe_path(
 mod tests {
     use super::*;
     use axum::{
-        http::{header, HeaderMap, StatusCode},
-        routing::get,
-        Router,
+        body,
+        http::{header, HeaderMap, HeaderName, StatusCode},
+        routing::{get, post},
+        Json, Router,
     };
+    use serde_json::Value;
 
     #[tokio::test]
     async fn discover_sends_bearer_token_to_health_probe() {
@@ -178,5 +261,65 @@ mod tests {
 
         server.abort();
         assert!(discovered.is_some());
+    }
+
+    #[tokio::test]
+    async fn synthesize_speech_sends_openai_wav_request_without_voice() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server local addr");
+        let app = Router::new().route(
+            "/v1/audio/speech",
+            post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                assert_eq!(
+                    headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("Bearer test-token")
+                );
+                assert_eq!(body["model"], "gpt-4o-mini-tts");
+                assert_eq!(body["input"], "hello");
+                assert_eq!(body["response_format"], "wav");
+                assert!(body.get("voice").is_none());
+                (
+                    [
+                        (header::CONTENT_TYPE, "audio/wav"),
+                        (HeaderName::from_static("x-codex-voice-format"), "wav"),
+                    ],
+                    body::Body::from("audio"),
+                )
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve speech endpoint");
+        });
+        let client = LocalTranscriberClient {
+            base_url: format!("http://{addr}"),
+            token: "test-token".to_string(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .expect("client builds"),
+        };
+
+        let speech = client.synthesize_speech("hello").await.expect("speech ok");
+
+        server.abort();
+        assert_eq!(&speech.bytes[..], b"audio");
+        assert_eq!(speech.format, SpeechFormat::Wav);
+        assert_eq!(speech.mime_type, "audio/wav");
+    }
+
+    #[test]
+    fn response_body_preview_truncates_on_utf8_boundary() {
+        let body = Bytes::from(format!("{}é", "a".repeat(MAX_PROBE_BYTES - 1)));
+
+        let preview = response_body_preview(&body);
+
+        assert!(preview.ends_with("... (truncated)"));
+        assert!(!preview.contains('é'));
     }
 }

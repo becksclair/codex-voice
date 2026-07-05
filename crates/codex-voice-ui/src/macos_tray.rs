@@ -16,15 +16,18 @@ use crate::UiStatus;
 
 const MENU_STATUS: &str = "status";
 const MENU_TEST_RECORDING: &str = "test-recording";
+const MENU_SPEAK_TEXT: &str = "speak-text";
 const MENU_SETTINGS: &str = "settings";
 const MENU_LOGS: &str = "logs";
 const MENU_DIAGNOSTICS: &str = "diagnostics";
 const MENU_QUIT: &str = "quit";
 const ICON_SIZE: u32 = 32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiCommand {
     StartTestRecording,
+    SpeakText(String),
+    PlayLastSpeech,
     OpenLogs,
     RunDiagnostics,
     Quit,
@@ -100,6 +103,7 @@ fn initialize_tray(
     let status_item = MenuItem::with_id(MENU_STATUS, initial.tray_label(), false, None);
     let test_recording_item =
         MenuItem::with_id(MENU_TEST_RECORDING, "Start Test Recording", true, None);
+    let speak_text_item = MenuItem::with_id(MENU_SPEAK_TEXT, "Speak text...", true, None);
     let settings_item = MenuItem::with_id(MENU_SETTINGS, "Open Settings", true, None);
     let logs_item = MenuItem::with_id(MENU_LOGS, "Open Logs", true, None);
     let diagnostics_item = MenuItem::with_id(MENU_DIAGNOSTICS, "Run Diagnostics", true, None);
@@ -110,6 +114,7 @@ fn initialize_tray(
         &status_item,
         &separator,
         &test_recording_item,
+        &speak_text_item,
         &settings_item,
         &logs_item,
         &diagnostics_item,
@@ -146,6 +151,9 @@ fn initialize_tray(
             match event.id().as_ref() {
                 MENU_TEST_RECORDING => {
                     let _ = command_tx.send(UiCommand::StartTestRecording);
+                }
+                MENU_SPEAK_TEXT => {
+                    show_speak_text_dialog(command_tx.clone());
                 }
                 MENU_SETTINGS => {
                     show_settings_dialog(&config, &current_status);
@@ -229,6 +237,27 @@ fn show_settings_dialog(config: &MacOSUiConfig, status: &UiStatus) {
             let _ = child.wait();
         });
     }
+}
+
+fn show_speak_text_dialog(command_tx: Sender<UiCommand>) {
+    thread::spawn(move || {
+        let script = "display dialog \"Paste text to speak:\" default answer \"\" buttons {\"Cancel\", \"Play\", \"Generate\"} default button \"Generate\" with title \"Speak Text\"";
+        let output = Command::new("osascript").arg("-e").arg(script).output();
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("button returned:Play") {
+                let _ = command_tx.send(UiCommand::PlayLastSpeech);
+            } else if stdout.contains("button returned:Generate") {
+                let text = stdout
+                    .split("text returned:")
+                    .nth(1)
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string();
+                let _ = command_tx.send(UiCommand::SpeakText(text));
+            }
+        }
+    });
 }
 
 fn build_icon_cache() -> Result<HashMap<DictationState, Icon>, String> {

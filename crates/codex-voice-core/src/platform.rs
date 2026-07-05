@@ -18,6 +18,7 @@ pub enum PlatformError {
 pub enum HotkeyEvent {
     Pressed,
     Released,
+    SpeakSelection,
 }
 
 pub trait HotkeyService: Send + Sync {
@@ -27,6 +28,18 @@ pub trait HotkeyService: Send + Sync {
 #[async_trait]
 pub trait TextInjector: Send + Sync {
     async fn insert_text(&self, text: &str) -> PlatformResult<InsertReport>;
+}
+
+#[async_trait]
+pub trait SelectedTextReader: Send + Sync {
+    async fn selected_text(&self) -> PlatformResult<SelectedText>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedText {
+    pub text: String,
+    pub chars: usize,
+    pub restored_clipboard: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

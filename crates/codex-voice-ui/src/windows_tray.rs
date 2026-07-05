@@ -4,6 +4,7 @@ use std::{
     ffi::OsStr,
     os::windows::ffi::OsStrExt,
     path::PathBuf,
+    process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::Duration,
@@ -29,6 +30,7 @@ use crate::UiStatus;
 
 const MENU_STATUS: &str = "status";
 const MENU_TEST_RECORDING: &str = "test-recording";
+const MENU_SPEAK_TEXT: &str = "speak-text";
 const MENU_SETTINGS: &str = "settings";
 const MENU_LOGS: &str = "logs";
 const MENU_DIAGNOSTICS: &str = "diagnostics";
@@ -36,9 +38,11 @@ const MENU_QUIT: &str = "quit";
 const ICON_SIZE: u32 = 32;
 const SETTINGS_CLASS_NAME: &str = "CodexVoiceSettingsWindow";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiCommand {
     StartTestRecording,
+    SpeakText(String),
+    PlayLastSpeech,
     OpenLogs,
     RunDiagnostics,
     Quit,
@@ -114,6 +118,7 @@ fn initialize_tray(
     let status_item = MenuItem::with_id(MENU_STATUS, initial.tray_label(), false, None);
     let test_recording_item =
         MenuItem::with_id(MENU_TEST_RECORDING, "Start Test Recording", true, None);
+    let speak_text_item = MenuItem::with_id(MENU_SPEAK_TEXT, "Speak text...", true, None);
     let settings_item = MenuItem::with_id(MENU_SETTINGS, "Open Settings", true, None);
     let logs_item = MenuItem::with_id(MENU_LOGS, "Open Logs", true, None);
     let diagnostics_item = MenuItem::with_id(MENU_DIAGNOSTICS, "Run Diagnostics", true, None);
@@ -124,6 +129,7 @@ fn initialize_tray(
         &status_item,
         &separator,
         &test_recording_item,
+        &speak_text_item,
         &settings_item,
         &logs_item,
         &diagnostics_item,
@@ -159,6 +165,9 @@ fn initialize_tray(
                 MENU_TEST_RECORDING => {
                     let _ = command_tx.send(UiCommand::StartTestRecording);
                 }
+                MENU_SPEAK_TEXT => {
+                    show_speak_text_dialog(command_tx.clone());
+                }
                 MENU_SETTINGS => {
                     show_settings_window(&config, &current_status);
                 }
@@ -186,6 +195,76 @@ fn show_settings_window(config: &WindowsUiConfig, initial: &UiStatus) {
     thread::spawn(move || {
         let _ = run_settings_window(config, initial);
     });
+}
+
+fn show_speak_text_dialog(command_tx: Sender<UiCommand>) {
+    thread::spawn(move || {
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Speak Text'
+$form.Width = 620
+$form.Height = 430
+$text = New-Object System.Windows.Forms.TextBox
+$text.Multiline = $true
+$text.ScrollBars = 'Vertical'
+$text.AcceptsReturn = $true
+$text.AcceptsTab = $true
+$text.SetBounds(12,12,580,300)
+$generate = New-Object System.Windows.Forms.Button
+$generate.Text = 'Generate'
+$generate.SetBounds(12,325,95,32)
+$play = New-Object System.Windows.Forms.Button
+$play.Text = 'Play'
+$play.SetBounds(116,325,75,32)
+$close = New-Object System.Windows.Forms.Button
+$close.Text = 'Close'
+$close.SetBounds(500,325,75,32)
+$generate.Add_Click({ [Console]::Out.WriteLine('GENERATE:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text.Text))); $form.Close() })
+$play.Add_Click({ [Console]::Out.WriteLine('PLAY'); $form.Close() })
+$close.Add_Click({ $form.Close() })
+$form.Controls.AddRange(@($text,$generate,$play,$close))
+[void]$form.ShowDialog()
+"#;
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .output();
+        if let Ok(output) = output {
+            let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if line == "PLAY" {
+                let _ = command_tx.send(UiCommand::PlayLastSpeech);
+            } else if let Some(encoded) = line.strip_prefix("GENERATE:") {
+                if let Ok(bytes) = decode_base64(encoded) {
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        let _ = command_tx.send(UiCommand::SpeakText(text));
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, ()> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0_u32;
+    let mut bits = 0_u8;
+    for byte in input.bytes().filter(|b| !b.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+        let Some(value) = TABLE.iter().position(|candidate| *candidate == byte) else {
+            return Err(());
+        };
+        buf = (buf << 6) | value as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
 }
 
 fn run_settings_window(config: WindowsUiConfig, initial: UiStatus) -> Result<(), String> {

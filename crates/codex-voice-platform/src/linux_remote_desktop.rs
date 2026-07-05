@@ -16,6 +16,7 @@ use crate::{
 
 const SESSION_START_TIMEOUT: Duration = Duration::from_secs(12);
 const KEYCODE_CONTROL_LEFT: i32 = 29;
+const KEYCODE_C: i32 = 46;
 const KEYCODE_V: i32 = 47;
 
 #[derive(Debug, Clone, Default)]
@@ -49,9 +50,17 @@ impl RemoteDesktopSessionManager {
     }
 
     pub async fn send_paste_chord(&self) -> PlatformResult<()> {
+        self.send_control_chord(KEYCODE_V).await
+    }
+
+    pub async fn send_copy_chord(&self) -> PlatformResult<()> {
+        self.send_control_chord(KEYCODE_C).await
+    }
+
+    async fn send_control_chord(&self, keycode: i32) -> PlatformResult<()> {
         self.send_keycode_state(KEYCODE_CONTROL_LEFT, KeyState::Pressed)
             .await?;
-        let key_result = self.send_keycode_raw(KEYCODE_V).await;
+        let key_result = self.send_keycode_raw(keycode).await;
         let release_result = self
             .send_keycode_state(KEYCODE_CONTROL_LEFT, KeyState::Released)
             .await;

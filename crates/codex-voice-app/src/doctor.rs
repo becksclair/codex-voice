@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use codex_voice_audio::{wav_duration, CpalWavRecorder};
 use codex_voice_codex::CodexAuthService;
+#[cfg(target_os = "linux")]
+use codex_voice_core::PermissionService;
 use codex_voice_core::{
-    AudioRecorder, HotkeyService, PermissionService, RecordedAudio, TextInjector,
-    TranscriptionClient,
+    AudioRecorder, HotkeyService, RecordedAudio, TextInjector, TranscriptionClient,
 };
 use std::{path::PathBuf, time::Duration};
 use tokio::sync::mpsc;
@@ -187,6 +188,7 @@ platform_impl! {
     other(anyhow::bail!("portal diagnostics are implemented for Linux only"))
 }
 
+#[cfg(target_os = "linux")]
 async fn check_portals(service: impl PermissionService) -> Result<()> {
     for status in service.check().await? {
         println!(

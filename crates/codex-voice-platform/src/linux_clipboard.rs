@@ -52,6 +52,13 @@ impl LinuxClipboard {
         }
     }
 
+    pub fn primary_selection(&self) -> ClipboardSnapshot {
+        match self.backend {
+            ClipboardBackend::WlClipboard => read_wl_selection(true),
+            ClipboardBackend::Arboard => ClipboardSnapshot::Unavailable,
+        }
+    }
+
     pub fn set_text(&self, text: &str) -> PlatformResult<()> {
         match self.backend {
             ClipboardBackend::WlClipboard => write_wl_clipboard(text),
@@ -79,13 +86,21 @@ impl LinuxClipboard {
 }
 
 fn read_wl_clipboard() -> ClipboardSnapshot {
-    match wl_clipboard_text_state() {
+    read_wl_selection(false)
+}
+
+fn read_wl_selection(primary: bool) -> ClipboardSnapshot {
+    match wl_clipboard_text_state(primary) {
         WlClipboardTextState::Text => {}
         WlClipboardTextState::Empty => return ClipboardSnapshot::Empty,
         WlClipboardTextState::Unavailable => return ClipboardSnapshot::Unavailable,
     }
 
-    let output = Command::new("wl-paste")
+    let mut command = Command::new("wl-paste");
+    if primary {
+        command.arg("--primary");
+    }
+    let output = command
         .args(["--no-newline", "--type", "text/plain;charset=utf-8"])
         .output();
     match output {
@@ -102,8 +117,12 @@ enum WlClipboardTextState {
     Unavailable,
 }
 
-fn wl_clipboard_text_state() -> WlClipboardTextState {
-    let output = Command::new("wl-paste").arg("--list-types").output();
+fn wl_clipboard_text_state(primary: bool) -> WlClipboardTextState {
+    let mut command = Command::new("wl-paste");
+    if primary {
+        command.arg("--primary");
+    }
+    let output = command.arg("--list-types").output();
     match output {
         Ok(output) if output.status.success() => {
             let types = String::from_utf8_lossy(&output.stdout);

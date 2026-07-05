@@ -16,15 +16,18 @@ use crate::UiStatus;
 
 const MENU_STATUS: &str = "status";
 const MENU_TEST_RECORDING: &str = "test-recording";
+const MENU_SPEAK_TEXT: &str = "speak-text";
 const MENU_SETTINGS: &str = "settings";
 const MENU_LOGS: &str = "logs";
 const MENU_DIAGNOSTICS: &str = "diagnostics";
 const MENU_QUIT: &str = "quit";
 const ICON_SIZE: u32 = 32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiCommand {
     StartTestRecording,
+    SpeakText(String),
+    PlayLastSpeech,
     OpenLogs,
     RunDiagnostics,
     Quit,
@@ -105,6 +108,7 @@ fn initialize_tray(
     let status_item = MenuItem::with_id(MENU_STATUS, initial.tray_label(), false, None);
     let test_recording_item =
         MenuItem::with_id(MENU_TEST_RECORDING, "Start Test Recording", true, None);
+    let speak_text_item = MenuItem::with_id(MENU_SPEAK_TEXT, "Speak text...", true, None);
     let settings_item = MenuItem::with_id(MENU_SETTINGS, "Open Settings", true, None);
     let logs_item = MenuItem::with_id(MENU_LOGS, "Open Logs", true, None);
     let diagnostics_item = MenuItem::with_id(MENU_DIAGNOSTICS, "Run Diagnostics", true, None);
@@ -115,6 +119,7 @@ fn initialize_tray(
         &status_item,
         &separator,
         &test_recording_item,
+        &speak_text_item,
         &settings_item,
         &logs_item,
         &diagnostics_item,
@@ -134,6 +139,7 @@ fn initialize_tray(
         .map_err(|error| format!("failed to create tray icon: {error}"))?;
     let mut hud = HudWindow::new();
     let settings = SettingsWindow::new(&initial, &config);
+    let speak_dialog = SpeakTextDialog::new(command_tx.clone());
 
     let _ = ready_tx.send(Ok(()));
 
@@ -158,6 +164,9 @@ fn initialize_tray(
                 }
                 MENU_SETTINGS => {
                     settings.show();
+                }
+                MENU_SPEAK_TEXT => {
+                    speak_dialog.show();
                 }
                 MENU_LOGS => {
                     let _ = command_tx.send(UiCommand::OpenLogs);
@@ -310,6 +319,76 @@ impl SettingsWindow {
 
         self.status_label
             .set_label(&format!("Status: {}", status.message));
+    }
+}
+
+struct SpeakTextDialog {
+    window: gtk::Window,
+}
+
+impl SpeakTextDialog {
+    fn new(command_tx: Sender<UiCommand>) -> Self {
+        use gtk::prelude::*;
+
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title("Speak Text");
+        window.set_default_size(520, 360);
+
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        root.set_margin_top(14);
+        root.set_margin_bottom(14);
+        root.set_margin_start(14);
+        root.set_margin_end(14);
+
+        let scroller = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+        scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        scroller.set_vexpand(true);
+
+        let text_view = gtk::TextView::new();
+        text_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        scroller.add(&text_view);
+        root.pack_start(&scroller, true, true, 0);
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let generate = gtk::Button::with_label("Generate");
+        let play = gtk::Button::with_label("Play");
+        let close = gtk::Button::with_label("Close");
+        buttons.pack_start(&generate, false, false, 0);
+        buttons.pack_start(&play, false, false, 0);
+        buttons.pack_end(&close, false, false, 0);
+        root.pack_start(&buttons, false, false, 0);
+
+        let buffer = text_view.buffer().expect("TextView has a buffer");
+        let tx = command_tx.clone();
+        generate.connect_clicked(move |_| {
+            let start = buffer.start_iter();
+            let end = buffer.end_iter();
+            let text = buffer
+                .text(&start, &end, true)
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            let _ = tx.send(UiCommand::SpeakText(text));
+        });
+
+        let tx = command_tx.clone();
+        play.connect_clicked(move |_| {
+            let _ = tx.send(UiCommand::PlayLastSpeech);
+        });
+
+        let close_window = window.clone();
+        close.connect_clicked(move |_| {
+            close_window.hide();
+        });
+
+        window.add(&root);
+        Self { window }
+    }
+
+    fn show(&self) {
+        use gtk::prelude::*;
+
+        self.window.show_all();
+        self.window.present();
     }
 }
 

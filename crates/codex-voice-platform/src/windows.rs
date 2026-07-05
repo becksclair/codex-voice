@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use codex_voice_core::{
     HotkeyEvent, HotkeyService, InsertMethod, InsertReport, PermissionKind, PermissionService,
-    PermissionStatus, PlatformError, PlatformResult, TextInjector,
+    PermissionStatus, PlatformError, PlatformResult, SelectedText, SelectedTextReader,
+    TextInjector,
 };
 use std::{
     io,
@@ -12,11 +13,13 @@ use std::{
 use tokio::sync::mpsc;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VK_CONTROL, VK_LCONTROL, VK_M, VK_RCONTROL, VK_V,
+    KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VK_C, VK_CONTROL, VK_F6, VK_LCONTROL, VK_LWIN, VK_M,
+    VK_RCONTROL, VK_RWIN, VK_V,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PASTE_SETTLE: Duration = Duration::from_millis(80);
+const COPY_SETTLE: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Default, Clone)]
 pub struct WindowsPermissionService;
@@ -94,6 +97,38 @@ impl TextInjector for WindowsTextInjector {
     }
 }
 
+#[async_trait]
+impl SelectedTextReader for WindowsTextInjector {
+    async fn selected_text(&self) -> PlatformResult<SelectedText> {
+        let mut clipboard = arboard::Clipboard::new().map_err(|error| {
+            PlatformError::Unavailable(format!("failed to open clipboard: {error}"))
+        })?;
+        let previous = clipboard.get_text().ok();
+        let sentinel = selection_sentinel();
+        clipboard
+            .set_text(sentinel.clone())
+            .map_err(|error| PlatformError::Message(format!("failed to set clipboard: {error}")))?;
+
+        wait_for_modifier_release(Duration::from_secs(2)).await;
+        tokio::time::sleep(PASTE_SETTLE).await;
+        let copy_result = send_ctrl_c();
+        tokio::time::sleep(COPY_SETTLE).await;
+
+        let copied = clipboard.get_text().ok();
+        let restored_clipboard = restore_clipboard(&mut clipboard, previous);
+        copy_result?;
+
+        match copied {
+            Some(text) if !text.is_empty() && text != sentinel => Ok(SelectedText {
+                chars: text.chars().count(),
+                text,
+                restored_clipboard,
+            }),
+            _ => Err(PlatformError::Unavailable("no selected text found".into())),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct WindowsHotkeyService;
 
@@ -119,6 +154,7 @@ impl HotkeyService for WindowsHotkeyService {
 
 fn poll_control_m(events: mpsc::Sender<HotkeyEvent>) {
     let mut active = false;
+    let mut speak_active = false;
     loop {
         let pressed = key_down(VK_M) && control_down();
         if pressed != active {
@@ -132,6 +168,13 @@ fn poll_control_m(events: mpsc::Sender<HotkeyEvent>) {
                 break;
             }
         }
+        let speak_pressed = key_down(VK_F6) && super_down();
+        if speak_pressed && !speak_active {
+            if events.blocking_send(HotkeyEvent::SpeakSelection).is_err() {
+                break;
+            }
+        }
+        speak_active = speak_pressed;
         thread::sleep(POLL_INTERVAL);
     }
 }
@@ -147,15 +190,34 @@ fn control_down() -> bool {
     key_down(VK_CONTROL) || key_down(VK_LCONTROL) || key_down(VK_RCONTROL)
 }
 
+fn super_down() -> bool {
+    key_down(VK_LWIN) || key_down(VK_RWIN)
+}
+
 fn key_down(key: u16) -> bool {
     unsafe { GetAsyncKeyState(key as i32) < 0 }
 }
 
+async fn wait_for_modifier_release(timeout: Duration) {
+    let start = Instant::now();
+    while (control_down() || super_down()) && start.elapsed() < timeout {
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+fn send_ctrl_c() -> PlatformResult<()> {
+    send_ctrl_chord(VK_C, "copy")
+}
+
 fn send_ctrl_v() -> PlatformResult<()> {
+    send_ctrl_chord(VK_V, "paste")
+}
+
+fn send_ctrl_chord(key: u16, label: &str) -> PlatformResult<()> {
     let inputs = [
         keyboard_input(VK_CONTROL, 0),
-        keyboard_input(VK_V, 0),
-        keyboard_input(VK_V, KEYEVENTF_KEYUP),
+        keyboard_input(key, 0),
+        keyboard_input(key, KEYEVENTF_KEYUP),
         keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
     ];
     let sent = unsafe {
@@ -170,10 +232,22 @@ fn send_ctrl_v() -> PlatformResult<()> {
     } else {
         let error = io::Error::last_os_error();
         Err(PlatformError::Message(format!(
-            "SendInput sent {sent}/{} events; last_os_error={error}; insertion may be blocked by UIPI/elevation or a non-interactive desktop",
-            inputs.len()
+            "SendInput {label} sent {sent}/{} events; last_os_error={error}; input may be blocked by UIPI/elevation or a non-interactive desktop",
+            inputs.len(),
         )))
     }
+}
+
+fn selection_sentinel() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "codex-voice-selection-sentinel-{}-{}",
+        std::process::id(),
+        nanos
+    )
 }
 
 fn restore_clipboard(clipboard: &mut arboard::Clipboard, previous: Option<String>) -> bool {

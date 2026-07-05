@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use codex_voice_core::{
     HotkeyEvent, HotkeyService, InsertMethod, InsertReport, PermissionKind, PermissionService,
-    PermissionStatus, PlatformError, PlatformResult, TextInjector,
+    PermissionStatus, PlatformError, PlatformResult, SelectedText, SelectedTextReader,
+    TextInjector,
 };
 use std::{
     ffi::{c_char, c_void},
@@ -205,6 +206,92 @@ impl TextInjector for MacOSTextInjector {
     }
 }
 
+#[async_trait]
+impl SelectedTextReader for MacOSTextInjector {
+    async fn selected_text(&self) -> PlatformResult<SelectedText> {
+        match self.selected_text_via_accessibility().await {
+            Ok(text) => return Ok(text),
+            Err(error) => {
+                tracing::warn!(%error, "accessibility selected-text read failed, falling back to clipboard copy");
+            }
+        }
+        self.selected_text_via_clipboard().await
+    }
+}
+
+impl MacOSTextInjector {
+    async fn selected_text_via_accessibility(&self) -> PlatformResult<SelectedText> {
+        if !is_accessibility_trusted() {
+            return Err(PlatformError::Unavailable(
+                "Accessibility permission not granted".into(),
+            ));
+        }
+
+        let system_wide = unsafe { AXUIElementCreateSystemWide() };
+        if system_wide.is_null() {
+            return Err(PlatformError::Unavailable(
+                "failed to create system-wide AX element".into(),
+            ));
+        }
+        let _system_wide_guard = ReleaseOnDrop(system_wide);
+
+        let focused = get_focused_element(system_wide)?;
+        let _focused_guard = ReleaseOnDrop(focused);
+        let attr = cfstring_from_static("AXSelectedText");
+        if attr.is_null() {
+            return Err(PlatformError::Unavailable(
+                "failed to allocate attribute CFString".into(),
+            ));
+        }
+        let _attr_guard = ReleaseOnDrop(attr);
+
+        let mut value: *mut c_void = std::ptr::null_mut();
+        let result = unsafe { AXUIElementCopyAttributeValue(focused, attr, &mut value) };
+        if result != 0 || value.is_null() {
+            return Err(PlatformError::Unavailable(format!(
+                "AX selected text unavailable with error {result}"
+            )));
+        }
+        let _value_guard = ReleaseOnDrop(value);
+        let text = cfstring_to_string(value)
+            .ok_or_else(|| PlatformError::Unavailable("selected text is not UTF-8".into()))?;
+        if text.is_empty() {
+            return Err(PlatformError::Unavailable("no selected text found".into()));
+        }
+        Ok(SelectedText {
+            chars: text.chars().count(),
+            text,
+            restored_clipboard: true,
+        })
+    }
+
+    async fn selected_text_via_clipboard(&self) -> PlatformResult<SelectedText> {
+        let mut clipboard = arboard::Clipboard::new().map_err(|error| {
+            PlatformError::Unavailable(format!("failed to open clipboard: {error}"))
+        })?;
+        let previous = clipboard.get_text().ok();
+        let sentinel = selection_sentinel();
+        clipboard
+            .set_text(sentinel.clone())
+            .map_err(|error| PlatformError::Message(format!("failed to set clipboard: {error}")))?;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        send_cmd_c();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        let copied = clipboard.get_text().ok();
+        let restored_clipboard = restore_clipboard(&mut clipboard, previous);
+        match copied {
+            Some(text) if !text.is_empty() && text != sentinel => Ok(SelectedText {
+                chars: text.chars().count(),
+                text,
+                restored_clipboard,
+            }),
+            _ => Err(PlatformError::Unavailable("no selected text found".into())),
+        }
+    }
+}
+
 fn get_focused_element(system_wide: AXUIElementRef) -> PlatformResult<AXUIElementRef> {
     let attr = cfstring_from_static("AXFocusedUIElement");
     if attr.is_null() {
@@ -266,15 +353,19 @@ impl HotkeyService for MacOSHotkeyService {
     fn start(&self, events: mpsc::Sender<HotkeyEvent>) -> PlatformResult<()> {
         use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, HotKeyState};
 
-        let hotkey = HotKey::new(
+        let dictation_hotkey = HotKey::new(
             Some(global_hotkey::hotkey::Modifiers::CONTROL),
             global_hotkey::hotkey::Code::KeyM,
+        );
+        let speak_hotkey = HotKey::new(
+            Some(global_hotkey::hotkey::Modifiers::SUPER),
+            global_hotkey::hotkey::Code::F6,
         );
 
         self.manager
             .lock()
             .map_err(|_| PlatformError::Unavailable("hotkey manager lock poisoned".into()))?
-            .register(hotkey)
+            .register_all(&[dictation_hotkey, speak_hotkey])
             .map_err(|error| {
                 PlatformError::Unavailable(format!("failed to register global hotkey: {error}"))
             })?;
@@ -286,12 +377,18 @@ impl HotkeyService for MacOSHotkeyService {
                 loop {
                     match receiver.recv() {
                         Ok(event) => {
-                            if event.id == hotkey.id() {
+                            if event.id == dictation_hotkey.id() {
                                 let hotkey_event = match event.state {
                                     HotKeyState::Pressed => HotkeyEvent::Pressed,
                                     HotKeyState::Released => HotkeyEvent::Released,
                                 };
                                 if events.blocking_send(hotkey_event).is_err() {
+                                    break;
+                                }
+                            } else if event.id == speak_hotkey.id()
+                                && event.state == HotKeyState::Pressed
+                            {
+                                if events.blocking_send(HotkeyEvent::SpeakSelection).is_err() {
                                     break;
                                 }
                             }
@@ -312,39 +409,46 @@ impl HotkeyService for MacOSHotkeyService {
 // CGEvent paste fallback (Command+V)
 // ---------------------------------------------------------------------------
 
+fn send_cmd_c() {
+    send_cmd_chord(kVK_ANSI_C);
+}
+
 fn send_cmd_v() {
+    send_cmd_chord(kVK_ANSI_V);
+}
+
+fn send_cmd_chord(key: u16) {
     let source = unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) };
     if source.is_null() {
-        tracing::warn!("CGEventSourceCreate returned null; paste will not work");
+        tracing::warn!("CGEventSourceCreate returned null; keyboard chord will not work");
         return;
     }
     let _source_guard = ReleaseOnDrop(source);
 
     let cmd_down = unsafe { CGEventCreateKeyboardEvent(source, kVK_Command, true) };
-    let v_down = unsafe { CGEventCreateKeyboardEvent(source, kVK_ANSI_V, true) };
-    let v_up = unsafe { CGEventCreateKeyboardEvent(source, kVK_ANSI_V, false) };
+    let key_down = unsafe { CGEventCreateKeyboardEvent(source, key, true) };
+    let key_up = unsafe { CGEventCreateKeyboardEvent(source, key, false) };
     let cmd_up = unsafe { CGEventCreateKeyboardEvent(source, kVK_Command, false) };
 
     let _cmd_down_guard = ReleaseOnDrop(cmd_down);
-    let _v_down_guard = ReleaseOnDrop(v_down);
-    let _v_up_guard = ReleaseOnDrop(v_up);
+    let _key_down_guard = ReleaseOnDrop(key_down);
+    let _key_up_guard = ReleaseOnDrop(key_up);
     let _cmd_up_guard = ReleaseOnDrop(cmd_up);
 
-    if cmd_down.is_null() || v_down.is_null() || v_up.is_null() || cmd_up.is_null() {
-        tracing::warn!("CGEventCreateKeyboardEvent returned null; paste will not work");
+    if cmd_down.is_null() || key_down.is_null() || key_up.is_null() || cmd_up.is_null() {
+        tracing::warn!("CGEventCreateKeyboardEvent returned null; keyboard chord will not work");
         return;
     }
 
     unsafe {
-        // Set Command flag on all events
         CGEventSetFlags(cmd_down, kCGEventFlagMaskCommand);
-        CGEventSetFlags(v_down, kCGEventFlagMaskCommand);
-        CGEventSetFlags(v_up, kCGEventFlagMaskCommand);
+        CGEventSetFlags(key_down, kCGEventFlagMaskCommand);
+        CGEventSetFlags(key_up, kCGEventFlagMaskCommand);
         CGEventSetFlags(cmd_up, kCGEventFlagMaskCommand);
 
         CGEventPost(kCGHIDEventTap, cmd_down);
-        CGEventPost(kCGHIDEventTap, v_down);
-        CGEventPost(kCGHIDEventTap, v_up);
+        CGEventPost(kCGHIDEventTap, key_down);
+        CGEventPost(kCGHIDEventTap, key_up);
         CGEventPost(kCGHIDEventTap, cmd_up);
     }
 }
@@ -379,6 +483,14 @@ extern "C" {
         cstr: *const c_char,
         encoding: u32,
     ) -> CFStringRef;
+    fn CFStringGetCString(
+        the_string: CFStringRef,
+        buffer: *mut c_char,
+        buffer_size: isize,
+        encoding: u32,
+    ) -> bool;
+    fn CFStringGetLength(the_string: CFStringRef) -> isize;
+    fn CFStringGetMaximumSizeForEncoding(length: isize, encoding: u32) -> isize;
     fn CFRelease(cf: *mut c_void);
 }
 
@@ -395,6 +507,7 @@ const kCGEventSourceStateHIDSystemState: i32 = 1;
 const kCGHIDEventTap: u32 = 0;
 const kCGEventFlagMaskCommand: u64 = 0x00100000;
 const kVK_Command: u16 = 0x37;
+const kVK_ANSI_C: u16 = 0x08;
 const kVK_ANSI_V: u16 = 0x09;
 
 fn cfstring_from_static(s: &'static str) -> CFStringRef {
@@ -415,4 +528,45 @@ fn cfstring_from_str(s: &str) -> PlatformResult<CFStringRef> {
         ));
     }
     Ok(ptr)
+}
+
+fn cfstring_to_string(value: *mut c_void) -> Option<String> {
+    let cf = value as CFStringRef;
+    let length = unsafe { CFStringGetLength(cf) };
+    if length < 0 {
+        return None;
+    }
+    let max = unsafe { CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) };
+    if max < 0 {
+        return None;
+    }
+    let mut buffer = vec![0_u8; max as usize + 1];
+    let ok = unsafe {
+        CFStringGetCString(
+            cf,
+            buffer.as_mut_ptr() as *mut c_char,
+            buffer.len() as isize,
+            kCFStringEncodingUTF8,
+        )
+    };
+    if !ok {
+        return None;
+    }
+    let nul = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf8(buffer[..nul].to_vec()).ok()
+}
+
+fn selection_sentinel() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "codex-voice-selection-sentinel-{}-{}",
+        std::process::id(),
+        nanos
+    )
 }

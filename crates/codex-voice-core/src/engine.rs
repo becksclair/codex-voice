@@ -280,4 +280,24 @@ mod tests {
         assert!(saw_error);
         assert_eq!(engine.state(), &DictationState::Idle);
     }
+
+    #[tokio::test]
+    async fn speak_selection_hotkey_does_not_change_dictation_state() {
+        let audio = Arc::new(FakeAudio {
+            recording: Mutex::new(None),
+            start_error: false,
+        });
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut engine = DictationEngine::new(
+            audio,
+            Arc::new(FakeTranscription("ignored".into())),
+            Arc::new(FakeInjector),
+            tx,
+        );
+
+        engine.handle_hotkey(HotkeyEvent::SpeakSelection).await;
+
+        assert!(rx.try_recv().is_err());
+        assert_eq!(engine.state(), &DictationState::Idle);
+    }
 }

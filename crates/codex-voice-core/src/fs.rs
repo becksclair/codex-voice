@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::path::Path;
 
 /// Write `bytes` to `path` atomically with owner-only permissions.
@@ -9,6 +8,7 @@ use std::path::Path;
 pub fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
             .create_new(true)

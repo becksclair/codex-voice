@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::{
     env,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use codex_voice_core::fs::{set_owner_only_directory_permissions, write_private_file_atomic};

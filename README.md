@@ -15,8 +15,8 @@ runtime first:
 - Local OpenAI-compatible text-to-speech (TTS) service backed by Google Gemini TTS or ElevenLabs.
 - Linux KDE/Wayland diagnostics for portal availability.
 - Linux clipboard paste diagnostic using RemoteDesktop portal keyboard events.
-- Linux tray, system notification status HUD, settings/status window, log file,
-  diagnostics, test recording, and quit menu actions.
+- Desktop tray, system notification status HUD, settings/status window, log file,
+  diagnostics, test recording, speak-text, and quit menu actions.
 
 ## Commands
 
@@ -33,12 +33,13 @@ cargo run -p codex-voice-app --bin codex-voice -- transcriber probe-limits --fil
 cargo run -p codex-voice-app --bin codex-voice -- run
 ```
 
-`run` currently uses the Linux engine wiring, binds Control-M plus the keyboard
-dictation key through the KDE GlobalShortcuts portal for hold-to-dictate, and
-exposes a Linux desktop surface with a tray menu, system notification status
-HUD, and settings/status window. If a healthy local transcriber service is
-running, `run` uses it as the transcription backend; otherwise it falls back to
-direct Codex transcription.
+`run` binds Control-M for hold-to-dictate and binds Super-F6 (Command-F6 on
+macOS, Win-F6 on Windows) to speak the currently selected text. It exposes a
+desktop tray surface with status, settings, diagnostics, test recording,
+`Speak text...`, replay, logs, and quit actions. If a healthy local transcriber
+service is running, `run` uses it as the transcription backend; otherwise it
+falls back to direct Codex transcription. Speech playback always uses the local
+audio service's `/v1/audio/speech` endpoint.
 
 ## Local Audio Server
 
@@ -84,7 +85,6 @@ The TTS endpoint accepts standard OpenAI TTS JSON requests:
 ```json
 {
   "model": "gpt-4o-mini-tts",
-  "voice": "sky",
   "input": "Hello from Codex Voice.",
   "response_format": "wav",
   "speed": 1.0
@@ -97,7 +97,8 @@ Google Gemini TTS currently returns raw `audio/L16;codec=pcm;rate=24000`, so
 `wav` is wrapped locally and compressed/container formats require `ffmpeg` on
 `PATH`.
 
-`voice` is required. It can be a configured persona name (e.g. `"sky"`) or a
+`voice` is optional. When omitted, the configured default persona/provider voice
+is used. When present, it can be a configured persona name (e.g. `"sky"`) or a
 provider-native voice identifier for the selected/default provider. If a persona
 is configured, the service uses the persona's primary provider and preserves
 persona context (scene, style, pace) across fallback to the other provider.

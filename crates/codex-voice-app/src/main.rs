@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use codex_voice_audio::CpalWavRecorder;
 use codex_voice_core::DictationState;
-use codex_voice_core::{AppEvent, DictationEngine, HotkeyEvent, HotkeyService, TextInjector};
+use codex_voice_core::{
+    AppEvent, DictationEngine, HotkeyEvent, HotkeyService, SelectedTextReader, TextInjector,
+};
 #[cfg(target_os = "linux")]
 use codex_voice_platform::LinuxTextInjector;
 #[cfg(target_os = "macos")]
@@ -21,9 +23,11 @@ use codex_voice_ui::{LinuxUiConfig, StatusTray, UiCommand, UiStatus};
 use codex_voice_ui::{MacOSUiConfig, StatusTray, UiCommand, UiStatus};
 #[cfg(target_os = "windows")]
 use codex_voice_ui::{StatusTray, UiCommand, UiStatus, WindowsUiConfig};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
 use cli::{Cli, Command, DoctorCommand, TranscriberCommand};
 
@@ -101,22 +105,35 @@ async fn run() -> Result<()> {
             None
         }
     };
+    let injector = Arc::new(LinuxTextInjector::new());
+    let speech_state = Arc::new(SpeechState::default());
     let DictationApp {
         mut engine,
         mut app_rx,
         mut hotkey_rx,
     } = DictationApp::new(
-        Arc::new(LinuxTextInjector::new()),
+        injector.clone(),
         codex_voice_platform::LinuxHotkeyService::new(),
     )
     .await?;
-    println!("Codex Voice is running. Hold Control-M or the keyboard dictation key to dictate through the KDE/Wayland GlobalShortcuts portal.");
+    println!("Codex Voice is running. Hold Control-M or the keyboard dictation key to dictate. Press Super-F6 to speak selected text.");
 
     let tray_busy = Arc::new(AtomicBool::new(false));
     let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
-            Some(event) = hotkey_rx.recv() => engine.handle_hotkey(event).await,
+            Some(event) = hotkey_rx.recv() => {
+                match event {
+                    HotkeyEvent::SpeakSelection => {
+                        let reader = injector.clone();
+                        let speech_state = speech_state.clone();
+                        spawn_status_task(status_sender_for_tray(tray.as_ref()), &tray_busy, move |status_tx| {
+                            run_speak_selection(status_tx, reader, speech_state)
+                        });
+                    }
+                    other => engine.handle_hotkey(other).await,
+                }
+            },
             Some(event) = app_rx.recv() => {
                 if let Some(ref tray) = tray {
                     if let Some(status) = UiStatus::from_app_event(&event) {
@@ -135,6 +152,18 @@ async fn run() -> Result<()> {
                             UiCommand::OpenLogs => open_tray_logs(tray),
                             UiCommand::RunDiagnostics => {
                                 spawn_tray_task(tray, &tray_busy, run_tray_diagnostics);
+                            }
+                            UiCommand::SpeakText(text) => {
+                                let speech_state = speech_state.clone();
+                                spawn_tray_task(tray, &tray_busy, move |status_tx| {
+                                    run_speak_text(status_tx, text, speech_state)
+                                });
+                            }
+                            UiCommand::PlayLastSpeech => {
+                                let speech_state = speech_state.clone();
+                                spawn_tray_task(tray, &tray_busy, move |status_tx| {
+                                    run_play_last_speech(status_tx, speech_state)
+                                });
                             }
                             UiCommand::Quit => return Ok(()),
                         }
@@ -157,22 +186,37 @@ async fn run() -> Result<()> {
             None
         }
     };
+    let injector = Arc::new(WindowsTextInjector::new());
+    let speech_state = Arc::new(SpeechState::default());
     let DictationApp {
         mut engine,
         mut app_rx,
         mut hotkey_rx,
     } = DictationApp::new(
-        Arc::new(WindowsTextInjector::new()),
+        injector.clone(),
         codex_voice_platform::WindowsHotkeyService::new(),
     )
     .await?;
-    println!("Codex Voice is running. Hold Control-M to dictate. Paste insertion uses clipboard plus SendInput and may be blocked for elevated target apps.");
+    println!(
+        "Codex Voice is running. Hold Control-M to dictate. Press Win-F6 to speak selected text."
+    );
 
     let tray_busy = Arc::new(AtomicBool::new(false));
     let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
-            Some(event) = hotkey_rx.recv() => engine.handle_hotkey(event).await,
+            Some(event) = hotkey_rx.recv() => {
+                match event {
+                    HotkeyEvent::SpeakSelection => {
+                        let reader = injector.clone();
+                        let speech_state = speech_state.clone();
+                        spawn_status_task(status_sender_for_tray(tray.as_ref()), &tray_busy, move |status_tx| {
+                            run_speak_selection(status_tx, reader, speech_state)
+                        });
+                    }
+                    other => engine.handle_hotkey(other).await,
+                }
+            },
             Some(event) = app_rx.recv() => {
                 if let Some(ref tray) = tray {
                     if let Some(status) = UiStatus::from_app_event(&event) {
@@ -191,6 +235,18 @@ async fn run() -> Result<()> {
                             UiCommand::OpenLogs => open_tray_logs(tray),
                             UiCommand::RunDiagnostics => {
                                 spawn_tray_task(tray, &tray_busy, run_tray_diagnostics);
+                            }
+                            UiCommand::SpeakText(text) => {
+                                let speech_state = speech_state.clone();
+                                spawn_tray_task(tray, &tray_busy, move |status_tx| {
+                                    run_speak_text(status_tx, text, speech_state)
+                                });
+                            }
+                            UiCommand::PlayLastSpeech => {
+                                let speech_state = speech_state.clone();
+                                spawn_tray_task(tray, &tray_busy, move |status_tx| {
+                                    run_play_last_speech(status_tx, speech_state)
+                                });
                             }
                             UiCommand::Quit => return Ok(()),
                         }
@@ -213,22 +269,35 @@ async fn run() -> Result<()> {
             None
         }
     };
+    let injector = Arc::new(MacOSTextInjector::new());
+    let speech_state = Arc::new(SpeechState::default());
     let DictationApp {
         mut engine,
         mut app_rx,
         mut hotkey_rx,
     } = DictationApp::new(
-        Arc::new(MacOSTextInjector::new()),
+        injector.clone(),
         codex_voice_platform::MacOSHotkeyService::new()?,
     )
     .await?;
-    println!("Codex Voice is running. Hold Control-M to dictate. Text insertion uses macOS Accessibility API with clipboard paste fallback.");
+    println!("Codex Voice is running. Hold Control-M to dictate. Press Command-F6 to speak selected text.");
 
     let tray_busy = Arc::new(AtomicBool::new(false));
     let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
-            Some(event) = hotkey_rx.recv() => engine.handle_hotkey(event).await,
+            Some(event) = hotkey_rx.recv() => {
+                match event {
+                    HotkeyEvent::SpeakSelection => {
+                        let reader = injector.clone();
+                        let speech_state = speech_state.clone();
+                        spawn_status_task(status_sender_for_tray(tray.as_ref()), &tray_busy, move |status_tx| {
+                            run_speak_selection(status_tx, reader, speech_state)
+                        });
+                    }
+                    other => engine.handle_hotkey(other).await,
+                }
+            },
             Some(event) = app_rx.recv() => {
                 if let Some(ref tray) = tray {
                     if let Some(status) = UiStatus::from_app_event(&event) {
@@ -247,6 +316,18 @@ async fn run() -> Result<()> {
                             UiCommand::OpenLogs => open_tray_logs(tray),
                             UiCommand::RunDiagnostics => {
                                 spawn_tray_task(tray, &tray_busy, run_tray_diagnostics);
+                            }
+                            UiCommand::SpeakText(text) => {
+                                let speech_state = speech_state.clone();
+                                spawn_tray_task(tray, &tray_busy, move |status_tx| {
+                                    run_speak_text(status_tx, text, speech_state)
+                                });
+                            }
+                            UiCommand::PlayLastSpeech => {
+                                let speech_state = speech_state.clone();
+                                spawn_tray_task(tray, &tray_busy, move |status_tx| {
+                                    run_play_last_speech(status_tx, speech_state)
+                                });
                             }
                             UiCommand::Quit => return Ok(()),
                         }
@@ -302,11 +383,21 @@ where
     F: FnOnce(std::sync::mpsc::Sender<UiStatus>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    spawn_status_task(tray.status_sender(), busy, task);
+}
+
+fn spawn_status_task<F, Fut>(
+    status_tx: std::sync::mpsc::Sender<UiStatus>,
+    busy: &Arc<AtomicBool>,
+    task: F,
+) where
+    F: FnOnce(std::sync::mpsc::Sender<UiStatus>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     if busy
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
     {
-        let status_tx = tray.status_sender();
         let busy = busy.clone();
         tokio::spawn(async move {
             let _guard = TrayBusyGuard(busy);
@@ -315,12 +406,206 @@ where
     }
 }
 
+fn status_sender_for_tray(tray: Option<&StatusTray>) -> std::sync::mpsc::Sender<UiStatus> {
+    tray.map(StatusTray::status_sender)
+        .unwrap_or_else(|| std::sync::mpsc::channel().0)
+}
+
 struct TrayBusyGuard(Arc<AtomicBool>);
 
 impl Drop for TrayBusyGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
+}
+
+#[derive(Default)]
+struct SpeechState {
+    last_path: Mutex<Option<PathBuf>>,
+}
+
+async fn run_speak_selection<R>(
+    status_tx: std::sync::mpsc::Sender<UiStatus>,
+    reader: Arc<R>,
+    speech_state: Arc<SpeechState>,
+) where
+    R: SelectedTextReader + Send + Sync + 'static,
+{
+    set_tray_status(
+        &status_tx,
+        UiStatus::new(DictationState::Transcribing, "Reading selected text..."),
+    );
+    match reader.selected_text().await {
+        Ok(selection) => {
+            tracing::info!(
+                chars = selection.chars,
+                restored_clipboard = selection.restored_clipboard,
+                "selected text captured for speech"
+            );
+            let _ = logging::append_log_line(format!(
+                "selected text captured for speech: {} chars restored_clipboard={}",
+                selection.chars, selection.restored_clipboard
+            ));
+            run_speak_text(status_tx, selection.text, speech_state).await;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "selected text capture failed");
+            let _ = logging::append_log_line(format!("selected text capture failed: {error}"));
+            set_tray_status(
+                &status_tx,
+                UiStatus::new(DictationState::Error(error.to_string()), "No selected text"),
+            );
+        }
+    }
+}
+
+async fn run_speak_text(
+    status_tx: std::sync::mpsc::Sender<UiStatus>,
+    text: String,
+    speech_state: Arc<SpeechState>,
+) {
+    if text.trim().is_empty() {
+        set_tray_status(
+            &status_tx,
+            UiStatus::new(
+                DictationState::Error("empty speech text".into()),
+                "No text to speak",
+            ),
+        );
+        return;
+    }
+
+    set_tray_status(
+        &status_tx,
+        UiStatus::new(DictationState::Transcribing, "Generating speech..."),
+    );
+    match synthesize_save_and_play(&text, speech_state.clone()).await {
+        Ok(report) => {
+            let message = format!("Played speech: {} chars", report.chars);
+            set_tray_status(&status_tx, UiStatus::new(DictationState::Idle, message));
+        }
+        Err(error) => {
+            tracing::warn!(%error, "speech generation/playback failed");
+            let _ =
+                logging::append_log_line(format!("speech generation/playback failed: {error:#}"));
+            set_tray_error(&status_tx, "Speech failed", &error);
+        }
+    }
+}
+
+async fn run_play_last_speech(
+    status_tx: std::sync::mpsc::Sender<UiStatus>,
+    speech_state: Arc<SpeechState>,
+) {
+    let path = {
+        let last_path = speech_state.last_path.lock().await;
+        last_path.clone()
+    }
+    .unwrap_or_else(speech_output_path);
+
+    if tokio::fs::metadata(&path).await.is_err() {
+        set_tray_status(
+            &status_tx,
+            UiStatus::new(
+                DictationState::Error("no generated speech".into()),
+                "No generated speech to play",
+            ),
+        );
+        return;
+    }
+
+    set_tray_status(
+        &status_tx,
+        UiStatus::new(DictationState::Inserting, "Playing speech..."),
+    );
+    match play_audio_file(path.clone()).await {
+        Ok(()) => {
+            let _ = logging::append_log_line(format!("replayed speech audio: {}", path.display()));
+            set_tray_status(
+                &status_tx,
+                UiStatus::new(DictationState::Idle, "Speech replay complete"),
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "speech replay failed");
+            let _ = logging::append_log_line(format!("speech replay failed: {error:#}"));
+            set_tray_error(&status_tx, "Playback failed", &error);
+        }
+    }
+}
+
+struct SpeechRunReport {
+    chars: usize,
+}
+
+async fn synthesize_save_and_play(
+    text: &str,
+    speech_state: Arc<SpeechState>,
+) -> Result<SpeechRunReport> {
+    let chars = text.chars().count();
+    let client = codex_voice_transcriber::client::LocalTranscriberClient::discover(
+        Duration::from_millis(500),
+        Duration::from_secs(60),
+    )
+    .await
+    .context("local speech service is not healthy or not discoverable")?;
+    let speech = client
+        .synthesize_speech(text)
+        .await
+        .map_err(anyhow::Error::from)
+        .context("local speech synthesis failed")?;
+    let path = speech_output_path();
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    tokio::fs::write(&path, &speech.bytes)
+        .await
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    {
+        let mut last_path = speech_state.last_path.lock().await;
+        *last_path = Some(path.clone());
+    }
+    tracing::info!(
+        chars,
+        bytes = speech.bytes.len(),
+        path = %path.display(),
+        content_type = %speech.mime_type,
+        "generated speech audio"
+    );
+    let _ = logging::append_log_line(format!(
+        "generated speech audio: chars={chars} bytes={} path={}",
+        speech.bytes.len(),
+        path.display()
+    ));
+    play_audio_file(path).await?;
+    Ok(SpeechRunReport { chars })
+}
+
+fn speech_output_path() -> PathBuf {
+    dirs::state_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("codex-voice")
+        .join("last-speech.wav")
+}
+
+async fn play_audio_file(path: PathBuf) -> Result<()> {
+    tokio::task::spawn_blocking(move || play_audio_file_blocking(&path))
+        .await
+        .context("audio playback task failed")?
+}
+
+fn play_audio_file_blocking(path: &Path) -> Result<()> {
+    let sink_handle = rodio::DeviceSinkBuilder::open_default_sink()
+        .context("failed to open default audio output")?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let player = rodio::play(sink_handle.mixer(), std::io::BufReader::new(file))
+        .context("failed to decode or start audio playback")?;
+    player.sleep_until_end();
+    Ok(())
 }
 
 async fn run_tray_test_recording(status_tx: std::sync::mpsc::Sender<UiStatus>) {

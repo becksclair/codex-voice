@@ -2,7 +2,8 @@ use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, Ne
 use async_trait::async_trait;
 use codex_voice_core::{
     HotkeyEvent, HotkeyService, InsertMethod, InsertReport, PermissionKind, PermissionService,
-    PermissionStatus, PlatformError, PlatformResult, TextInjector,
+    PermissionStatus, PlatformError, PlatformResult, SelectedText, SelectedTextReader,
+    TextInjector,
 };
 use futures_util::StreamExt;
 use std::{env, process::Command, sync::mpsc as std_mpsc, thread, time::Duration};
@@ -16,12 +17,17 @@ use crate::{
 
 const HOTKEY_ID: &str = "codex-voice-hold-to-dictate";
 const MEDIA_HOTKEY_ID: &str = "codex-voice-media-dictation";
+const SPEAK_SELECTION_HOTKEY_ID: &str = "codex-voice-speak-selection";
 const HOTKEY_TRIGGER: &str = "<Control>m";
 const MEDIA_HOTKEY_TRIGGER: &str = "<Super>h";
+const SPEAK_SELECTION_TRIGGER: &str = "<Super>F6";
 const HOTKEY_DESCRIPTION: &str = "Hold to dictate with Codex Voice";
 const MEDIA_HOTKEY_DESCRIPTION: &str =
     "Hold the keyboard dictation key to dictate with Codex Voice";
+const SPEAK_SELECTION_DESCRIPTION: &str = "Speak selected text with Codex Voice";
 const HOTKEY_START_TIMEOUT: Duration = Duration::from_secs(15);
+const HOTKEY_RELEASE_SETTLE: Duration = Duration::from_millis(80);
+const COPY_SETTLE: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Default, Clone)]
 pub struct LinuxPermissionService;
@@ -102,6 +108,64 @@ impl TextInjector for LinuxTextInjector {
             restored_clipboard,
         })
     }
+}
+
+#[async_trait]
+impl SelectedTextReader for LinuxTextInjector {
+    async fn selected_text(&self) -> PlatformResult<SelectedText> {
+        let clipboard = LinuxClipboard::new()?;
+        let previous = clipboard.snapshot();
+        let sentinel = selection_sentinel();
+        clipboard.set_text(&sentinel)?;
+
+        let copy_result = self.remote_desktop.send_copy_chord().await;
+        tokio::time::sleep(COPY_SETTLE).await;
+        let copied = clipboard.snapshot();
+        let restored_clipboard = clipboard.restore(previous);
+        copy_result?;
+
+        match selected_text_from_snapshot(copied, &sentinel, restored_clipboard)
+            .or_else(|| selected_text_from_snapshot(clipboard.primary_selection(), "", true))
+        {
+            Some(selection) => Ok(selection),
+            _ => Err(PlatformError::Unavailable("no selected text found".into())),
+        }
+    }
+}
+
+fn selected_text_from_snapshot(
+    snapshot: crate::linux_clipboard::ClipboardSnapshot,
+    sentinel: &str,
+    restored_clipboard: bool,
+) -> Option<SelectedText> {
+    match snapshot {
+        crate::linux_clipboard::ClipboardSnapshot::Text(text)
+            if !text.is_empty() && text != sentinel =>
+        {
+            Some(SelectedText {
+                chars: text.chars().count(),
+                text,
+                restored_clipboard,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn selection_sentinel() -> String {
+    format!(
+        "codex-voice-selection-sentinel-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    )
+}
+
+fn rand_suffix() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -221,6 +285,8 @@ async fn run_global_shortcut_listener(
         NewShortcut::new(HOTKEY_ID, HOTKEY_DESCRIPTION).preferred_trigger(Some(HOTKEY_TRIGGER)),
         NewShortcut::new(MEDIA_HOTKEY_ID, MEDIA_HOTKEY_DESCRIPTION)
             .preferred_trigger(Some(MEDIA_HOTKEY_TRIGGER)),
+        NewShortcut::new(SPEAK_SELECTION_HOTKEY_ID, SPEAK_SELECTION_DESCRIPTION)
+            .preferred_trigger(Some(SPEAK_SELECTION_TRIGGER)),
     ];
     portal
         .bind_shortcuts(&session, &shortcuts, None, BindShortcutsOptions::default())
@@ -272,6 +338,12 @@ async fn run_global_shortcut_listener(
             event = deactivated.next() => match event {
                 Some(event) if is_dictation_shortcut(event.shortcut_id()) => {
                     if events.send(HotkeyEvent::Released).await.is_err() {
+                        break;
+                    }
+                }
+                Some(event) if event.shortcut_id() == SPEAK_SELECTION_HOTKEY_ID => {
+                    tokio::time::sleep(HOTKEY_RELEASE_SETTLE).await;
+                    if events.send(HotkeyEvent::SpeakSelection).await.is_err() {
                         break;
                     }
                 }

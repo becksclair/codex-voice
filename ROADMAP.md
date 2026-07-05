@@ -1,6 +1,6 @@
 # Codex Voice — Roadmap
 
-Rust-native, cross-platform hold-to-dictate desktop utility. Press and hold `Control-M`, speak, release, and the transcript is inserted into the focused application.
+Rust-native, cross-platform hold-to-dictate desktop utility. Press and hold `Control-M`, speak, release, and the transcript is inserted into the focused application. Press `Super-F6` (`Command-F6` on macOS, `Win-F6` on Windows) to speak selected text through the local TTS service.
 
 This roadmap replaces `@docs/execplan-rust-native-cross-platform.md` as the canonical plan of record.
 
@@ -61,14 +61,14 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
 KDE6/Wayland portal-based hotkeys, text injection, and desktop UI surface.
 
 - [x] Implement `LinuxHotkeyService` via XDG GlobalShortcuts portal (`ashpd`)
-  - Binds `Control-M` + keyboard dictation key
+  - Binds `Control-M` + keyboard dictation key, plus `Super-F6` for speak selection
   - Emits `Pressed`/`Released` from activation/deactivation signals
 - [x] Implement `LinuxTextInjector` via RemoteDesktop portal + clipboard
   - Sets clipboard, sends Ctrl+V through portal keyboard session, restores clipboard
   - Persists restore tokens for reuse across process restarts
 - [x] Implement `LinuxPermissionService` with portal diagnostics
 - [x] Implement GTK tray with `tray-icon`
-  - Status updates, Start Test Recording, Open Settings, Open Logs, Run Diagnostics, Quit
+  - Status updates, Start Test Recording, Speak text..., Open Settings, Open Logs, Run Diagnostics, Quit
 - [x] Implement desktop notification HUD (`notify-send`) for focus-safe status
 - [x] Implement GTK settings/status window
 - [x] Add `doctor linux-portals`, `doctor paste`
@@ -90,7 +90,7 @@ Windows has a full desktop surface with system tray, settings window, and engine
 - [x] Implement `WindowsPermissionService` stub
 - [x] Wire `codex-voice run` for Windows with system tray
 - [x] Add Windows system tray (`tray-icon` cross-platform menu)
-  - Status updates, Start Test Recording, Open Settings, Open Logs, Run Diagnostics, Quit
+  - Status updates, Start Test Recording, Speak text..., Open Settings, Open Logs, Run Diagnostics, Quit
   - `@crates/codex-voice-ui/src/windows_tray.rs`
 - [x] Add Windows settings/status window (Win32 dialog with static text)
   - Shows current status, hotkey info, insertion method, log path
@@ -134,7 +134,7 @@ macOS has a complete desktop surface with global hotkeys, Accessibility text inj
   - `doctor hotkey` uses the same `global-hotkey` service
   - `doctor paste` tests Accessibility + clipboard fallback
 - [x] Add macOS system tray (`tray-icon` cross-platform menu)
-  - Status updates, Start Test Recording, Open Settings (osascript dialog), Open Logs, Run Diagnostics, Quit
+  - Status updates, Start Test Recording, Speak text..., Open Settings (osascript dialog), Open Logs, Run Diagnostics, Quit
   - `@crates/codex-voice-ui/src/macos_tray.rs`
 - [x] Add macOS notification HUD (`osascript display notification`)
   - Best-effort desktop notifications with sound and replace semantics

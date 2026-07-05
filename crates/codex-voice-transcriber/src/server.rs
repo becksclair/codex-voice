@@ -283,10 +283,7 @@ async fn speech(State(state): State<ServiceState>, request: Request) -> Result<R
         .await
         .map_err(ApiError::json_rejection)?;
 
-    let voice = body
-        .voice
-        .filter(|voice| !voice.trim().is_empty())
-        .ok_or_else(|| ApiError::bad_request("voice is required"))?;
+    let voice = body.voice.filter(|voice| !voice.trim().is_empty());
 
     if body.input.trim().is_empty() {
         return Err(ApiError::bad_request("input is required"));
@@ -304,7 +301,7 @@ async fn speech(State(state): State<ServiceState>, request: Request) -> Result<R
     let request = SpeechRequest {
         input: body.input,
         model_hint: body.model,
-        voice_hint: Some(voice),
+        voice_hint: voice,
         instructions: body.instructions,
         format,
         speed: body.speed.or(body.rate),
@@ -645,8 +642,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn speech_route_requires_voice() {
-        let app = service_router(test_state_with_speech(1024));
+    async fn speech_route_allows_omitted_voice() {
+        let speech = Arc::new(FakeSpeechBackend::default());
+        let app = service_router(test_state_with_speech_backend(1024, Some(speech.clone())));
         let response = app
             .oneshot(speech_request(
                 "/v1/audio/speech",
@@ -655,7 +653,10 @@ mod tests {
             ))
             .await
             .expect("request succeeds");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
+        let seen = speech.seen.lock().expect("fake speech lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].voice_hint, None);
     }
 
     #[tokio::test]
