@@ -40,17 +40,21 @@ async fn main() -> Result<()> {
         Command::Run => run().await,
         Command::Server(args) => {
             let config: codex_voice_transcriber::ServeConfig = args.try_into()?;
-            let speech = match tts::load_speech_client(None) {
+            let (speech, tts_config) = match tts::load_speech_client(None) {
                 Ok(client) => {
                     tracing::info!("TTS client loaded successfully");
-                    Some(Arc::new(client) as Arc<dyn codex_voice_core::SpeechClient>)
+                    let config = client.config().clone();
+                    (
+                        Some(Arc::new(client) as Arc<dyn codex_voice_core::SpeechClient>),
+                        Some(config),
+                    )
                 }
                 Err(error) => {
                     tracing::warn!(%error, "TTS client not available; speech endpoint will return 503");
-                    None
+                    (None, None)
                 }
             };
-            codex_voice_transcriber::serve(config, speech).await
+            codex_voice_transcriber::serve(config, speech, tts_config).await
         }
         Command::Doctor { command } => match command.unwrap_or(DoctorCommand::LinuxPortals) {
             DoctorCommand::Audio(args) => doctor::doctor_audio(args).await,

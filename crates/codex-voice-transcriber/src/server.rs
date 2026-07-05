@@ -10,9 +10,13 @@ use base64::Engine;
 use bytes::Bytes;
 use codex_voice_codex::{CodexAuthService, CodexTranscriptionClient};
 use codex_voice_core::{SpeechClient, SpeechFormat, SpeechRequest, TranscriptionClient};
+use codex_voice_tts::config::{
+    ElevenLabsPersonaConfig, FallbackPolicy, GooglePersonaConfig, ProviderKind, ResolvedPersona,
+    ResolvedTtsConfig, SpeechPrepMode,
+};
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::net::TcpListener;
 
 use super::chunking::{self, MAX_GENERATED_CHUNKS, PCM_BYTES_PER_SECOND};
@@ -60,7 +64,7 @@ const WEB_MANIFEST: &str = r##"{
     }
   ]
 }"##;
-const WEB_SW_JS: &str = r#"const CACHE_NAME = 'codex-voice-web-v2';
+const WEB_SW_JS: &str = r#"const CACHE_NAME = 'codex-voice-web-v4';
 const SHELL_ASSETS = [
   '/web',
   '/web/manifest.webmanifest',
@@ -69,6 +73,40 @@ const SHELL_ASSETS = [
   '/web/icon-maskable-512.png',
   '/web/apple-touch-icon.png'
 ];
+const NETWORK_FIRST_ASSETS = new Set([
+  '/web',
+  '/web/manifest.webmanifest'
+]);
+const CACHE_FIRST_ASSETS = new Set([
+  '/web/icon-192.png',
+  '/web/icon-512.png',
+  '/web/icon-maskable-512.png',
+  '/web/apple-touch-icon.png'
+]);
+
+async function networkFirst(request, cacheKey) {
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const response = await fetch(request);
+    if (response.ok) await cache.put(cacheKey, response.clone());
+    return response;
+  } catch (_) {
+    const cached = await cache.match(cacheKey);
+    if (cached) return cached;
+    throw _;
+  }
+}
+
+async function cacheFirst(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+  const response = await fetch(request);
+  if (response.ok) {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.put(request, response.clone());
+  }
+  return response;
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -96,23 +134,17 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
 
   if (request.mode === 'navigate' && url.pathname === '/web') {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put('/web', copy));
-          return response;
-        })
-        .catch(() => caches.match('/web'))
-    );
+    event.respondWith(networkFirst(request, '/web'));
     return;
   }
 
-  if (SHELL_ASSETS.includes(url.pathname)) {
-    event.respondWith(
-      caches.match(request)
-        .then((cached) => cached || fetch(request))
-    );
+  if (NETWORK_FIRST_ASSETS.has(url.pathname)) {
+    event.respondWith(networkFirst(request, url.pathname));
+    return;
+  }
+
+  if (CACHE_FIRST_ASSETS.has(url.pathname)) {
+    event.respondWith(cacheFirst(request));
   }
 });
 "#;
@@ -201,16 +233,18 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     }
     .buttons {
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
     }
     button {
-      min-height: 54px;
+      min-height: 44px;
+      padding: 0 10px;
       border: 0;
       border-radius: 8px;
       color: #081110;
       background: var(--accent);
       font: inherit;
+      font-size: 0.98rem;
       font-weight: 700;
       cursor: pointer;
       touch-action: manipulation;
@@ -243,7 +277,6 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     #status.error { color: var(--danger); }
     @media (max-width: 420px) {
       main { padding-left: 12px; padding-right: 12px; }
-      .buttons { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -258,6 +291,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       <div class="buttons">
         <button id="generate" type="button">Generate</button>
         <button id="play" type="button" class="secondary" disabled>Play</button>
+        <button id="clear" type="button" class="secondary">Clear</button>
       </div>
       <input id="seek" type="range" min="0" max="1000" value="0" disabled aria-label="Audio position">
       <div class="time">
@@ -271,28 +305,61 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     const text = document.getElementById('text');
     const generate = document.getElementById('generate');
     const play = document.getElementById('play');
+    const clear = document.getElementById('clear');
     const seek = document.getElementById('seek');
     const elapsed = document.getElementById('elapsed');
     const duration = document.getElementById('duration');
     const status = document.getElementById('status');
     const count = document.getElementById('count');
-    const storageKey = 'codex-voice.web.text';
+    const textStorageKey = 'codex-voice.web.text';
+    const configStorageKey = 'codex-voice.web.config.v1';
+    const speechModelHint = 'gpt-4o-mini-tts';
     let audio = new Audio();
     let objectUrl = null;
     let seeking = false;
+    let directConfig = loadCachedConfig();
+    let serviceWorkerRefreshing = false;
 
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/web-sw.js', { scope: '/web' }).catch(() => {});
+        navigator.serviceWorker.register('/web-sw.js', { scope: '/web', updateViaCache: 'none' })
+          .then((registration) => registration.update().catch(() => {}))
+          .catch(() => {});
+      });
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (serviceWorkerRefreshing) return;
+        serviceWorkerRefreshing = true;
+        window.location.reload();
       });
     }
 
-    text.value = localStorage.getItem(storageKey) || '';
+    text.value = localStorage.getItem(textStorageKey) || '';
     updateCount();
+    refreshConfig();
 
     function setStatus(message, isError = false) {
       status.textContent = message;
       status.classList.toggle('error', isError);
+    }
+
+    function loadCachedConfig() {
+      try {
+        const raw = localStorage.getItem(configStorageKey);
+        return raw ? JSON.parse(raw) : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    async function refreshConfig() {
+      try {
+        const response = await fetch('/web/config', { cache: 'no-store' });
+        if (!response.ok) return;
+        const config = await response.json();
+        if (config?.version !== 1 || !config.providers) return;
+        directConfig = config;
+        localStorage.setItem(configStorageKey, JSON.stringify(config));
+      } catch (_) {}
     }
 
     function formatTime(seconds) {
@@ -330,18 +397,334 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       duration.textContent = '0:00';
     }
 
-    function audioBlobFromBase64(base64Audio, mimeType) {
+    function loadAudioBlob(blob) {
+      resetAudio();
+      objectUrl = URL.createObjectURL(blob);
+      audio.src = objectUrl;
+      audio.load();
+      play.disabled = false;
+      seek.disabled = false;
+    }
+
+    function bytesFromBase64(base64Audio) {
       const binary = atob(base64Audio);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i += 1) {
         bytes[i] = binary.charCodeAt(i);
       }
-      return new Blob([bytes], { type: mimeType || 'audio/wav' });
+      return bytes;
+    }
+
+    function audioBlobFromBase64(base64Audio, mimeType) {
+      return new Blob([bytesFromBase64(base64Audio)], { type: mimeType || 'audio/wav' });
+    }
+
+    function normalizeGoogleModelName(model) {
+      return String(model || '').replace(/^google\//, '');
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function resolvePersona(config) {
+      const name = config?.defaultPersona;
+      return name && config.personas ? config.personas[name] || null : null;
+    }
+
+    function resolveProvider(config, persona) {
+      return persona?.provider || config.defaultProvider;
+    }
+
+    function fallbackProvider(provider) {
+      return provider === 'google' ? 'elevenlabs' : 'google';
+    }
+
+    function resolveGoogleModel(google) {
+      if (!google) return '';
+      if (!speechModelHint || google.model === speechModelHint) return google.model;
+      return (google.fallbackModels || []).includes(speechModelHint) ? speechModelHint : google.model;
+    }
+
+    function providerSupportsInlineAudioTags(config, provider) {
+      if (provider === 'google') {
+        const google = config.providers?.google;
+        if (!google) return false;
+        if (typeof google.inlineAudioTags === 'boolean') return google.inlineAudioTags;
+        const model = resolveGoogleModel(google).toLowerCase();
+        return model.includes('gemini-3.1') && model.includes('tts');
+      }
+      if (provider === 'elevenlabs') {
+        const elevenlabs = config.providers?.elevenlabs;
+        if (!elevenlabs) return false;
+        if (typeof elevenlabs.inlineAudioTags === 'boolean') return elevenlabs.inlineAudioTags;
+        const model = String(elevenlabs.modelId || '').toLowerCase();
+        return model === 'eleven_v3' || model.startsWith('eleven_v3_');
+      }
+      return false;
+    }
+
+    function shouldPrepare(input, prep, supportsInlineAudioTags) {
+      if (!prep || prep.mode !== 'performance-tags' || !supportsInlineAudioTags) return false;
+      const chars = Array.from(input).length;
+      return chars >= prep.threshold && chars <= prep.maxInputLength;
+    }
+
+    function buildPerformanceTagsPrompt(input, prep, persona) {
+      let prompt = 'You are a TTS performance tagger. Do not rewrite the text. Do not summarize. Insert concise emotion/performance tags only where they improve delivery. Use tags sparingly. Keep tags local to the phrase or paragraph they affect. Prefer natural performance: warm, amused, teasing, soft, relieved, sleepy, serious, whispering, laughing, affectionate. Never add tags that contradict the text. Return only the tagged text.\n';
+      prompt += 'Use inline bracketed audio tags such as [tender], [softly], [amused], [laughs], [whispers], [sigh], [exhales], [light chuckle], [sigh of relief], or another clear performable cue. Keep the result under ';
+      prompt += `${prep.maxLength} characters.\n\n`;
+      if (persona) {
+        prompt += 'Delivery context:\n';
+        prompt += `- persona: ${persona.label} - ${persona.description}\n`;
+        if (persona.promptScene) prompt += `- scene: ${persona.promptScene}\n`;
+        if (persona.promptStyle) prompt += `- style: ${persona.promptStyle}\n`;
+        if (persona.promptPacing) prompt += `- pace: ${persona.promptPacing}\n`;
+        for (const constraint of persona.promptConstraints || []) {
+          prompt += `- constraint: ${constraint}\n`;
+        }
+        prompt += '\n';
+      }
+      prompt += `Text:\n"""${input}"""`;
+      return prompt;
+    }
+
+    async function providerError(response, fallback) {
+      let text = '';
+      try {
+        text = await response.text();
+      } catch (_) {}
+      const error = new Error(text ? `${fallback}: ${text}` : `${fallback} (${response.status})`);
+      error.status = response.status;
+      return error;
+    }
+
+    async function prepareForProvider(config, provider, input, persona) {
+      const prep = config.speechPrep;
+      if (!shouldPrepare(input, prep, providerSupportsInlineAudioTags(config, provider))) return input;
+      if (prep.provider !== 'google') return input;
+      const model = normalizeGoogleModelName(prep.model);
+      const response = await fetch(`${prep.baseUrl}/models/${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': prep.apiKey
+        },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: buildPerformanceTagsPrompt(input, prep, persona) }] }],
+          generationConfig: {
+            temperature: 0.45,
+            maxOutputTokens: clamp(Math.floor(prep.maxLength / 2), 128, 2048)
+          }
+        })
+      });
+      if (!response.ok) throw await providerError(response, 'Speech prep failed');
+      const json = await response.json();
+      const prepared = extractTextOutput(json).trim();
+      if (!prepared) throw new Error('Speech prep returned empty text.');
+      if (Array.from(prepared).length > prep.maxLength) {
+        throw new Error(`Speech prep returned ${Array.from(prepared).length} chars, above max ${prep.maxLength}.`);
+      }
+      return prepared;
+    }
+
+    function extractTextOutput(json) {
+      const parts = json?.candidates?.[0]?.content?.parts || [];
+      return parts.map((part) => part.text || '').filter(Boolean).join(' ');
+    }
+
+    function buildGoogleTtsPrompt(input, persona) {
+      let prompt = 'Read the following text aloud.\n\n';
+      if (persona) {
+        prompt += 'Delivery profile:\n';
+        if (persona.promptScene) prompt += `- scene: ${persona.promptScene}\n`;
+        if (persona.promptStyle) prompt += `- style: ${persona.promptStyle}\n`;
+        if (persona.promptPacing) prompt += `- pace: ${persona.promptPacing}\n`;
+        for (const constraint of persona.promptConstraints || []) {
+          prompt += `- constraint: ${constraint}\n`;
+        }
+        prompt += '\n';
+        if (persona.promptSampleContext) {
+          prompt += `Sample context: ${persona.promptSampleContext}\n\n`;
+        }
+      }
+      prompt += 'Important:\n';
+      prompt += '- speak the text exactly as written\n';
+      prompt += '- do not add narration or commentary\n';
+      prompt += '- do not change wording or paraphrase\n\n';
+      prompt += `Text:\n"""${input}"""`;
+      return prompt;
+    }
+
+    function parseSampleRate(mimeType) {
+      const match = /rate=(\d+)/i.exec(mimeType || '');
+      return match ? Number(match[1]) : 24000;
+    }
+
+    function writeAscii(view, offset, value) {
+      for (let i = 0; i < value.length; i += 1) {
+        view.setUint8(offset + i, value.charCodeAt(i));
+      }
+    }
+
+    function wavBlobFromPcm(pcmBytes, sampleRate) {
+      const header = new ArrayBuffer(44);
+      const view = new DataView(header);
+      writeAscii(view, 0, 'RIFF');
+      view.setUint32(4, 36 + pcmBytes.length, true);
+      writeAscii(view, 8, 'WAVE');
+      writeAscii(view, 12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeAscii(view, 36, 'data');
+      view.setUint32(40, pcmBytes.length, true);
+      return new Blob([header, pcmBytes], { type: 'audio/wav' });
+    }
+
+    async function synthesizeGoogle(config, input, persona) {
+      const google = config.providers?.google;
+      if (!google) throw new Error('Google TTS is not configured.');
+      const model = resolveGoogleModel(google);
+      const voiceName = persona?.google?.voiceName || google.voice;
+      const response = await fetch(`${google.baseUrl}/models/${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': google.apiKey
+        },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: buildGoogleTtsPrompt(input, persona) }] }],
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName }
+              }
+            }
+          }
+        })
+      });
+      if (!response.ok) throw await providerError(response, 'Google TTS failed');
+      const json = await response.json();
+      const parts = json?.candidates?.[0]?.content?.parts || [];
+      const inline = parts.map((part) => part.inlineData || part.inline_data).find(Boolean);
+      if (!inline?.data) throw new Error('Google TTS returned no audio.');
+      const mimeType = inline.mimeType || inline.mime_type || 'audio/L16;codec=pcm;rate=24000';
+      const bytes = bytesFromBase64(inline.data);
+      if (mimeType.toLowerCase().startsWith('audio/l16') || mimeType.toLowerCase().startsWith('audio/pcm')) {
+        return wavBlobFromPcm(bytes, parseSampleRate(mimeType));
+      }
+      return new Blob([bytes], { type: mimeType });
+    }
+
+    function resolveElevenLabsSpeed(persona) {
+      const speed = persona?.elevenlabs?.voiceSettings?.speed;
+      return Math.round(clamp(Number.isFinite(speed) ? speed : 1.0, 0.7, 1.2) * 100) / 100;
+    }
+
+    function elevenLabsMimeType(outputFormat) {
+      if ((outputFormat || '').startsWith('wav')) return 'audio/wav';
+      if ((outputFormat || '').startsWith('pcm')) return 'audio/pcm';
+      if ((outputFormat || '').startsWith('opus')) return 'audio/opus';
+      return 'audio/mpeg';
+    }
+
+    async function synthesizeElevenLabs(config, input, persona) {
+      const elevenlabs = config.providers?.elevenlabs;
+      if (!elevenlabs) throw new Error('ElevenLabs TTS is not configured.');
+      const voiceId = persona?.elevenlabs?.voiceId;
+      if (!voiceId) throw new Error('ElevenLabs voice_id is not configured for this persona.');
+      const voiceSettings = persona?.elevenlabs?.voiceSettings
+        ? { ...persona.elevenlabs.voiceSettings, speed: resolveElevenLabsSpeed(persona) }
+        : { speed: 1.0 };
+      const url = `${elevenlabs.baseUrl}/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=${encodeURIComponent(elevenlabs.outputFormat)}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'xi-api-key': elevenlabs.apiKey
+        },
+        body: JSON.stringify({
+          text: input,
+          model_id: elevenlabs.modelId,
+          voice_settings: voiceSettings,
+          language_code: elevenlabs.languageCode,
+          apply_text_normalization: elevenlabs.applyTextNormalization
+        })
+      });
+      if (!response.ok) throw await providerError(response, 'ElevenLabs TTS failed');
+      const bytes = await response.arrayBuffer();
+      return new Blob([bytes], {
+        type: response.headers.get('content-type') || elevenLabsMimeType(elevenlabs.outputFormat)
+      });
+    }
+
+    function isRetryable(error) {
+      if (!error?.status) return true;
+      return error.status === 401 || error.status === 403 || error.status === 429 || error.status >= 500;
+    }
+
+    async function synthesizeProvider(config, provider, input, persona) {
+      const preparedInput = await prepareForProvider(config, provider, input, persona);
+      const blob = provider === 'google'
+        ? await synthesizeGoogle(config, preparedInput, persona)
+        : await synthesizeElevenLabs(config, preparedInput, persona);
+      return { blob, input: preparedInput, inputChanged: preparedInput !== input };
+    }
+
+    async function generateDirect(input) {
+      const config = directConfig;
+      const persona = resolvePersona(config);
+      const primary = resolveProvider(config, persona);
+      try {
+        return await synthesizeProvider(config, primary, input, persona);
+      } catch (error) {
+        if (!isRetryable(error) || persona?.fallbackPolicy !== 'preserve-persona') throw error;
+        const fallback = fallbackProvider(primary);
+        if (!config.providers?.[fallback]) throw error;
+        return await synthesizeProvider(config, fallback, input, persona);
+      }
+    }
+
+    async function generateViaServer(input) {
+      const response = await fetch('/web/speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input })
+      });
+      if (!response.ok) {
+        let message = `TTS failed (${response.status})`;
+        try {
+          const json = await response.json();
+          message = json?.error?.message || message;
+        } catch (_) {}
+        throw new Error(message);
+      }
+      const result = await response.json();
+      return {
+        blob: audioBlobFromBase64(result.audio_base64, result.mime_type),
+        input: result.input,
+        inputChanged: Boolean(result.input_changed)
+      };
     }
 
     text.addEventListener('input', () => {
-      localStorage.setItem(storageKey, text.value);
+      localStorage.setItem(textStorageKey, text.value);
       updateCount();
+    });
+
+    clear.addEventListener('click', () => {
+      text.value = '';
+      localStorage.removeItem(textStorageKey);
+      updateCount();
+      resetAudio();
+      setStatus('Ready');
+      text.focus();
     });
 
     generate.addEventListener('click', async () => {
@@ -351,41 +734,24 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         return;
       }
       generate.disabled = true;
+      clear.disabled = true;
       play.disabled = true;
       setStatus('Generating...');
       try {
-        const response = await fetch('/web/speech', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ input })
-        });
-        if (!response.ok) {
-          let message = `TTS failed (${response.status})`;
-          try {
-            const json = await response.json();
-            message = json?.error?.message || message;
-          } catch (_) {}
-          throw new Error(message);
-        }
-        resetAudio();
-        const result = await response.json();
+        const result = directConfig ? await generateDirect(input) : await generateViaServer(input);
         if (typeof result.input === 'string' && result.input !== text.value) {
           text.value = result.input;
-          localStorage.setItem(storageKey, text.value);
+          localStorage.setItem(textStorageKey, text.value);
           updateCount();
         }
-        const blob = audioBlobFromBase64(result.audio_base64, result.mime_type);
-        objectUrl = URL.createObjectURL(blob);
-        audio.src = objectUrl;
-        audio.load();
-        play.disabled = false;
-        seek.disabled = false;
-        setStatus(result.input_changed ? 'Ready to play. Tags added.' : 'Ready to play.');
+        loadAudioBlob(result.blob);
+        setStatus(result.inputChanged ? 'Ready to play. Tags added.' : 'Ready to play.');
       } catch (error) {
         resetAudio();
         setStatus(error.message || 'TTS failed.', true);
       } finally {
         generate.disabled = false;
+        clear.disabled = false;
       }
     });
 
@@ -431,10 +797,254 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
 </body>
 </html>"##;
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserTtsConfig {
+    version: u8,
+    default_provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_persona: Option<String>,
+    max_text_length: usize,
+    providers: BrowserProviders,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speech_prep: Option<BrowserSpeechPrepConfig>,
+    personas: HashMap<String, BrowserPersonaConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserProviders {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    google: Option<BrowserGoogleConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elevenlabs: Option<BrowserElevenLabsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserSpeechPrepConfig {
+    provider: String,
+    mode: String,
+    api_key: String,
+    base_url: String,
+    model: String,
+    threshold: usize,
+    max_input_length: usize,
+    max_length: usize,
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserGoogleConfig {
+    api_key: String,
+    base_url: String,
+    voice: String,
+    model: String,
+    fallback_models: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inline_audio_tags: Option<bool>,
+    max_text_length: usize,
+    timeout_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scene: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sample_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pace: Option<String>,
+    constraints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserElevenLabsConfig {
+    api_key: String,
+    base_url: String,
+    model_id: String,
+    apply_text_normalization: String,
+    output_format: String,
+    language_code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inline_audio_tags: Option<bool>,
+    max_text_length: usize,
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPersonaConfig {
+    label: String,
+    description: String,
+    provider: String,
+    fallback_policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_scene: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_sample_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_pacing: Option<String>,
+    prompt_constraints: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    google: Option<BrowserGooglePersonaConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elevenlabs: Option<BrowserElevenLabsPersonaConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserGooglePersonaConfig {
+    voice_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserElevenLabsPersonaConfig {
+    voice_id: String,
+    voice_settings: BrowserElevenLabsVoiceSettings,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserElevenLabsVoiceSettings {
+    stability: f64,
+    similarity_boost: f64,
+    style: f64,
+    use_speaker_boost: bool,
+    speed: f64,
+}
+
+impl BrowserTtsConfig {
+    pub(crate) fn from_resolved(config: &ResolvedTtsConfig) -> Self {
+        Self {
+            version: 1,
+            default_provider: provider_name(config.default_provider).to_string(),
+            default_persona: config.default_persona.clone(),
+            max_text_length: config.max_text_length,
+            providers: BrowserProviders {
+                google: config.google.as_ref().map(|google| BrowserGoogleConfig {
+                    api_key: google.api_key.clone(),
+                    base_url: google.base_url.clone(),
+                    voice: google.voice.clone(),
+                    model: google.model.clone(),
+                    fallback_models: google.fallback_models.clone(),
+                    inline_audio_tags: google.inline_audio_tags,
+                    max_text_length: google.max_text_length,
+                    timeout_ms: duration_millis(google.timeout),
+                    scene: google.scene.clone(),
+                    sample_context: google.sample_context.clone(),
+                    style: google.style.clone(),
+                    pace: google.pace.clone(),
+                    constraints: google.constraints.clone(),
+                }),
+                elevenlabs: config
+                    .elevenlabs
+                    .as_ref()
+                    .map(|elevenlabs| BrowserElevenLabsConfig {
+                        api_key: elevenlabs.api_key.clone(),
+                        base_url: elevenlabs.base_url.clone(),
+                        model_id: elevenlabs.model_id.clone(),
+                        apply_text_normalization: elevenlabs.apply_text_normalization.clone(),
+                        output_format: elevenlabs.output_format.clone(),
+                        language_code: elevenlabs.language_code.clone(),
+                        inline_audio_tags: elevenlabs.inline_audio_tags,
+                        max_text_length: elevenlabs.max_text_length,
+                        timeout_ms: duration_millis(elevenlabs.timeout),
+                    }),
+            },
+            speech_prep: config
+                .speech_prep
+                .as_ref()
+                .map(|prep| BrowserSpeechPrepConfig {
+                    provider: provider_name(prep.provider).to_string(),
+                    mode: speech_prep_mode_name(prep.mode).to_string(),
+                    api_key: prep.api_key.clone(),
+                    base_url: prep.base_url.clone(),
+                    model: prep.model.clone(),
+                    threshold: prep.threshold,
+                    max_input_length: prep.max_input_length,
+                    max_length: prep.max_length,
+                    timeout_ms: duration_millis(prep.timeout),
+                }),
+            personas: config
+                .personas
+                .iter()
+                .map(|(name, persona)| (name.clone(), browser_persona(persona)))
+                .collect(),
+        }
+    }
+}
+
+fn browser_persona(persona: &ResolvedPersona) -> BrowserPersonaConfig {
+    BrowserPersonaConfig {
+        label: persona.label.clone(),
+        description: persona.description.clone(),
+        provider: provider_name(persona.provider).to_string(),
+        fallback_policy: fallback_policy_name(persona.fallback_policy).to_string(),
+        prompt_scene: persona.prompt_scene.clone(),
+        prompt_sample_context: persona.prompt_sample_context.clone(),
+        prompt_style: persona.prompt_style.clone(),
+        prompt_pacing: persona.prompt_pacing.clone(),
+        prompt_constraints: persona.prompt_constraints.clone(),
+        google: persona.google.as_ref().map(browser_google_persona),
+        elevenlabs: persona.elevenlabs.as_ref().map(browser_elevenlabs_persona),
+    }
+}
+
+fn browser_google_persona(google: &GooglePersonaConfig) -> BrowserGooglePersonaConfig {
+    BrowserGooglePersonaConfig {
+        voice_name: google.voice_name.clone(),
+    }
+}
+
+fn browser_elevenlabs_persona(
+    elevenlabs: &ElevenLabsPersonaConfig,
+) -> BrowserElevenLabsPersonaConfig {
+    BrowserElevenLabsPersonaConfig {
+        voice_id: elevenlabs.voice_id.clone(),
+        voice_settings: BrowserElevenLabsVoiceSettings {
+            stability: elevenlabs.voice_settings.stability,
+            similarity_boost: elevenlabs.voice_settings.similarity_boost,
+            style: elevenlabs.voice_settings.style,
+            use_speaker_boost: elevenlabs.voice_settings.use_speaker_boost,
+            speed: elevenlabs.voice_settings.speed,
+        },
+    }
+}
+
+fn provider_name(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Google => "google",
+        ProviderKind::ElevenLabs => "elevenlabs",
+    }
+}
+
+fn fallback_policy_name(policy: FallbackPolicy) -> &'static str {
+    match policy {
+        FallbackPolicy::PreservePersona => "preserve-persona",
+        FallbackPolicy::Strict => "strict",
+    }
+}
+
+fn speech_prep_mode_name(mode: SpeechPrepMode) -> &'static str {
+    match mode {
+        SpeechPrepMode::Shorten => "shorten",
+        SpeechPrepMode::PerformanceTags => "performance-tags",
+    }
+}
+
+fn duration_millis(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[derive(Clone)]
 pub(crate) struct ServiceState {
     pub(crate) backend: Arc<dyn TranscriptionClient>,
     pub(crate) speech: Option<Arc<dyn SpeechClient>>,
+    pub(crate) web_tts_config: Option<BrowserTtsConfig>,
     pub(crate) auth: ServiceAuth,
     pub(crate) codex_upload_limit_bytes: u64,
     pub(crate) client_upload_limit_bytes: u64,
@@ -451,6 +1061,7 @@ pub(crate) struct ServiceAuth {
 pub async fn serve(
     config: super::ServeConfig,
     speech: Option<Arc<dyn SpeechClient>>,
+    tts_config: Option<ResolvedTtsConfig>,
 ) -> Result<()> {
     let listener = TcpListener::bind(config.bind)
         .await
@@ -473,6 +1084,7 @@ pub async fn serve(
     let app = service_router(ServiceState {
         backend,
         speech,
+        web_tts_config: tts_config.as_ref().map(BrowserTtsConfig::from_resolved),
         auth: ServiceAuth {
             token: discovery.token.clone(),
             no_auth: config.no_auth,
@@ -521,6 +1133,7 @@ fn service_router(state: ServiceState) -> Router {
         .route("/healthz", health_routes.clone())
         .route("/v1/healthz", health_routes)
         .route("/web", get(web_app))
+        .route("/web/config", get(web_config))
         .route("/web/manifest.webmanifest", get(web_manifest))
         .route("/web-sw.js", get(web_service_worker))
         .route("/web/icon-192.png", get(web_icon_192))
@@ -579,6 +1192,22 @@ async fn transcribe(
 
 async fn web_app() -> Html<&'static str> {
     Html(WEB_APP_HTML)
+}
+
+async fn web_config(State(state): State<ServiceState>) -> Result<impl IntoResponse, ApiError> {
+    let config = state
+        .web_tts_config
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| ApiError::service_unavailable("TTS service is not configured"))?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(config),
+    ))
 }
 
 async fn web_manifest() -> impl IntoResponse {
@@ -1115,12 +1744,97 @@ mod tests {
         let html = std::str::from_utf8(&bytes).expect("html is utf-8");
         assert!(html.contains("<textarea id=\"text\""));
         assert!(html.contains("id=\"generate\""));
+        assert!(html.contains("id=\"clear\""));
         assert!(html.contains("id=\"seek\""));
+        assert!(html.contains("codex-voice.web.config.v1"));
+        assert!(html.contains("fetch('/web/config'"));
+        assert!(html.contains("function synthesizeGoogle"));
+        assert!(html.contains("function wavBlobFromPcm"));
+        assert!(html.contains("function synthesizeElevenLabs"));
+        assert!(html.contains("function generateViaServer"));
         assert!(html.contains("'/web/speech'"));
         assert!(html.contains(r#"<link rel="manifest" href="/web/manifest.webmanifest">"#));
         assert!(html.contains(r##"<meta name="theme-color" content="#101214">"##));
         assert!(html.contains(r#"<link rel="apple-touch-icon" href="/web/apple-touch-icon.png">"#));
         assert!(html.contains("navigator.serviceWorker.register('/web-sw.js'"));
+        assert!(html.contains("updateViaCache: 'none'"));
+    }
+
+    #[tokio::test]
+    async fn web_config_is_public_and_exports_browser_tts_config() {
+        let app = service_router(test_state_with_web_tts_config(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/web/config")
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert!(response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json")));
+
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let config: serde_json::Value = serde_json::from_slice(&bytes).expect("json response");
+        assert_eq!(config["version"], 1);
+        assert_eq!(config["defaultProvider"], "google");
+        assert_eq!(config["defaultPersona"], "sky");
+        assert_eq!(config["speechPrep"]["model"], "google/gemini-3.5-flash");
+        assert_eq!(config["speechPrep"]["apiKey"], "google-prep-key");
+        assert_eq!(config["providers"]["google"]["apiKey"], "google-tts-key");
+        assert_eq!(
+            config["providers"]["google"]["model"],
+            "gemini-3.1-flash-tts-preview"
+        );
+        assert_eq!(config["providers"]["elevenlabs"]["apiKey"], "eleven-key");
+        assert_eq!(
+            config["personas"]["sky"]["fallbackPolicy"],
+            "preserve-persona"
+        );
+        assert_eq!(
+            config["personas"]["sky"]["elevenlabs"]["voiceId"],
+            "eleven-voice"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_config_returns_503_without_tts_config() {
+        let app = service_router(test_state(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/web/config")
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn browser_config_export_omits_absent_providers() {
+        let mut config = sample_tts_config();
+        config.elevenlabs = None;
+        let exported = BrowserTtsConfig::from_resolved(&config);
+        let json = serde_json::to_value(exported).expect("serializes");
+
+        assert_eq!(json["providers"]["google"]["apiKey"], "google-tts-key");
+        assert!(json["providers"].get("elevenlabs").is_none());
+        assert_eq!(json["personas"]["sky"]["google"]["voiceName"], "Sulafat");
     }
 
     #[tokio::test]
@@ -1201,6 +1915,10 @@ mod tests {
         assert!(script.contains("self.addEventListener('install'"));
         assert!(script.contains("self.addEventListener('fetch'"));
         assert!(script.contains("request.method !== 'GET'"));
+        assert!(script.contains("const CACHE_NAME = 'codex-voice-web-v4'"));
+        assert!(script.contains("NETWORK_FIRST_ASSETS"));
+        assert!(script.contains("'/web/manifest.webmanifest'"));
+        assert!(script.contains("networkFirst(request, url.pathname)"));
         assert!(script.contains("'/web/icon-maskable-512.png'"));
     }
 

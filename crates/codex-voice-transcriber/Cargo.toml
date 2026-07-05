@@ -11,6 +11,7 @@ base64.workspace = true
 bytes.workspace = true
 codex-voice-codex = { path = "../codex-voice-codex" }
 codex-voice-core = { path = "../codex-voice-core" }
+codex-voice-tts = { path = "../codex-voice-tts" }
 dirs.workspace = true
 hex.workspace = true
 rand.workspace = true

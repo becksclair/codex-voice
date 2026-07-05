@@ -4,7 +4,14 @@ use codex_voice_core::{
     SpeechClient, SpeechRequest, SpeechResult, SynthesizedSpeech, TranscriptionClient,
     TranscriptionResult,
 };
+use codex_voice_tts::config::{
+    ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ElevenLabsVoiceSettings, FallbackPolicy,
+    GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, ResolvedTtsConfig,
+    SpeechPrepConfig, SpeechPrepMode,
+};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::server::{ServiceAuth, ServiceState};
 
@@ -60,6 +67,14 @@ pub(crate) fn test_state_with_speech(codex_upload_limit_bytes: u64) -> ServiceSt
     )
 }
 
+pub(crate) fn test_state_with_web_tts_config(codex_upload_limit_bytes: u64) -> ServiceState {
+    let mut state = test_state_with_speech(codex_upload_limit_bytes);
+    state.web_tts_config = Some(crate::server::BrowserTtsConfig::from_resolved(
+        &sample_tts_config(),
+    ));
+    state
+}
+
 pub(crate) fn test_state_with_speech_backend(
     codex_upload_limit_bytes: u64,
     speech: Option<Arc<dyn SpeechClient>>,
@@ -67,6 +82,7 @@ pub(crate) fn test_state_with_speech_backend(
     ServiceState {
         backend: Arc::new(FakeBackend::default()),
         speech,
+        web_tts_config: None,
         auth: ServiceAuth {
             token: "test-token".into(),
             no_auth: false,
@@ -75,6 +91,86 @@ pub(crate) fn test_state_with_speech_backend(
         client_upload_limit_bytes: 1024 * 1024,
         chunk_seconds: 600,
         ffmpeg_binary: "definitely-not-ffmpeg".into(),
+    }
+}
+
+pub(crate) fn sample_tts_config() -> ResolvedTtsConfig {
+    let mut personas = HashMap::new();
+    personas.insert(
+        "sky".to_string(),
+        ResolvedPersona {
+            label: "Sky".to_string(),
+            description: "Warm test voice".to_string(),
+            provider: ProviderKind::Google,
+            fallback_policy: FallbackPolicy::PreservePersona,
+            prompt_profile: None,
+            prompt_scene: Some("At home".to_string()),
+            prompt_sample_context: Some("Gentle and clear".to_string()),
+            prompt_style: Some("Warm".to_string()),
+            prompt_accent: None,
+            prompt_pacing: Some("Relaxed".to_string()),
+            prompt_constraints: vec!["Do not narrate tags.".to_string()],
+            google: Some(GooglePersonaConfig {
+                voice_name: "Sulafat".to_string(),
+                prompt_template: String::new(),
+                persona_prompt: String::new(),
+            }),
+            elevenlabs: Some(ElevenLabsPersonaConfig {
+                voice_id: "eleven-voice".to_string(),
+                voice_settings: ElevenLabsVoiceSettings {
+                    stability: 0.5,
+                    similarity_boost: 0.75,
+                    style: 0.25,
+                    use_speaker_boost: true,
+                    speed: 1.0,
+                },
+            }),
+        },
+    );
+
+    ResolvedTtsConfig {
+        default_provider: ProviderKind::Google,
+        default_persona: Some("sky".to_string()),
+        max_text_length: 4000,
+        timeout: Duration::from_secs(30),
+        speech_prep: Some(SpeechPrepConfig {
+            provider: ProviderKind::Google,
+            mode: SpeechPrepMode::PerformanceTags,
+            api_key: "google-prep-key".to_string(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            model: "google/gemini-3.5-flash".to_string(),
+            threshold: 1,
+            max_input_length: 12000,
+            max_length: 4000,
+            timeout: Duration::from_secs(20),
+        }),
+        google: Some(GoogleRuntimeConfig {
+            api_key: "google-tts-key".to_string(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            voice: "Sulafat".to_string(),
+            model: "gemini-3.1-flash-tts-preview".to_string(),
+            fallback_models: vec![],
+            inline_audio_tags: None,
+            max_text_length: 4000,
+            timeout: Duration::from_secs(30),
+            scene: Some("At home".to_string()),
+            sample_context: Some("Gentle and clear".to_string()),
+            style: Some("Warm".to_string()),
+            pace: Some("Relaxed".to_string()),
+            constraints: vec!["Do not narrate tags.".to_string()],
+        }),
+        elevenlabs: Some(ElevenLabsRuntimeConfig {
+            api_key: "eleven-key".to_string(),
+            base_url: "https://api.elevenlabs.io".to_string(),
+            model_id: "eleven_v3".to_string(),
+            apply_text_normalization: "auto".to_string(),
+            output_format: "mp3_44100_128".to_string(),
+            language_code: "en".to_string(),
+            inline_audio_tags: None,
+            max_text_length: 4000,
+            timeout: Duration::from_secs(30),
+        }),
+        personas,
     }
 }
 

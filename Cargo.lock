@@ -576,6 +576,7 @@ dependencies = [
  "bytes",
  "codex-voice-codex",
  "codex-voice-core",
+ "codex-voice-tts",
  "dirs",
  "hex",
  "rand 0.9.4",
