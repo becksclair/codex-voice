@@ -116,7 +116,16 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello world
 
 The `read-aloud-defaults.json` config is read from `~/.codex/read-aloud-defaults.json`
 and supports Google Gemini TTS and ElevenLabs backends with persona-aware
-provider fallback.
+provider fallback. Optional `messages.tts.speechPrep` uses a configured Google
+generation model before synthesis. Its default mode, `shorten`, preserves the
+previous behavior for over-limit text. Set `"mode": "performance-tags"` to
+preserve the original wording and insert sparse inline bracketed audio tags such
+as `[tender]`, `[sigh]`, or `[light chuckle]` only when the selected speech model
+supports them. Model support is inferred for known tag-aware models and can be
+overridden per provider with `"inlineAudioTags": true` or `false`. Use a Google
+text generation model that supports `generateContent` for `speechPrep.model`;
+`google/gemini-2.5-flash` is a known-good example, while preview model names can
+expire or be unavailable for the configured API version.
 
 ## User Service Setup
 

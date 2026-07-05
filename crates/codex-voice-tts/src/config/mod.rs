@@ -9,7 +9,7 @@ use codex_voice_core::SpeechError;
 pub use models::{
     ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ElevenLabsVoiceSettings, FallbackPolicy,
     GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, ResolvedTtsConfig,
-    SpeechPrepConfig,
+    SpeechPrepConfig, SpeechPrepMode,
 };
 
 #[derive(Debug, Clone)]
@@ -263,6 +263,7 @@ mod tests {
         let speech_prep = resolved.speech_prep.expect("speech prep missing");
 
         assert_eq!(speech_prep.provider, ProviderKind::Google);
+        assert_eq!(speech_prep.mode, SpeechPrepMode::Shorten);
         assert_eq!(speech_prep.model, "google/gemini-3-flash-preview");
         assert_eq!(speech_prep.threshold, 700);
         assert_eq!(speech_prep.max_input_length, 9000);
@@ -413,5 +414,77 @@ mod tests {
 
         assert_eq!(resolved.max_text_length, 300);
         assert_eq!(speech_prep.threshold, 300);
+    }
+
+    #[test]
+    fn parses_performance_tag_speech_prep_mode() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "elevenlabs",
+                    "maxTextLength": 3000,
+                    "speechPrep": {
+                        "enabled": true,
+                        "provider": "google",
+                        "mode": "performance-tags"
+                    },
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_SPEECH_PREP_TAGS" },
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts"
+                        },
+                        "elevenlabs": {
+                            "apiKey": { "source": "env", "id": "TEST_ELEVEN_KEY_SPEECH_PREP_TAGS" },
+                            "modelId": "eleven_v3"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var("TEST_GOOGLE_KEY_SPEECH_PREP_TAGS", "test-google-key-value");
+        std::env::set_var("TEST_ELEVEN_KEY_SPEECH_PREP_TAGS", "test-eleven-key-value");
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+        let speech_prep = resolved.speech_prep.expect("speech prep missing");
+        let elevenlabs = resolved.elevenlabs.expect("elevenlabs config missing");
+
+        assert_eq!(speech_prep.mode, SpeechPrepMode::PerformanceTags);
+        assert_eq!(speech_prep.threshold, 1);
+        assert_eq!(elevenlabs.inline_audio_tags, None);
+    }
+
+    #[test]
+    fn parses_provider_inline_audio_tag_override() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "google",
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_INLINE_TAG_OVERRIDE" },
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts",
+                            "inlineAudioTags": true
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var(
+            "TEST_GOOGLE_KEY_INLINE_TAG_OVERRIDE",
+            "test-google-key-value",
+        );
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+        let google = resolved.google.expect("google config missing");
+
+        assert_eq!(google.inline_audio_tags, Some(true));
     }
 }

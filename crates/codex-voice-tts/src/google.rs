@@ -19,6 +19,25 @@ impl GoogleSpeechClient {
         Ok(Self { config, client })
     }
 
+    pub fn supports_inline_audio_tags(&self, request: &SpeechRequest) -> bool {
+        let model = self.resolve_model(request);
+        self.config
+            .inline_audio_tags
+            .unwrap_or_else(|| google_model_supports_inline_audio_tags(model))
+    }
+
+    fn resolve_model<'a>(&'a self, request: &'a SpeechRequest) -> &'a str {
+        if self.config.model == request.model_hint || request.model_hint.is_empty() {
+            &self.config.model
+        } else {
+            self.config
+                .fallback_models
+                .iter()
+                .find(|m| *m == &request.model_hint)
+                .unwrap_or(&self.config.model)
+        }
+    }
+
     pub async fn synthesize(
         &self,
         request: &SpeechRequest,
@@ -27,15 +46,7 @@ impl GoogleSpeechClient {
     ) -> SpeechResult<SynthesizedSpeech> {
         let sanitized = sanitize_for_tts(&request.input, self.config.max_text_length)?;
 
-        let model = if self.config.model == request.model_hint || request.model_hint.is_empty() {
-            &self.config.model
-        } else {
-            self.config
-                .fallback_models
-                .iter()
-                .find(|m| *m == &request.model_hint)
-                .unwrap_or(&self.config.model)
-        };
+        let model = self.resolve_model(request);
 
         let voice_name = persona
             .and_then(|p| p.google.as_ref())
@@ -164,6 +175,14 @@ impl GoogleSpeechClient {
     }
 }
 
+fn google_model_supports_inline_audio_tags(model: &str) -> bool {
+    let normalized = model
+        .strip_prefix("google/")
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    normalized.contains("gemini-3.1") && normalized.contains("tts")
+}
+
 fn build_prompt(
     text: &str,
     persona: Option<&ResolvedPersona>,
@@ -242,7 +261,7 @@ fn guess_format_from_mime(mime: &str) -> Option<SpeechFormat> {
 
 #[cfg(test)]
 mod tests {
-    use super::guess_format_from_mime;
+    use super::{google_model_supports_inline_audio_tags, guess_format_from_mime};
     use codex_voice_core::SpeechFormat;
 
     #[test]
@@ -278,6 +297,19 @@ mod tests {
     fn guess_format_returns_none_for_unknown() {
         assert_eq!(guess_format_from_mime("audio/ogg"), None);
         assert_eq!(guess_format_from_mime("text/plain"), None);
+    }
+
+    #[test]
+    fn google_inline_audio_tags_are_model_gated() {
+        assert!(google_model_supports_inline_audio_tags(
+            "google/gemini-3.1-flash-preview-tts"
+        ));
+        assert!(google_model_supports_inline_audio_tags(
+            "gemini-3.1-flash-tts"
+        ));
+        assert!(!google_model_supports_inline_audio_tags(
+            "gemini-2.5-flash-preview-tts"
+        ));
     }
 }
 
@@ -315,6 +347,7 @@ mod live_tests {
             voice: "Sulafat".to_string(),
             model: "gemini-2.5-flash-preview-tts".to_string(),
             fallback_models: vec![],
+            inline_audio_tags: None,
             max_text_length: 1000,
             timeout: std::time::Duration::from_secs(120),
             scene: Some(

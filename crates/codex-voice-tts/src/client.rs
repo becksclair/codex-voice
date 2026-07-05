@@ -3,7 +3,7 @@ use codex_voice_core::{SpeechClient, SpeechError, SpeechRequest, SpeechResult, S
 use crate::config::{FallbackPolicy, ProviderKind, ResolvedPersona, ResolvedTtsConfig};
 use crate::elevenlabs::ElevenLabsSpeechClient;
 use crate::google::GoogleSpeechClient;
-use crate::speech_prep::SpeechPrepClient;
+use crate::speech_prep::{SpeechPrepClient, SpeechPrepContext};
 
 /// Orchestrates TTS synthesis across configured providers with persona-aware fallback.
 pub struct ConfiguredSpeechClient {
@@ -92,6 +92,67 @@ impl ConfiguredSpeechClient {
         &self.config
     }
 
+    fn provider_supports_inline_audio_tags(
+        &self,
+        provider: ProviderKind,
+        request: &SpeechRequest,
+    ) -> bool {
+        match provider {
+            ProviderKind::Google => self
+                .google
+                .as_ref()
+                .is_some_and(|client| client.supports_inline_audio_tags(request)),
+            ProviderKind::ElevenLabs => self
+                .elevenlabs
+                .as_ref()
+                .is_some_and(|client| client.supports_inline_audio_tags(request)),
+        }
+    }
+
+    async fn prepare_request_for_provider(
+        &self,
+        provider: ProviderKind,
+        request: &SpeechRequest,
+        persona: Option<&ResolvedPersona>,
+    ) -> SpeechRequest {
+        let Some(prep) = &self.speech_prep else {
+            return request.clone();
+        };
+
+        let supports_inline_audio_tags =
+            self.provider_supports_inline_audio_tags(provider, request);
+        let context = SpeechPrepContext {
+            supports_inline_audio_tags,
+            persona,
+            instructions: request.instructions.as_deref(),
+        };
+
+        if !prep.should_prepare(&request.input, supports_inline_audio_tags) {
+            return request.clone();
+        }
+
+        match prep.prepare(&request.input, context).await {
+            Ok(Some(input)) => {
+                tracing::info!(
+                    original_chars = request.input.chars().count(),
+                    prepared_chars = input.chars().count(),
+                    provider = ?provider,
+                    inline_audio_tags = supports_inline_audio_tags,
+                    "prepared TTS text before synthesis"
+                );
+                SpeechRequest {
+                    input,
+                    ..request.clone()
+                }
+            }
+            Ok(None) => request.clone(),
+            Err(error) => {
+                tracing::warn!(%error, provider = ?provider, "speech prep failed; using original TTS text");
+                request.clone()
+            }
+        }
+    }
+
     /// Dispatch synthesis to the requested provider.
     async fn synthesize_with(
         &self,
@@ -124,36 +185,13 @@ impl ConfiguredSpeechClient {
 #[async_trait::async_trait]
 impl SpeechClient for ConfiguredSpeechClient {
     async fn synthesize(&self, request: &SpeechRequest) -> SpeechResult<SynthesizedSpeech> {
-        let prepared_request;
-        let request = match &self.speech_prep {
-            Some(prep) if prep.should_prepare(&request.input) => {
-                match prep.prepare(&request.input).await {
-                    Ok(Some(input)) => {
-                        tracing::info!(
-                            original_chars = request.input.chars().count(),
-                            prepared_chars = input.chars().count(),
-                            "prepared TTS text before synthesis"
-                        );
-                        prepared_request = SpeechRequest {
-                            input,
-                            ..request.clone()
-                        };
-                        &prepared_request
-                    }
-                    Ok(None) => request,
-                    Err(error) => {
-                        tracing::warn!(%error, "speech prep failed; using original TTS text");
-                        request
-                    }
-                }
-            }
-            _ => request,
-        };
-
         let (primary_provider, persona, native_voice) = self.resolve_request(request)?;
+        let primary_request = self
+            .prepare_request_for_provider(primary_provider, request, persona)
+            .await;
 
         let primary_result = self
-            .synthesize_with(primary_provider, request, persona, native_voice)
+            .synthesize_with(primary_provider, &primary_request, persona, native_voice)
             .await;
 
         let primary_err = match primary_result {
@@ -171,9 +209,12 @@ impl SpeechClient for ConfiguredSpeechClient {
                     ProviderKind::Google => ProviderKind::ElevenLabs,
                     ProviderKind::ElevenLabs => ProviderKind::Google,
                 };
+                let fallback_request = self
+                    .prepare_request_for_provider(fallback_provider, request, Some(persona))
+                    .await;
 
                 match self
-                    .synthesize_with(fallback_provider, request, Some(persona), None)
+                    .synthesize_with(fallback_provider, &fallback_request, Some(persona), None)
                     .await
                 {
                     Ok(speech) => return Ok(speech),

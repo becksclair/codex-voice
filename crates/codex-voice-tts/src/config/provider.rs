@@ -4,6 +4,7 @@ use std::time::Duration;
 use super::models::{
     ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ElevenLabsVoiceSettings, FallbackPolicy,
     GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, SpeechPrepConfig,
+    SpeechPrepMode,
 };
 use serde_json::Value;
 
@@ -138,6 +139,7 @@ pub fn resolve_google_config(
     let voice = json_string(val, "voice", "Sulafat");
     let model = json_string(val, "model", "gemini-2.5-flash-preview-tts");
     let fallback_models = json_string_vec(val, "fallbackModels");
+    let inline_audio_tags = json_bool(val, "inlineAudioTags");
 
     let scene = json_string_opt(val, "scene");
     let sample_context = json_string_opt(val, "sampleContext");
@@ -151,6 +153,7 @@ pub fn resolve_google_config(
         voice,
         model,
         fallback_models,
+        inline_audio_tags,
         max_text_length,
         timeout,
         scene,
@@ -200,8 +203,16 @@ pub fn resolve_speech_prep_config(
         .unwrap_or("https://generativelanguage.googleapis.com/v1beta")
         .to_string();
     let model = json_string(val, "model", "gemini-3-flash-preview");
+    let mode_name = json_str(val, "mode").unwrap_or("shorten");
+    let mode = SpeechPrepMode::from_name(mode_name).ok_or_else(|| {
+        codex_voice_core::SpeechError::Config(format!("invalid speechPrep mode: {mode_name}"))
+    })?;
+    let default_threshold = match mode {
+        SpeechPrepMode::Shorten => 500,
+        SpeechPrepMode::PerformanceTags => 1,
+    };
     let threshold = json_usize(val, "threshold")
-        .unwrap_or(500)
+        .unwrap_or(default_threshold)
         .min(max_text_length);
     let max_input_length = json_usize(val, "maxInputLength")
         .unwrap_or(12_000)
@@ -219,6 +230,7 @@ pub fn resolve_speech_prep_config(
 
     Ok(Some(SpeechPrepConfig {
         provider,
+        mode,
         api_key,
         base_url,
         model,
@@ -251,6 +263,7 @@ pub fn resolve_elevenlabs_config(
     let apply_text_normalization = json_string(val, "applyTextNormalization", "auto");
     let output_format = json_string(val, "outputFormat", "mp3_44100_128");
     let language_code = json_string(val, "languageCode", "en");
+    let inline_audio_tags = json_bool(val, "inlineAudioTags");
 
     Ok(Some(ElevenLabsRuntimeConfig {
         api_key,
@@ -259,6 +272,7 @@ pub fn resolve_elevenlabs_config(
         apply_text_normalization,
         output_format,
         language_code,
+        inline_audio_tags,
         max_text_length,
         timeout,
     }))

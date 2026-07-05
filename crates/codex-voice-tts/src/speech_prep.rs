@@ -1,12 +1,18 @@
 use codex_voice_core::{SpeechError, SpeechResult};
 use reqwest::Client;
 
-use crate::config::SpeechPrepConfig;
+use crate::config::{ResolvedPersona, SpeechPrepConfig, SpeechPrepMode};
 use crate::sanitize::sanitize_for_tts;
 
 pub struct SpeechPrepClient {
     config: SpeechPrepConfig,
     client: Client,
+}
+
+pub struct SpeechPrepContext<'a> {
+    pub supports_inline_audio_tags: bool,
+    pub persona: Option<&'a ResolvedPersona>,
+    pub instructions: Option<&'a str>,
 }
 
 impl SpeechPrepClient {
@@ -20,21 +26,37 @@ impl SpeechPrepClient {
         Ok(Self { config, client })
     }
 
-    pub fn should_prepare(&self, text: &str) -> bool {
+    pub fn should_prepare(&self, text: &str, supports_inline_audio_tags: bool) -> bool {
         let chars = text.chars().count();
-        chars > self.config.threshold && chars > self.config.max_length
+        match self.config.mode {
+            SpeechPrepMode::Shorten => {
+                chars > self.config.threshold && chars > self.config.max_length
+            }
+            SpeechPrepMode::PerformanceTags => {
+                supports_inline_audio_tags
+                    && chars >= self.config.threshold
+                    && chars <= self.config.max_input_length
+            }
+        }
     }
 
-    pub async fn prepare(&self, text: &str) -> SpeechResult<Option<String>> {
-        if !self.should_prepare(text) {
+    pub async fn prepare(
+        &self,
+        text: &str,
+        context: SpeechPrepContext<'_>,
+    ) -> SpeechResult<Option<String>> {
+        if !self.should_prepare(text, context.supports_inline_audio_tags) {
             return Ok(None);
         }
 
         let input = prepare_input_for_prompt(text, self.config.max_input_length)?;
-        let prompt = build_prompt(&input, self.config.max_length);
+        let prompt = build_prompt(&input, self.config.max_length, self.config.mode, &context);
         let model = normalize_google_model_name(&self.config.model);
         let url = format!("{}/models/{}:generateContent", self.config.base_url, model);
-        let max_output_tokens = (self.config.max_length / 3).clamp(64, 512);
+        let max_output_tokens = match self.config.mode {
+            SpeechPrepMode::Shorten => (self.config.max_length / 3).clamp(64, 512),
+            SpeechPrepMode::PerformanceTags => (self.config.max_length / 2).clamp(128, 2048),
+        };
         let body = serde_json::json!({
             "contents": [
                 {
@@ -43,7 +65,10 @@ impl SpeechPrepClient {
                 }
             ],
             "generationConfig": {
-                "temperature": 0.2,
+                "temperature": match self.config.mode {
+                    SpeechPrepMode::Shorten => 0.2,
+                    SpeechPrepMode::PerformanceTags => 0.45,
+                },
                 "maxOutputTokens": max_output_tokens
             }
         });
@@ -83,22 +108,99 @@ impl SpeechPrepClient {
             ))
         })??;
         let sanitized = sanitize_for_tts(&prepared, usize::MAX)?;
-        let shortened = truncate_chars(&sanitized, self.config.max_length);
+        let prepared = match self.config.mode {
+            SpeechPrepMode::Shorten => truncate_chars(&sanitized, self.config.max_length),
+            SpeechPrepMode::PerformanceTags => {
+                if sanitized.chars().count() > self.config.max_length {
+                    return Err(SpeechError::Request(format!(
+                        "speech prep enrichment returned {} characters, above max {}",
+                        sanitized.chars().count(),
+                        self.config.max_length
+                    )));
+                }
+                sanitized
+            }
+        };
 
-        if shortened.is_empty() {
+        if prepared.is_empty() {
             return Err(SpeechError::Request(
                 "speech prep returned empty text".into(),
             ));
         }
 
-        Ok(Some(shortened))
+        Ok(Some(prepared))
     }
 }
 
-fn build_prompt(text: &str, max_length: usize) -> String {
-    format!(
-        "Prepare this text for text-to-speech playback. Preserve the user's meaning, key facts, decisions, and the full requested message. Shorten only when necessary to stay under {max_length} characters. Remove repetition, code blocks, URLs, file paths, and formatting noise. Return only natural speakable prose, no markdown, no preamble, no labels.\n\nText:\n\"\"\"{text}\"\"\""
-    )
+fn build_prompt(
+    text: &str,
+    max_length: usize,
+    mode: SpeechPrepMode,
+    context: &SpeechPrepContext<'_>,
+) -> String {
+    match mode {
+        SpeechPrepMode::Shorten => format!(
+            "Prepare this text for text-to-speech playback. Preserve the user's meaning, key facts, decisions, and the full requested message. Shorten only when necessary to stay under {max_length} characters. Remove repetition, code blocks, URLs, file paths, and formatting noise. Return only natural speakable prose, no markdown, no preamble, no labels.\n\nText:\n\"\"\"{text}\"\"\""
+        ),
+        SpeechPrepMode::PerformanceTags => build_performance_tags_prompt(text, max_length, context),
+    }
+}
+
+fn build_performance_tags_prompt(
+    text: &str,
+    max_length: usize,
+    context: &SpeechPrepContext<'_>,
+) -> String {
+    let mut prompt = String::with_capacity(text.len() + 1600);
+    prompt.push_str("Enrich this text for text-to-speech performance by inserting sparse inline bracketed audio tags at the exact point where the voice should change.\n");
+    prompt.push_str("Do not summarize, shorten, paraphrase, reorder, omit, or add spoken content. Preserve the original wording and meaning. Only insert bracketed performance tags.\n");
+    prompt.push_str("Treat tags as performance direction for emotional state, pacing, reaction, intimacy, hesitation, warmth, tension, and release.\n");
+    prompt.push_str("Use one strong cue instead of clutter. Prefer zero to three tags for short text; avoid stacking tags. If no cue improves the reading, return the text unchanged.\n");
+    prompt.push_str("Allowed examples include [excited], [nervous], [frustrated], [sorrowful], [calm], [tender], [proud], [sigh], [laughs], [gasps], [whispers], [exhales], [light chuckle], [sigh of relief], [amused], [softly], [moan], [leans closer], [laughing], or another clear performable cue.\n");
+    prompt.push_str("Return only the enriched text. No markdown, no labels, no explanation. Keep the result under ");
+    prompt.push_str(&max_length.to_string());
+    prompt.push_str(" characters.\n\n");
+
+    if let Some(persona) = context.persona {
+        prompt.push_str("Delivery context:\n");
+        prompt.push_str("- persona: ");
+        prompt.push_str(&persona.label);
+        prompt.push_str(" - ");
+        prompt.push_str(&persona.description);
+        prompt.push('\n');
+        if let Some(scene) = &persona.prompt_scene {
+            prompt.push_str("- scene: ");
+            prompt.push_str(scene);
+            prompt.push('\n');
+        }
+        if let Some(style) = &persona.prompt_style {
+            prompt.push_str("- style: ");
+            prompt.push_str(style);
+            prompt.push('\n');
+        }
+        if let Some(pacing) = &persona.prompt_pacing {
+            prompt.push_str("- pace: ");
+            prompt.push_str(pacing);
+            prompt.push('\n');
+        }
+        for constraint in &persona.prompt_constraints {
+            prompt.push_str("- constraint: ");
+            prompt.push_str(constraint);
+            prompt.push('\n');
+        }
+        prompt.push('\n');
+    }
+
+    if let Some(instructions) = context.instructions {
+        prompt.push_str("Additional delivery hints:\n");
+        prompt.push_str(instructions);
+        prompt.push_str("\n\n");
+    }
+
+    prompt.push_str("Text:\n\"\"\"");
+    prompt.push_str(text);
+    prompt.push_str("\"\"\"");
+    prompt
 }
 
 fn prepare_input_for_prompt(text: &str, max_input_length: usize) -> SpeechResult<String> {
@@ -176,6 +278,7 @@ mod tests {
     fn speech_prep_config_keeps_input_cap_at_or_above_threshold() {
         let config = SpeechPrepConfig {
             provider: crate::config::ProviderKind::Google,
+            mode: SpeechPrepMode::Shorten,
             api_key: "key".to_string(),
             base_url: "https://example.test".to_string(),
             model: "gemini-3-flash-preview".to_string(),
@@ -186,13 +289,14 @@ mod tests {
         };
         let client = SpeechPrepClient::new(config).unwrap();
 
-        assert!(client.should_prepare(&"x".repeat(701)));
+        assert!(client.should_prepare(&"x".repeat(701), false));
     }
 
     #[test]
     fn speech_prep_skips_text_that_already_fits_output_limit() {
         let config = SpeechPrepConfig {
             provider: crate::config::ProviderKind::Google,
+            mode: SpeechPrepMode::Shorten,
             api_key: "key".to_string(),
             base_url: "https://example.test".to_string(),
             model: "gemini-3-flash-preview".to_string(),
@@ -203,7 +307,7 @@ mod tests {
         };
         let client = SpeechPrepClient::new(config).unwrap();
 
-        assert!(!client.should_prepare(&"x".repeat(700)));
+        assert!(!client.should_prepare(&"x".repeat(700), false));
     }
 
     #[test]
@@ -215,5 +319,44 @@ mod tests {
         assert!(result.chars().count() <= 40);
         assert!(!result.contains("```"));
         assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn performance_tags_only_prepare_when_model_supports_tags() {
+        let config = SpeechPrepConfig {
+            provider: crate::config::ProviderKind::Google,
+            mode: SpeechPrepMode::PerformanceTags,
+            api_key: "key".to_string(),
+            base_url: "https://example.test".to_string(),
+            model: "gemini-3-flash-preview".to_string(),
+            threshold: 1,
+            max_input_length: 12_000,
+            max_length: 3000,
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let client = SpeechPrepClient::new(config).unwrap();
+
+        assert!(client.should_prepare("I did it.", true));
+        assert!(!client.should_prepare("I did it.", false));
+    }
+
+    #[test]
+    fn performance_tags_prompt_forbids_summarization() {
+        let context = SpeechPrepContext {
+            supports_inline_audio_tags: true,
+            persona: None,
+            instructions: Some("Keep it warm."),
+        };
+
+        let prompt = build_prompt(
+            "I was worried, but it worked.",
+            1000,
+            SpeechPrepMode::PerformanceTags,
+            &context,
+        );
+
+        assert!(prompt.contains("Do not summarize"));
+        assert!(prompt.contains("[sigh of relief]"));
+        assert!(prompt.contains("Only insert bracketed performance tags"));
     }
 }

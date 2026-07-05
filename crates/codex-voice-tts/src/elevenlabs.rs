@@ -19,6 +19,14 @@ impl ElevenLabsSpeechClient {
         Ok(Self { config, client })
     }
 
+    pub fn supports_inline_audio_tags(&self, request: &SpeechRequest) -> bool {
+        let model_id = resolve_model_id(&request.model_hint, &self.config.model_id)
+            .unwrap_or_else(|_| self.config.model_id.clone());
+        self.config
+            .inline_audio_tags
+            .unwrap_or_else(|| elevenlabs_model_supports_inline_audio_tags(&model_id))
+    }
+
     pub async fn synthesize(
         &self,
         request: &SpeechRequest,
@@ -187,6 +195,11 @@ fn resolve_model_id(model_hint: &str, configured: &str) -> SpeechResult<String> 
     )))
 }
 
+fn elevenlabs_model_supports_inline_audio_tags(model_id: &str) -> bool {
+    let normalized = model_id.to_ascii_lowercase();
+    normalized == "eleven_v3" || normalized.starts_with("eleven_v3_")
+}
+
 fn format_from_elevenlabs_output(output_format: &str) -> SpeechFormat {
     if output_format.starts_with("mp3") {
         SpeechFormat::Mp3
@@ -203,7 +216,7 @@ fn format_from_elevenlabs_output(output_format: &str) -> SpeechFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_request_body, normalize_speed};
+    use super::{build_request_body, elevenlabs_model_supports_inline_audio_tags, normalize_speed};
     use crate::config::{ElevenLabsPersonaConfig, ElevenLabsVoiceSettings};
 
     #[test]
@@ -322,5 +335,16 @@ mod tests {
         assert_eq!(body["voice_settings"]["speed"], 1.0);
         assert!(body.to_string().contains(r#""speed":1.0"#));
         assert!(!body.to_string().contains(r#""speed":null"#));
+    }
+
+    #[test]
+    fn elevenlabs_inline_audio_tags_are_model_gated() {
+        assert!(elevenlabs_model_supports_inline_audio_tags("eleven_v3"));
+        assert!(elevenlabs_model_supports_inline_audio_tags(
+            "eleven_v3_alpha"
+        ));
+        assert!(!elevenlabs_model_supports_inline_audio_tags(
+            "eleven_multilingual_v2"
+        ));
     }
 }

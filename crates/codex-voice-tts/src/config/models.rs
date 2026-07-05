@@ -37,6 +37,27 @@ impl FallbackPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechPrepMode {
+    Shorten,
+    PerformanceTags,
+}
+
+impl SpeechPrepMode {
+    pub fn from_name(s: &str) -> Option<Self> {
+        if s.eq_ignore_ascii_case("shorten") || s.eq_ignore_ascii_case("summarize") {
+            Some(Self::Shorten)
+        } else if s.eq_ignore_ascii_case("performance-tags")
+            || s.eq_ignore_ascii_case("emotion-tags")
+            || s.eq_ignore_ascii_case("enrich")
+        {
+            Some(Self::PerformanceTags)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedTtsConfig {
     pub default_provider: ProviderKind,
@@ -52,6 +73,7 @@ pub struct ResolvedTtsConfig {
 #[derive(Debug, Clone)]
 pub struct SpeechPrepConfig {
     pub provider: ProviderKind,
+    pub mode: SpeechPrepMode,
     pub api_key: String,
     pub base_url: String,
     pub model: String,
@@ -68,6 +90,7 @@ pub struct GoogleRuntimeConfig {
     pub voice: String,
     pub model: String,
     pub fallback_models: Vec<String>,
+    pub inline_audio_tags: Option<bool>,
     pub max_text_length: usize,
     pub timeout: Duration,
     pub scene: Option<String>,
@@ -85,6 +108,7 @@ pub struct ElevenLabsRuntimeConfig {
     pub apply_text_normalization: String,
     pub output_format: String,
     pub language_code: String,
+    pub inline_audio_tags: Option<bool>,
     pub max_text_length: usize,
     pub timeout: Duration,
 }
