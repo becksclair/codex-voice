@@ -119,6 +119,7 @@ impl ElevenLabsSpeechClient {
             bytes,
             format,
             mime_type,
+            prepared_input: None,
         };
 
         convert_speech(native, request.format).await

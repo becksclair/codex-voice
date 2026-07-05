@@ -114,6 +114,7 @@ impl LocalTranscriberClient {
             bytes: body,
             format,
             mime_type,
+            prepared_input: None,
         })
     }
 }

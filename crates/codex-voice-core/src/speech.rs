@@ -62,6 +62,7 @@ pub struct SynthesizedSpeech {
     pub bytes: bytes::Bytes,
     pub format: SpeechFormat,
     pub mime_type: String,
+    pub prepared_input: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

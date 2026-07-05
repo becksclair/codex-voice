@@ -35,6 +35,7 @@ async fn pcm_to_wav_blocking(speech: SynthesizedSpeech) -> SpeechResult<Synthesi
 }
 
 fn pcm_to_wav(speech: SynthesizedSpeech) -> SpeechResult<SynthesizedSpeech> {
+    let prepared_input = speech.prepared_input;
     let spec = parse_pcm_spec(&speech.mime_type);
     let mut cursor = Cursor::new(Vec::with_capacity(speech.bytes.len() + 44));
     let wav_spec = hound::WavSpec {
@@ -62,6 +63,7 @@ fn pcm_to_wav(speech: SynthesizedSpeech) -> SpeechResult<SynthesizedSpeech> {
         bytes: Bytes::from(cursor.into_inner()),
         format: SpeechFormat::Wav,
         mime_type: SpeechFormat::Wav.mime_type().to_string(),
+        prepared_input,
     })
 }
 
@@ -69,7 +71,13 @@ async fn convert_encoded_with_ffmpeg(
     speech: SynthesizedSpeech,
     target: SpeechFormat,
 ) -> SpeechResult<SynthesizedSpeech> {
-    run_ffmpeg(speech.bytes, vec!["-i", "pipe:0"], target).await
+    run_ffmpeg(
+        speech.bytes,
+        vec!["-i", "pipe:0"],
+        target,
+        speech.prepared_input,
+    )
+    .await
 }
 
 async fn convert_pcm_with_ffmpeg(
@@ -89,13 +97,14 @@ async fn convert_pcm_with_ffmpeg(
         "-i",
         "pipe:0",
     ];
-    run_ffmpeg(speech.bytes, input_args, target).await
+    run_ffmpeg(speech.bytes, input_args, target, speech.prepared_input).await
 }
 
 async fn run_ffmpeg(
     input: Bytes,
     input_args: Vec<&str>,
     target: SpeechFormat,
+    prepared_input: Option<String>,
 ) -> SpeechResult<SynthesizedSpeech> {
     let output_args = ffmpeg_output_args(target);
     let mut command = Command::new("ffmpeg");
@@ -167,6 +176,7 @@ async fn run_ffmpeg(
         bytes: Bytes::from(output.stdout),
         format: target,
         mime_type: target.mime_type().to_string(),
+        prepared_input,
     })
 }
 
@@ -220,11 +230,13 @@ mod tests {
             bytes: Bytes::from_static(&[0, 0, 1, 0, 255, 255, 0, 0]),
             format: SpeechFormat::Pcm,
             mime_type: "audio/L16;codec=pcm;rate=24000".to_string(),
+            prepared_input: Some("[softly] hello".to_string()),
         };
 
         let converted = convert_speech(speech, SpeechFormat::Wav).await.unwrap();
         assert_eq!(converted.format, SpeechFormat::Wav);
         assert_eq!(converted.mime_type, "audio/wav");
+        assert_eq!(converted.prepared_input.as_deref(), Some("[softly] hello"));
         assert_eq!(&converted.bytes[..4], b"RIFF");
         assert_eq!(&converted.bytes[8..12], b"WAVE");
     }

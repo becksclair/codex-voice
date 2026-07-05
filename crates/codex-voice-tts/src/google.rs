@@ -161,6 +161,7 @@ impl GoogleSpeechClient {
                 bytes: audio_bytes,
                 format,
                 mime_type,
+                prepared_input: None,
             })
         })
         .await

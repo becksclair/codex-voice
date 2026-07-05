@@ -152,12 +152,8 @@ fn build_performance_tags_prompt(
     context: &SpeechPrepContext<'_>,
 ) -> String {
     let mut prompt = String::with_capacity(text.len() + 1600);
-    prompt.push_str("Enrich this text for text-to-speech performance by inserting sparse inline bracketed audio tags at the exact point where the voice should change.\n");
-    prompt.push_str("Do not summarize, shorten, paraphrase, reorder, omit, or add spoken content. Preserve the original wording and meaning. Only insert bracketed performance tags.\n");
-    prompt.push_str("Treat tags as performance direction for emotional state, pacing, reaction, intimacy, hesitation, warmth, tension, and release.\n");
-    prompt.push_str("Use one strong cue instead of clutter. Prefer zero to three tags for short text; avoid stacking tags. If no cue improves the reading, return the text unchanged.\n");
-    prompt.push_str("Allowed examples include [excited], [nervous], [frustrated], [sorrowful], [calm], [tender], [proud], [sigh], [laughs], [gasps], [whispers], [exhales], [light chuckle], [sigh of relief], [amused], [softly], [moan], [leans closer], [laughing], or another clear performable cue.\n");
-    prompt.push_str("Return only the enriched text. No markdown, no labels, no explanation. Keep the result under ");
+    prompt.push_str("You are a TTS performance tagger. Do not rewrite the text. Do not summarize. Insert concise emotion/performance tags only where they improve delivery. Use tags sparingly. Keep tags local to the phrase or paragraph they affect. Prefer natural performance: warm, amused, teasing, soft, relieved, sleepy, serious, whispering, laughing, affectionate. Never add tags that contradict the text. Return only the tagged text.\n");
+    prompt.push_str("Use inline bracketed audio tags such as [tender], [softly], [amused], [laughs], [whispers], [sigh], [exhales], [light chuckle], [sigh of relief], or another clear performable cue. Keep the result under ");
     prompt.push_str(&max_length.to_string());
     prompt.push_str(" characters.\n\n");
 
@@ -356,7 +352,8 @@ mod tests {
         );
 
         assert!(prompt.contains("Do not summarize"));
+        assert!(prompt.contains("Do not rewrite the text"));
         assert!(prompt.contains("[sigh of relief]"));
-        assert!(prompt.contains("Only insert bracketed performance tags"));
+        assert!(prompt.contains("Return only the tagged text"));
     }
 }

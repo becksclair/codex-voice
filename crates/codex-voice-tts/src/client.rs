@@ -190,12 +190,18 @@ impl SpeechClient for ConfiguredSpeechClient {
             .prepare_request_for_provider(primary_provider, request, persona)
             .await;
 
+        let primary_prepared_input =
+            (primary_request.input != request.input).then(|| primary_request.input.clone());
+
         let primary_result = self
             .synthesize_with(primary_provider, &primary_request, persona, native_voice)
             .await;
 
         let primary_err = match primary_result {
-            Ok(speech) => return Ok(speech),
+            Ok(mut speech) => {
+                speech.prepared_input = primary_prepared_input;
+                return Ok(speech);
+            }
             Err(e) if !self.is_retryable(&e) => return Err(e),
             Err(e) => e,
         };
@@ -212,12 +218,17 @@ impl SpeechClient for ConfiguredSpeechClient {
                 let fallback_request = self
                     .prepare_request_for_provider(fallback_provider, request, Some(persona))
                     .await;
+                let fallback_prepared_input = (fallback_request.input != request.input)
+                    .then(|| fallback_request.input.clone());
 
                 match self
                     .synthesize_with(fallback_provider, &fallback_request, Some(persona), None)
                     .await
                 {
-                    Ok(speech) => return Ok(speech),
+                    Ok(mut speech) => {
+                        speech.prepared_input = fallback_prepared_input;
+                        return Ok(speech);
+                    }
                     Err(e) => {
                         tracing::warn!(%e, provider = ?fallback_provider, "fallback TTS provider also failed");
                     }

@@ -202,8 +202,8 @@ pub fn resolve_speech_prep_config(
         .or_else(|| models.get("google").and_then(|m| m.base_url.as_deref()))
         .unwrap_or("https://generativelanguage.googleapis.com/v1beta")
         .to_string();
-    let model = json_string(val, "model", "gemini-3-flash-preview");
-    let mode_name = json_str(val, "mode").unwrap_or("shorten");
+    let model = json_string(val, "model", "google/gemini-3.5-flash");
+    let mode_name = json_str(val, "mode").unwrap_or("performance-tags");
     let mode = SpeechPrepMode::from_name(mode_name).ok_or_else(|| {
         codex_voice_core::SpeechError::Config(format!("invalid speechPrep mode: {mode_name}"))
     })?;

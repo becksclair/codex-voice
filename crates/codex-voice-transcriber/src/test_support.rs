@@ -30,6 +30,7 @@ impl TranscriptionClient for FakeBackend {
 #[derive(Default)]
 pub struct FakeSpeechBackend {
     pub seen: Mutex<Vec<SpeechRequest>>,
+    pub prepared_input: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -43,6 +44,7 @@ impl SpeechClient for FakeSpeechBackend {
             bytes: bytes::Bytes::from_static(b"fake audio bytes"),
             format: request.format,
             mime_type: request.format.mime_type().to_string(),
+            prepared_input: self.prepared_input.clone(),
         })
     }
 }

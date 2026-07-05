@@ -239,7 +239,7 @@ mod tests {
                     "speechPrep": {
                         "enabled": true,
                         "provider": "google",
-                        "model": "google/gemini-3-flash-preview",
+                        "model": "google/gemini-3.5-flash",
                         "timeoutMs": 20000,
                         "threshold": 700,
                         "maxInputLength": 9000,
@@ -263,8 +263,8 @@ mod tests {
         let speech_prep = resolved.speech_prep.expect("speech prep missing");
 
         assert_eq!(speech_prep.provider, ProviderKind::Google);
-        assert_eq!(speech_prep.mode, SpeechPrepMode::Shorten);
-        assert_eq!(speech_prep.model, "google/gemini-3-flash-preview");
+        assert_eq!(speech_prep.mode, SpeechPrepMode::PerformanceTags);
+        assert_eq!(speech_prep.model, "google/gemini-3.5-flash");
         assert_eq!(speech_prep.threshold, 700);
         assert_eq!(speech_prep.max_input_length, 9000);
         assert_eq!(speech_prep.max_length, 420);
@@ -280,7 +280,8 @@ mod tests {
                     "provider": "google",
                     "speechPrep": {
                         "enabled": true,
-                        "provider": "google"
+                        "provider": "google",
+                        "mode": "shorten"
                     },
                     "providers": {
                         "google": {
@@ -317,7 +318,8 @@ mod tests {
                     "maxTextLength": 3000,
                     "speechPrep": {
                         "enabled": true,
-                        "provider": "google"
+                        "provider": "google",
+                        "mode": "shorten"
                     },
                     "providers": {
                         "google": {
@@ -381,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn speech_prep_threshold_is_capped_to_tts_max_text_length() {
+    fn speech_prep_enabled_defaults_to_performance_tags() {
         let config = r#"
         {
             "messages": {
@@ -413,7 +415,9 @@ mod tests {
         let speech_prep = resolved.speech_prep.expect("speech prep missing");
 
         assert_eq!(resolved.max_text_length, 300);
-        assert_eq!(speech_prep.threshold, 300);
+        assert_eq!(speech_prep.mode, SpeechPrepMode::PerformanceTags);
+        assert_eq!(speech_prep.threshold, 1);
+        assert_eq!(speech_prep.model, "google/gemini-3.5-flash");
     }
 
     #[test]
@@ -453,6 +457,7 @@ mod tests {
         let elevenlabs = resolved.elevenlabs.expect("elevenlabs config missing");
 
         assert_eq!(speech_prep.mode, SpeechPrepMode::PerformanceTags);
+        assert_eq!(speech_prep.model, "google/gemini-3.5-flash");
         assert_eq!(speech_prep.threshold, 1);
         assert_eq!(elevenlabs.inline_audio_tags, None);
     }
