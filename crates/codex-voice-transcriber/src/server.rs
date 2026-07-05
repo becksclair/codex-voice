@@ -504,28 +504,29 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       if (!shouldPrepare(input, prep, providerSupportsInlineAudioTags(config, provider))) return input;
       if (prep.provider !== 'google') return input;
       const model = normalizeGoogleModelName(prep.model);
-      const response = await fetch(`${prep.baseUrl}/models/${encodeURIComponent(model)}:generateContent`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': prep.apiKey
-        },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: buildPerformanceTagsPrompt(input, prep, persona) }] }],
-          generationConfig: {
-            temperature: 0.45,
-            maxOutputTokens: clamp(Math.floor(prep.maxLength / 2), 128, 2048)
-          }
-        })
-      });
-      if (!response.ok) throw await providerError(response, 'Speech prep failed');
-      const json = await response.json();
-      const prepared = extractTextOutput(json).trim();
-      if (!prepared) throw new Error('Speech prep returned empty text.');
-      if (Array.from(prepared).length > prep.maxLength) {
-        throw new Error(`Speech prep returned ${Array.from(prepared).length} chars, above max ${prep.maxLength}.`);
+      try {
+        const response = await fetch(`${prep.baseUrl}/models/${encodeURIComponent(model)}:generateContent`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': prep.apiKey
+          },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: buildPerformanceTagsPrompt(input, prep, persona) }] }],
+            generationConfig: {
+              temperature: 0.45,
+              maxOutputTokens: clamp(Math.floor(prep.maxLength / 2), 128, 2048)
+            }
+          })
+        });
+        if (!response.ok) return input;
+        const json = await response.json();
+        const prepared = extractTextOutput(json).trim();
+        if (!prepared || Array.from(prepared).length > prep.maxLength) return input;
+        return prepared;
+      } catch (_) {
+        return input;
       }
-      return prepared;
     }
 
     function extractTextOutput(json) {
@@ -1751,6 +1752,7 @@ mod tests {
         assert!(html.contains("function synthesizeGoogle"));
         assert!(html.contains("function wavBlobFromPcm"));
         assert!(html.contains("function synthesizeElevenLabs"));
+        assert!(html.contains("if (!response.ok) return input;"));
         assert!(html.contains("function generateViaServer"));
         assert!(html.contains("'/web/speech'"));
         assert!(html.contains(r#"<link rel="manifest" href="/web/manifest.webmanifest">"#));
