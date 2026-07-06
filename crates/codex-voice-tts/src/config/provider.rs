@@ -1,12 +1,73 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use super::models::{
     ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ElevenLabsVoiceSettings, FallbackPolicy,
     GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, SpeechPrepConfig,
-    SpeechPrepMode,
+    SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies, SpeechPrepStrategy,
 };
 use serde_json::Value;
+
+const DEFAULT_CODEX_SPEECH_PREP_MODEL: &str = "gpt-5.3-codex-spark";
+const DEFAULT_CODEX_SPEECH_PREP_REASONING_EFFORT: &str = "medium";
+const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const DEFAULT_PERFORMANCE_TAG_THRESHOLD: usize = 120;
+const DEFAULT_SHORTEN_MIN_OUTPUT_CHARS: usize = 4_000;
+const DEFAULT_TAG_PALETTE: &[&str] = &[
+    "excited",
+    "delighted",
+    "playful",
+    "brightly",
+    "nervous",
+    "uneasy",
+    "fearful",
+    "frustrated",
+    "angry",
+    "stern",
+    "sorrowful",
+    "wistful",
+    "choked up",
+    "calm",
+    "reassuring",
+    "tender",
+    "vulnerable",
+    "affectionate",
+    "proud",
+    "determined",
+    "amused",
+    "dryly",
+    "deadpan",
+    "relieved",
+    "sleepy",
+    "serious",
+    "urgent",
+    "teasing",
+    "warmly",
+    "softly",
+    "flatly",
+    "breathless",
+    "sigh",
+    "laughs",
+    "laughing",
+    "gasps",
+    "whispers",
+    "exhales",
+    "shaky breath",
+    "light chuckle",
+    "snorts",
+    "scoffs",
+    "sigh of relief",
+    "hesitates",
+    "pause",
+    "long pause",
+    "voice breaks",
+    "swallows",
+    "leans closer",
+    "under breath",
+    "smiling",
+    "moan",
+];
 
 pub fn validate_default_path(
     default_provider: ProviderKind,
@@ -100,6 +161,36 @@ fn json_string_vec(value: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn parse_speech_prep_strategy(
+    value: &Value,
+    key: &str,
+    default: SpeechPrepStrategy,
+) -> Result<SpeechPrepStrategy, codex_voice_core::SpeechError> {
+    let Some(raw) = json_str(value, key) else {
+        return Ok(default);
+    };
+    SpeechPrepStrategy::from_name(raw).ok_or_else(|| {
+        codex_voice_core::SpeechError::Config(format!(
+            "invalid speechPrep strategy for {key}: {raw}"
+        ))
+    })
+}
+
+fn parse_speech_prep_strategies(
+    value: &Value,
+) -> Result<SpeechPrepStrategies, codex_voice_core::SpeechError> {
+    let defaults = SpeechPrepStrategies::default();
+    let Some(strategies) = value.get("strategies").and_then(Value::as_object) else {
+        return Ok(defaults);
+    };
+    let raw = Value::Object(strategies.clone());
+    Ok(SpeechPrepStrategies {
+        google: parse_speech_prep_strategy(&raw, "google", defaults.google)?,
+        elevenlabs: parse_speech_prep_strategy(&raw, "elevenlabs", defaults.elevenlabs)?,
+        default: parse_speech_prep_strategy(&raw, "*", defaults.default)?,
+    })
+}
+
 pub fn persona_provider_usable(
     persona: &ResolvedPersona,
     provider: ProviderKind,
@@ -170,63 +261,109 @@ pub fn resolve_speech_prep_config(
     models: &HashMap<String, super::serde::ProviderModelConfig>,
     max_text_length: usize,
 ) -> Result<Option<SpeechPrepConfig>, codex_voice_core::SpeechError> {
-    let Some(val) = raw else {
-        return Ok(None);
-    };
+    let default_value = Value::Object(Default::default());
+    let val = raw.unwrap_or(&default_value);
 
     if val.get("enabled").and_then(Value::as_bool) == Some(false) {
         return Ok(None);
     }
 
-    let provider_name = json_str(val, "provider").unwrap_or("google");
-    let provider = ProviderKind::from_name(provider_name).ok_or_else(|| {
+    let provider_name = json_str(val, "provider").unwrap_or("codex");
+    let provider = SpeechPrepProviderKind::from_name(provider_name).ok_or_else(|| {
         codex_voice_core::SpeechError::Config(format!(
             "invalid speechPrep provider: {provider_name}"
         ))
     })?;
-    if provider != ProviderKind::Google {
-        return Err(codex_voice_core::SpeechError::Config(
-            "speechPrep currently supports only the google provider".into(),
-        ));
-    }
 
     let google_provider = providers.get("google");
-    let api_key = crate::secret::resolve_secret(
-        val.get("apiKey")
-            .or_else(|| google_provider.and_then(|provider| provider.get("apiKey"))),
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-    )?;
-    let base_url = json_str(val, "baseUrl")
-        .or_else(|| google_provider.and_then(|provider| json_str(provider, "baseUrl")))
-        .or_else(|| models.get("google").and_then(|m| m.base_url.as_deref()))
-        .unwrap_or("https://generativelanguage.googleapis.com/v1beta")
-        .to_string();
-    let model = json_string(val, "model", "google/gemini-3.5-flash");
+    let codex_provider = providers.get("codex");
+    let api_key = match provider {
+        SpeechPrepProviderKind::Google => Some(crate::secret::resolve_secret(
+            val.get("apiKey")
+                .or_else(|| google_provider.and_then(|provider| provider.get("apiKey"))),
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+        )?),
+        SpeechPrepProviderKind::Codex => None,
+    };
+    let base_url = match provider {
+        SpeechPrepProviderKind::Google => json_str(val, "baseUrl")
+            .or_else(|| google_provider.and_then(|provider| json_str(provider, "baseUrl")))
+            .or_else(|| models.get("google").and_then(|m| m.base_url.as_deref()))
+            .unwrap_or("https://generativelanguage.googleapis.com/v1beta")
+            .to_string(),
+        SpeechPrepProviderKind::Codex => json_str(val, "baseUrl")
+            .or_else(|| codex_provider.and_then(|provider| json_str(provider, "baseUrl")))
+            .or_else(|| models.get("codex").and_then(|m| m.base_url.as_deref()))
+            .unwrap_or(DEFAULT_CODEX_BASE_URL)
+            .trim_end_matches('/')
+            .to_string(),
+    };
+    let model = match provider {
+        SpeechPrepProviderKind::Google => json_string(val, "model", "google/gemini-3.5-flash"),
+        SpeechPrepProviderKind::Codex => json_string(val, "model", DEFAULT_CODEX_SPEECH_PREP_MODEL),
+    };
+    let fallback_models = json_string_vec(val, "fallbackModels");
+    let auth_file = (provider == SpeechPrepProviderKind::Codex).then(|| {
+        json_str(val, "authFile")
+            .or_else(|| codex_provider.and_then(|provider| json_str(provider, "authFile")))
+            .map(PathBuf::from)
+            .unwrap_or_else(default_codex_auth_file)
+    });
+    let reasoning_effort = json_string_opt(val, "reasoningEffort")
+        .or_else(|| {
+            codex_provider.and_then(|provider| json_string_opt(provider, "reasoningEffort"))
+        })
+        .or_else(|| {
+            (provider == SpeechPrepProviderKind::Codex)
+                .then(|| DEFAULT_CODEX_SPEECH_PREP_REASONING_EFFORT.to_string())
+        })
+        .filter(|effort| !effort.eq_ignore_ascii_case("none"));
+    let strategies = parse_speech_prep_strategies(val)?;
+    let mut tag_palette = json_string_vec(val, "tagPalette");
+    if tag_palette.is_empty() {
+        tag_palette = DEFAULT_TAG_PALETTE
+            .iter()
+            .map(|tag| (*tag).to_string())
+            .collect();
+    }
     let mode_name = json_str(val, "mode").unwrap_or("performance-tags");
     let mode = SpeechPrepMode::from_name(mode_name).ok_or_else(|| {
         codex_voice_core::SpeechError::Config(format!("invalid speechPrep mode: {mode_name}"))
     })?;
+    let shorten_floor = DEFAULT_SHORTEN_MIN_OUTPUT_CHARS.min(max_text_length);
     let default_threshold = match mode {
-        SpeechPrepMode::Shorten => 500,
-        SpeechPrepMode::PerformanceTags => 1,
+        SpeechPrepMode::Shorten => shorten_floor,
+        SpeechPrepMode::PerformanceTags => DEFAULT_PERFORMANCE_TAG_THRESHOLD,
     };
-    let threshold = json_usize(val, "threshold")
+    let mut threshold = json_usize(val, "threshold")
         .unwrap_or(default_threshold)
         .min(max_text_length);
+    if mode == SpeechPrepMode::Shorten {
+        threshold = threshold.max(shorten_floor).min(max_text_length);
+    }
     let max_input_length = json_usize(val, "maxInputLength")
         .unwrap_or(12_000)
         .max(threshold);
-    let max_length = json_usize(val, "maxLength")
+    let mut max_length = json_usize(val, "maxLength")
         .unwrap_or(max_text_length)
         .max(80)
         .min(max_text_length);
+    if mode == SpeechPrepMode::Shorten {
+        max_length = max_length.max(shorten_floor).min(max_text_length);
+    }
     let timeout = val
         .get("timeoutMs")
         .and_then(Value::as_u64)
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(20))
         .min(Duration::from_secs(30));
+    let attempt_timeout = val
+        .get("attemptTimeoutMs")
+        .and_then(Value::as_u64)
+        .map(|ms| Duration::from_millis(ms.max(250)))
+        .unwrap_or(Duration::from_secs(10))
+        .min(timeout);
 
     Ok(Some(SpeechPrepConfig {
         provider,
@@ -234,11 +371,24 @@ pub fn resolve_speech_prep_config(
         api_key,
         base_url,
         model,
+        fallback_models,
+        auth_file,
+        reasoning_effort,
+        strategies,
+        tag_palette,
         threshold,
         max_input_length,
         max_length,
+        attempt_timeout,
         timeout,
     }))
+}
+
+fn default_codex_auth_file() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
+        .join("auth.json")
 }
 
 pub fn resolve_elevenlabs_config(

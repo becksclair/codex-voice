@@ -3,6 +3,7 @@ use reqwest::Client;
 
 use crate::config::{GoogleRuntimeConfig, ResolvedPersona};
 use crate::convert::convert_speech;
+use crate::provider_timeout::tts_timeout_for_input;
 use crate::sanitize::sanitize_for_tts;
 
 pub struct GoogleSpeechClient {
@@ -13,20 +14,19 @@ pub struct GoogleSpeechClient {
 impl GoogleSpeechClient {
     pub fn new(config: GoogleRuntimeConfig) -> Result<Self, SpeechError> {
         let client = Client::builder()
-            .timeout(config.timeout)
             .build()
             .map_err(|e| SpeechError::Request(format!("failed to build HTTP client: {}", e)))?;
         Ok(Self { config, client })
     }
 
     pub fn supports_inline_audio_tags(&self, request: &SpeechRequest) -> bool {
-        let model = self.resolve_model(request);
+        let model = self.resolved_model_id(request);
         self.config
             .inline_audio_tags
             .unwrap_or_else(|| google_model_supports_inline_audio_tags(model))
     }
 
-    fn resolve_model<'a>(&'a self, request: &'a SpeechRequest) -> &'a str {
+    pub fn resolved_model_id<'a>(&'a self, request: &'a SpeechRequest) -> &'a str {
         if self.config.model == request.model_hint || request.model_hint.is_empty() {
             &self.config.model
         } else {
@@ -38,6 +38,10 @@ impl GoogleSpeechClient {
         }
     }
 
+    pub fn max_text_length(&self) -> usize {
+        self.config.max_text_length
+    }
+
     pub async fn synthesize(
         &self,
         request: &SpeechRequest,
@@ -46,7 +50,7 @@ impl GoogleSpeechClient {
     ) -> SpeechResult<SynthesizedSpeech> {
         let sanitized = sanitize_for_tts(&request.input, self.config.max_text_length)?;
 
-        let model = self.resolve_model(request);
+        let model = self.resolved_model_id(request);
 
         let voice_name = persona
             .and_then(|p| p.google.as_ref())
@@ -77,12 +81,21 @@ impl GoogleSpeechClient {
             }
         });
 
-        tracing::debug!(base_url = %self.config.base_url, model = %model, "sending Google TTS request");
+        let timeout = tts_timeout_for_input(self.config.timeout, &sanitized);
 
-        let native = tokio::time::timeout(self.config.timeout, async {
+        tracing::debug!(
+            base_url = %self.config.base_url,
+            model = %model,
+            timeout_secs = timeout.as_secs(),
+            text_chars = sanitized.chars().count(),
+            "sending Google TTS request"
+        );
+
+        let native = tokio::time::timeout(timeout, async {
             let response = self
                 .client
                 .post(&url)
+                .timeout(timeout)
                 .header("x-goog-api-key", &self.config.api_key)
                 .header("Content-Type", "application/json")
                 .json(&body)
@@ -168,7 +181,7 @@ impl GoogleSpeechClient {
         .map_err(|_| {
             SpeechError::Request(format!(
                 "Google TTS request timed out after {}s",
-                self.config.timeout.as_secs()
+                timeout.as_secs()
             ))
         })??;
 

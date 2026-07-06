@@ -28,6 +28,78 @@ pub async fn convert_speech(
     }
 }
 
+pub async fn concatenate_wav_chunks(
+    chunks: Vec<SynthesizedSpeech>,
+) -> SpeechResult<SynthesizedSpeech> {
+    tokio::task::spawn_blocking(move || concatenate_wav_chunks_blocking(chunks))
+        .await
+        .map_err(|e| SpeechError::Request(format!("WAV concat task failed: {e}")))?
+}
+
+fn concatenate_wav_chunks_blocking(
+    chunks: Vec<SynthesizedSpeech>,
+) -> SpeechResult<SynthesizedSpeech> {
+    let first = chunks
+        .first()
+        .ok_or_else(|| SpeechError::Request("cannot concatenate zero WAV chunks".into()))?;
+    if first.format != SpeechFormat::Wav {
+        return Err(SpeechError::Request(
+            "cannot concatenate non-WAV speech chunks".into(),
+        ));
+    }
+    let spec = hound::WavReader::new(Cursor::new(first.bytes.clone()))
+        .map_err(|e| SpeechError::Request(format!("failed to read first WAV chunk: {e}")))?
+        .spec();
+
+    if spec.bits_per_sample != 16 || spec.sample_format != hound::SampleFormat::Int {
+        return Err(SpeechError::Request(format!(
+            "cannot concatenate WAV chunks with unsupported sample format: {}-bit {:?}",
+            spec.bits_per_sample, spec.sample_format
+        )));
+    }
+
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut writer = hound::WavWriter::new(&mut cursor, spec).map_err(|e| {
+            SpeechError::Request(format!("failed to create WAV concat writer: {e}"))
+        })?;
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            if chunk.format != SpeechFormat::Wav {
+                return Err(SpeechError::Request(format!(
+                    "cannot concatenate non-WAV speech chunk {index}"
+                )));
+            }
+            let mut reader = hound::WavReader::new(Cursor::new(chunk.bytes)).map_err(|e| {
+                SpeechError::Request(format!("failed to read WAV chunk {index}: {e}"))
+            })?;
+            if reader.spec() != spec {
+                return Err(SpeechError::Request(format!(
+                    "cannot concatenate WAV chunk {index} with mismatched spec"
+                )));
+            }
+            for sample in reader.samples::<i16>() {
+                writer
+                    .write_sample(sample.map_err(|e| {
+                        SpeechError::Request(format!("failed to read WAV chunk {index}: {e}"))
+                    })?)
+                    .map_err(|e| {
+                        SpeechError::Request(format!("failed to write WAV chunk {index}: {e}"))
+                    })?;
+            }
+        }
+        writer
+            .finalize()
+            .map_err(|e| SpeechError::Request(format!("failed to finalize WAV concat: {e}")))?;
+    }
+
+    Ok(SynthesizedSpeech {
+        bytes: Bytes::from(cursor.into_inner()),
+        format: SpeechFormat::Wav,
+        mime_type: SpeechFormat::Wav.mime_type().to_string(),
+        prepared_input: None,
+    })
+}
+
 async fn pcm_to_wav_blocking(speech: SynthesizedSpeech) -> SpeechResult<SynthesizedSpeech> {
     tokio::task::spawn_blocking(move || pcm_to_wav(speech))
         .await
@@ -224,6 +296,29 @@ fn parse_pcm_spec(mime_type: &str) -> PcmSpec {
 mod tests {
     use super::*;
 
+    fn test_wav(samples: &[i16]) -> SynthesizedSpeech {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 24_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
+            for sample in samples {
+                writer.write_sample(*sample).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        SynthesizedSpeech {
+            bytes: Bytes::from(cursor.into_inner()),
+            format: SpeechFormat::Wav,
+            mime_type: "audio/wav".to_string(),
+            prepared_input: None,
+        }
+    }
+
     #[tokio::test]
     async fn wraps_pcm_as_wav() {
         let speech = SynthesizedSpeech {
@@ -239,5 +334,20 @@ mod tests {
         assert_eq!(converted.prepared_input.as_deref(), Some("[softly] hello"));
         assert_eq!(&converted.bytes[..4], b"RIFF");
         assert_eq!(&converted.bytes[8..12], b"WAVE");
+    }
+
+    #[tokio::test]
+    async fn concatenates_wav_chunks() {
+        let combined = concatenate_wav_chunks(vec![test_wav(&[1, 2]), test_wav(&[3, 4])])
+            .await
+            .unwrap();
+        let mut reader = hound::WavReader::new(Cursor::new(combined.bytes)).unwrap();
+        let samples = reader
+            .samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(combined.format, SpeechFormat::Wav);
+        assert_eq!(samples, vec![1, 2, 3, 4]);
     }
 }

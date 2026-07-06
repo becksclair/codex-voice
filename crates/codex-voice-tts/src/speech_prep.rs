@@ -1,85 +1,383 @@
 use codex_voice_core::{SpeechError, SpeechResult};
 use reqwest::Client;
 
-use crate::config::{ResolvedPersona, SpeechPrepConfig, SpeechPrepMode};
+use crate::codex_llm::CodexLlmClient;
+use crate::config::{
+    ProviderKind, ResolvedPersona, SpeechPrepConfig, SpeechPrepMode, SpeechPrepProviderKind,
+    SpeechPrepStrategy,
+};
 use crate::sanitize::sanitize_for_tts;
+
+const PERFORMANCE_TAGS_DEFAULT_MAX_OUTPUT_TOKENS: usize = 384;
+const PERFORMANCE_TAGS_ABSOLUTE_MAX_OUTPUT_TOKENS: usize = 4096;
+const MIN_SHORTEN_OUTPUT_CHARS: usize = 4_000;
+const STYLE_INSTRUCTION_MAX_CHARS: usize = 300;
 
 pub struct SpeechPrepClient {
     config: SpeechPrepConfig,
     client: Client,
+    codex: Option<CodexLlmClient>,
 }
 
+#[derive(Clone, Copy)]
 pub struct SpeechPrepContext<'a> {
-    pub supports_inline_audio_tags: bool,
+    pub target: SpeechPrepTarget<'a>,
     pub persona: Option<&'a ResolvedPersona>,
     pub instructions: Option<&'a str>,
 }
 
+#[derive(Clone, Copy)]
+pub struct SpeechPrepTarget<'a> {
+    pub provider: ProviderKind,
+    pub model_id: &'a str,
+    pub supports_inline_audio_tags: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpeechPrepOutput {
+    Input(String),
+    DeliveryInstruction(String),
+}
+
 impl SpeechPrepClient {
     pub fn new(config: SpeechPrepConfig) -> Result<Self, SpeechError> {
-        let client = Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(|e| {
-                SpeechError::Request(format!("failed to build speech prep client: {e}"))
-            })?;
-        Ok(Self { config, client })
+        let client = Client::builder().build().map_err(|e| {
+            SpeechError::Request(format!("failed to build speech prep client: {e}"))
+        })?;
+        let codex = if config.provider == SpeechPrepProviderKind::Codex {
+            Some(CodexLlmClient::new(
+                config.auth_file.clone().ok_or_else(|| {
+                    SpeechError::Config("Codex speech prep is missing auth file".into())
+                })?,
+                config.base_url.clone(),
+                config.timeout,
+            )?)
+        } else {
+            None
+        };
+        Ok(Self {
+            config,
+            client,
+            codex,
+        })
     }
 
-    pub fn should_prepare(&self, text: &str, supports_inline_audio_tags: bool) -> bool {
+    pub fn strategy_for_target(&self, target: &SpeechPrepTarget<'_>) -> SpeechPrepStrategy {
+        if self.config.mode == SpeechPrepMode::Shorten {
+            return SpeechPrepStrategy::InlineTags;
+        }
+
+        let configured = match target.provider {
+            ProviderKind::Google => self.config.strategies.google,
+            ProviderKind::ElevenLabs => self.config.strategies.elevenlabs,
+        };
+        let strategy = if configured == SpeechPrepStrategy::Off {
+            self.config.strategies.default
+        } else {
+            configured
+        };
+
+        match strategy {
+            SpeechPrepStrategy::InlineTags if target.supports_inline_audio_tags => {
+                SpeechPrepStrategy::InlineTags
+            }
+            SpeechPrepStrategy::InlineTags => SpeechPrepStrategy::Off,
+            SpeechPrepStrategy::StyleInstruction
+                if target.provider == ProviderKind::Google
+                    && google_model_supports_style_instruction(target.model_id) =>
+            {
+                SpeechPrepStrategy::StyleInstruction
+            }
+            SpeechPrepStrategy::StyleInstruction => SpeechPrepStrategy::Off,
+            SpeechPrepStrategy::Off => SpeechPrepStrategy::Off,
+        }
+    }
+
+    pub fn mode(&self) -> SpeechPrepMode {
+        self.config.mode
+    }
+
+    pub fn should_prepare(&self, text: &str, target: &SpeechPrepTarget<'_>) -> bool {
         let chars = text.chars().count();
         match self.config.mode {
             SpeechPrepMode::Shorten => {
-                chars > self.config.threshold && chars > self.config.max_length
+                chars > self.shorten_prepare_floor() && chars > self.config.max_length
             }
             SpeechPrepMode::PerformanceTags => {
-                supports_inline_audio_tags
+                self.strategy_for_target(target) != SpeechPrepStrategy::Off
                     && chars >= self.config.threshold
                     && chars <= self.config.max_input_length
             }
         }
     }
 
-    pub async fn prepare(
+    pub fn should_shorten_to_fit(&self, text: &str, max_length: usize) -> bool {
+        text.chars().count() > max_length
+    }
+
+    pub fn extractive_shorten_to_fit(&self, text: &str, max_length: usize) -> SpeechResult<String> {
+        let input = prepare_input_for_prompt(text, self.config.max_input_length)?;
+        Ok(extractive_shorten_to_fit(&input, max_length))
+    }
+
+    pub fn fallback_performance_tags(
+        &self,
+        text: &str,
+        target: &SpeechPrepTarget<'_>,
+    ) -> SpeechResult<Option<String>> {
+        if self.config.mode != SpeechPrepMode::PerformanceTags
+            || self.strategy_for_target(target) != SpeechPrepStrategy::InlineTags
+            || !target.supports_inline_audio_tags
+            || !collect_bracket_tags(text).is_empty()
+        {
+            return Ok(None);
+        }
+
+        let Some(tag) = fallback_performance_tag(text, &self.config.tag_palette) else {
+            return Ok(None);
+        };
+        let tagged = format!("[{tag}] {}", text.trim_start());
+        let sanitized = sanitize_for_tts(&tagged, usize::MAX)?;
+        if sanitized.chars().count() > self.config.max_length {
+            return Ok(None);
+        }
+        validate_performance_tags_output(text, &sanitized)?;
+        Ok(Some(sanitized))
+    }
+
+    pub async fn prepare_to_fit(
         &self,
         text: &str,
         context: SpeechPrepContext<'_>,
+        max_length: usize,
     ) -> SpeechResult<Option<String>> {
-        if !self.should_prepare(text, context.supports_inline_audio_tags) {
+        if !self.should_shorten_to_fit(text, max_length) {
             return Ok(None);
         }
 
         let input = prepare_input_for_prompt(text, self.config.max_input_length)?;
-        let prompt = build_prompt(&input, self.config.max_length, self.config.mode, &context);
-        let model = normalize_google_model_name(&self.config.model);
-        let url = format!("{}/models/{}:generateContent", self.config.base_url, model);
-        let max_output_tokens = match self.config.mode {
-            SpeechPrepMode::Shorten => (self.config.max_length / 3).clamp(64, 512),
-            SpeechPrepMode::PerformanceTags => (self.config.max_length / 2).clamp(128, 2048),
-        };
-        let body = serde_json::json!({
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{ "text": prompt }]
+        let prompt = build_prompt(
+            &input,
+            max_length,
+            SpeechPrepMode::Shorten,
+            SpeechPrepStrategy::InlineTags,
+            &self.config.tag_palette,
+            &context,
+        );
+        let max_output_tokens = (max_length / 3).clamp(64, 4096);
+        let body = match self.config.provider {
+            SpeechPrepProviderKind::Google => Some(serde_json::json!({
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{ "text": prompt }]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": max_output_tokens
                 }
-            ],
-            "generationConfig": {
-                "temperature": match self.config.mode {
-                    SpeechPrepMode::Shorten => 0.2,
-                    SpeechPrepMode::PerformanceTags => 0.45,
-                },
-                "maxOutputTokens": max_output_tokens
-            }
-        });
+            })),
+            SpeechPrepProviderKind::Codex => None,
+        };
 
-        let prepared = tokio::time::timeout(self.config.timeout, async {
+        let prepared = self.prepare_with_fallbacks(&prompt, body.as_ref()).await?;
+        let sanitized = sanitize_for_tts(&prepared, usize::MAX)?;
+        let shortened = shorten_or_extract(&input, &sanitized, max_length);
+        Ok(Some(shortened))
+    }
+
+    pub async fn prepare(
+        &self,
+        text: &str,
+        context: SpeechPrepContext<'_>,
+    ) -> SpeechResult<Option<SpeechPrepOutput>> {
+        if !self.should_prepare(text, &context.target) {
+            return Ok(None);
+        }
+
+        let strategy = self.strategy_for_target(&context.target);
+        let input = prepare_input_for_prompt(text, self.config.max_input_length)?;
+        let prompt = build_prompt(
+            &input,
+            self.config.max_length,
+            self.config.mode,
+            strategy,
+            &self.config.tag_palette,
+            &context,
+        );
+        let max_output_tokens = match (self.config.mode, strategy) {
+            (SpeechPrepMode::Shorten, _) => (self.config.max_length / 3).clamp(64, 4096),
+            (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::InlineTags) => {
+                performance_tags_max_output_tokens(input.chars().count(), self.config.max_length)
+            }
+            (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::StyleInstruction) => 128,
+            (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::Off) => return Ok(None),
+        };
+        let mut generation_config = serde_json::json!({
+            "temperature": match self.config.mode {
+                SpeechPrepMode::Shorten => 0.2,
+                SpeechPrepMode::PerformanceTags => 0.45,
+            },
+            "maxOutputTokens": max_output_tokens
+        });
+        if self.config.mode == SpeechPrepMode::PerformanceTags {
+            generation_config["thinkingConfig"] = serde_json::json!({
+                "thinkingLevel": "MINIMAL"
+            });
+        }
+        let body = match self.config.provider {
+            SpeechPrepProviderKind::Google => Some(serde_json::json!({
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{ "text": prompt }]
+                    }
+                ],
+                "generationConfig": generation_config
+            })),
+            SpeechPrepProviderKind::Codex => None,
+        };
+
+        let prepared = self.prepare_with_fallbacks(&prompt, body.as_ref()).await?;
+        let sanitized = sanitize_for_tts(&prepared, usize::MAX)?;
+        let sanitized = match (self.config.mode, strategy) {
+            (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::InlineTags) => {
+                repair_bare_leading_performance_cue(&input, &sanitized, &self.config.tag_palette)
+            }
+            _ => sanitized,
+        };
+        let output = match (self.config.mode, strategy) {
+            (SpeechPrepMode::Shorten, _) => {
+                let shortened = shorten_or_extract(&input, &sanitized, self.config.max_length);
+                SpeechPrepOutput::Input(shortened)
+            }
+            (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::InlineTags) => {
+                if sanitized.chars().count() > self.config.max_length {
+                    return Err(SpeechError::Request(format!(
+                        "speech prep enrichment returned {} characters, above max {}",
+                        sanitized.chars().count(),
+                        self.config.max_length
+                    )));
+                }
+                validate_performance_tags_output(&input, &sanitized)?;
+                SpeechPrepOutput::Input(sanitized)
+            }
+            (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::StyleInstruction) => {
+                validate_style_instruction_output(&input, &sanitized)?;
+                SpeechPrepOutput::DeliveryInstruction(sanitized)
+            }
+            (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::Off) => return Ok(None),
+        };
+
+        let empty = match &output {
+            SpeechPrepOutput::Input(value) | SpeechPrepOutput::DeliveryInstruction(value) => {
+                value.trim().is_empty()
+            }
+        };
+        if empty {
+            return Err(SpeechError::Request(
+                "speech prep returned empty text".into(),
+            ));
+        }
+
+        Ok(Some(output))
+    }
+
+    fn shorten_prepare_floor(&self) -> usize {
+        self.config
+            .threshold
+            .max(MIN_SHORTEN_OUTPUT_CHARS.min(self.config.max_length))
+    }
+
+    async fn prepare_with_fallbacks(
+        &self,
+        prompt: &str,
+        body: Option<&serde_json::Value>,
+    ) -> SpeechResult<String> {
+        let started = std::time::Instant::now();
+        let models = speech_prep_models(
+            self.config.provider,
+            &self.config.model,
+            &self.config.fallback_models,
+        );
+        let mut last_retryable_error = None;
+        for model in models {
+            let elapsed = started.elapsed();
+            if elapsed >= self.config.timeout {
+                break;
+            }
+            let remaining = self.config.timeout - elapsed;
+            let attempt_timeout = self.config.attempt_timeout.min(remaining);
+            match self
+                .prepare_once(&model, prompt, body, attempt_timeout)
+                .await
+            {
+                Ok(prepared) => return Ok(prepared),
+                Err(error) if speech_prep_error_is_retryable(&error) => {
+                    last_retryable_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_retryable_error.unwrap_or_else(|| {
+            SpeechError::Request(format!(
+                "speech prep request timed out after {}s",
+                self.config.timeout.as_secs()
+            ))
+        }))
+    }
+
+    async fn prepare_once(
+        &self,
+        model: &str,
+        prompt: &str,
+        body: Option<&serde_json::Value>,
+        timeout: std::time::Duration,
+    ) -> SpeechResult<String> {
+        match self.config.provider {
+            SpeechPrepProviderKind::Google => {
+                let body = body.ok_or_else(|| {
+                    SpeechError::Config("Google speech prep is missing request body".into())
+                })?;
+                self.prepare_google_once(model, body, timeout).await
+            }
+            SpeechPrepProviderKind::Codex => {
+                let codex = self.codex.as_ref().ok_or_else(|| {
+                    SpeechError::Config("Codex speech prep client is not configured".into())
+                })?;
+                codex
+                    .generate_text(
+                        model,
+                        self.config.reasoning_effort.as_deref(),
+                        prompt,
+                        timeout,
+                    )
+                    .await
+            }
+        }
+    }
+
+    async fn prepare_google_once(
+        &self,
+        model: &str,
+        body: &serde_json::Value,
+        timeout: std::time::Duration,
+    ) -> SpeechResult<String> {
+        let model = normalize_google_model_name(model);
+        let url = format!("{}/models/{}:generateContent", self.config.base_url, model);
+        let api_key =
+            self.config.api_key.as_deref().ok_or_else(|| {
+                SpeechError::Config("Google speech prep is missing API key".into())
+            })?;
+        tokio::time::timeout(timeout, async {
             let response = self
                 .client
                 .post(&url)
-                .header("x-goog-api-key", &self.config.api_key)
+                .timeout(timeout)
+                .header("x-goog-api-key", api_key)
                 .header("Content-Type", "application/json")
-                .json(&body)
+                .json(body)
                 .send()
                 .await
                 .map_err(|e| SpeechError::Request(format!("speech prep request failed: {e}")))?;
@@ -104,31 +402,57 @@ impl SpeechPrepClient {
         .map_err(|_| {
             SpeechError::Request(format!(
                 "speech prep request timed out after {}s",
-                self.config.timeout.as_secs()
+                timeout.as_secs()
             ))
-        })??;
-        let sanitized = sanitize_for_tts(&prepared, usize::MAX)?;
-        let prepared = match self.config.mode {
-            SpeechPrepMode::Shorten => truncate_chars(&sanitized, self.config.max_length),
-            SpeechPrepMode::PerformanceTags => {
-                if sanitized.chars().count() > self.config.max_length {
-                    return Err(SpeechError::Request(format!(
-                        "speech prep enrichment returned {} characters, above max {}",
-                        sanitized.chars().count(),
-                        self.config.max_length
-                    )));
-                }
-                sanitized
-            }
-        };
+        })?
+    }
+}
 
-        if prepared.is_empty() {
-            return Err(SpeechError::Request(
-                "speech prep returned empty text".into(),
-            ));
+fn google_model_supports_style_instruction(model_id: &str) -> bool {
+    let normalized = model_id
+        .strip_prefix("google/")
+        .unwrap_or(model_id)
+        .to_ascii_lowercase();
+    normalized.contains("gemini") && normalized.contains("tts")
+}
+
+fn speech_prep_error_is_retryable(error: &SpeechError) -> bool {
+    match error {
+        SpeechError::Service { status, .. } => *status == 429 || *status >= 500,
+        SpeechError::Request(message) => {
+            message.contains("timed out") || message.contains("request failed")
         }
+        SpeechError::RateLimited(_) | SpeechError::Unavailable(_) => true,
+        SpeechError::Message(_)
+        | SpeechError::Config(_)
+        | SpeechError::Auth(_)
+        | SpeechError::Unsupported(_) => false,
+    }
+}
 
-        Ok(Some(prepared))
+fn speech_prep_models(
+    provider: SpeechPrepProviderKind,
+    primary: &str,
+    fallbacks: &[String],
+) -> Vec<String> {
+    let mut models: Vec<String> = Vec::with_capacity(fallbacks.len() + 1);
+    for model in std::iter::once(primary).chain(fallbacks.iter().map(String::as_str)) {
+        let normalized = normalize_speech_prep_model_name(provider, model);
+        if models
+            .iter()
+            .any(|existing| normalize_speech_prep_model_name(provider, existing) == normalized)
+        {
+            continue;
+        }
+        models.push(model.to_string());
+    }
+    models
+}
+
+fn normalize_speech_prep_model_name(provider: SpeechPrepProviderKind, model: &str) -> &str {
+    match provider {
+        SpeechPrepProviderKind::Google => normalize_google_model_name(model),
+        SpeechPrepProviderKind::Codex => model.strip_prefix("codex/").unwrap_or(model),
     }
 }
 
@@ -136,27 +460,73 @@ fn build_prompt(
     text: &str,
     max_length: usize,
     mode: SpeechPrepMode,
+    strategy: SpeechPrepStrategy,
+    tag_palette: &[String],
     context: &SpeechPrepContext<'_>,
 ) -> String {
     match mode {
         SpeechPrepMode::Shorten => format!(
-            "Prepare this text for text-to-speech playback. Preserve the user's meaning, key facts, decisions, and the full requested message. Shorten only when necessary to stay under {max_length} characters. Remove repetition, code blocks, URLs, file paths, and formatting noise. Return only natural speakable prose, no markdown, no preamble, no labels.\n\nText:\n\"\"\"{text}\"\"\""
+            "Prepare this text for text-to-speech playback. Preserve the user's meaning, key facts, decisions, and the full requested message. Shorten only when necessary to stay under {max_length} characters. Keep the prepared text at least {min_length} characters unless the source text itself is shorter. Do not collapse prose into a short abstract. Remove repetition, code blocks, URLs, file paths, and formatting noise. Return only natural speakable prose, no markdown, no preamble, no labels.\n\nText:\n\"\"\"{text}\"\"\"",
+            min_length = shorten_min_output_chars(text.chars().count(), max_length)
         ),
-        SpeechPrepMode::PerformanceTags => build_performance_tags_prompt(text, max_length, context),
+        SpeechPrepMode::PerformanceTags => match strategy {
+            SpeechPrepStrategy::InlineTags => {
+                build_performance_tags_prompt(text, max_length, tag_palette, context)
+            }
+            SpeechPrepStrategy::StyleInstruction => {
+                build_style_instruction_prompt(text, STYLE_INSTRUCTION_MAX_CHARS, context)
+            }
+            SpeechPrepStrategy::Off => String::new(),
+        },
     }
 }
 
 fn build_performance_tags_prompt(
     text: &str,
     max_length: usize,
+    tag_palette: &[String],
     context: &SpeechPrepContext<'_>,
 ) -> String {
     let mut prompt = String::with_capacity(text.len() + 1600);
-    prompt.push_str("You are a TTS performance tagger. Do not rewrite the text. Do not summarize. Insert concise emotion/performance tags only where they improve delivery. Use tags sparingly. Keep tags local to the phrase or paragraph they affect. Prefer natural performance: warm, amused, teasing, soft, relieved, sleepy, serious, whispering, laughing, affectionate. Never add tags that contradict the text. Return only the tagged text.\n");
-    prompt.push_str("Use inline bracketed audio tags such as [tender], [softly], [amused], [laughs], [whispers], [sigh], [exhales], [light chuckle], [sigh of relief], or another clear performable cue. Keep the result under ");
+    prompt.push_str("You are a TTS performance tagger. Do not rewrite the text. Do not summarize. Insert concise emotion/performance tags only where they improve delivery. Use tags sparingly. Keep tags local to the phrase or paragraph they affect. Prefer natural performance: warm, amused, teasing, soft, relieved, sleepy, serious, whispering, laughing, affectionate. Never add tags that contradict the text. Return only the tagged text. Every performance cue you add must be enclosed in square brackets, like [softly] or [sigh of relief]. If no cue improves delivery, return the original text unchanged.\n");
+    prompt.push_str("Use inline bracketed audio tags from this palette when they fit: ");
+    for (index, tag) in tag_palette.iter().enumerate() {
+        if index > 0 {
+            prompt.push_str(", ");
+        }
+        prompt.push('[');
+        prompt.push_str(tag);
+        prompt.push(']');
+    }
+    prompt.push_str(". Closely related performable cues are allowed when the palette does not fit, but they must also be square-bracketed. Keep the result under ");
     prompt.push_str(&max_length.to_string());
     prompt.push_str(" characters.\n\n");
 
+    push_delivery_context(&mut prompt, context);
+
+    prompt.push_str("Text:\n\"\"\"");
+    prompt.push_str(text);
+    prompt.push_str("\"\"\"");
+    prompt
+}
+
+fn build_style_instruction_prompt(
+    text: &str,
+    max_instruction_length: usize,
+    context: &SpeechPrepContext<'_>,
+) -> String {
+    let mut prompt = String::with_capacity(text.len() + 1400);
+    prompt.push_str("You are a TTS delivery director for Google Gemini speech synthesis. Do not rewrite, summarize, quote, or repeat the text. Return only a 1-3 sentence natural-language delivery instruction for how the voice should perform this exact message: emotional state, pacing, intimacy, tension, hesitation, warmth, and release. Keep it concrete and speakable as direction, not content. Never include bracket tags. Keep the instruction under ");
+    prompt.push_str(&max_instruction_length.to_string());
+    prompt.push_str(" characters.\n\n");
+    push_delivery_context(&mut prompt, context);
+    prompt.push_str("Text to direct, not rewrite:\n\"\"\"");
+    prompt.push_str(text);
+    prompt.push_str("\"\"\"");
+    prompt
+}
+
+fn push_delivery_context(prompt: &mut String, context: &SpeechPrepContext<'_>) {
     if let Some(persona) = context.persona {
         prompt.push_str("Delivery context:\n");
         prompt.push_str("- persona: ");
@@ -192,16 +562,611 @@ fn build_performance_tags_prompt(
         prompt.push_str(instructions);
         prompt.push_str("\n\n");
     }
-
-    prompt.push_str("Text:\n\"\"\"");
-    prompt.push_str(text);
-    prompt.push_str("\"\"\"");
-    prompt
 }
 
 fn prepare_input_for_prompt(text: &str, max_input_length: usize) -> SpeechResult<String> {
     let sanitized = sanitize_for_tts(text, usize::MAX)?;
     Ok(truncate_chars(&sanitized, max_input_length))
+}
+
+fn performance_tags_max_output_tokens(input_chars: usize, max_length: usize) -> usize {
+    let default_cap = (max_length / 2).clamp(128, PERFORMANCE_TAGS_DEFAULT_MAX_OUTPUT_TOKENS);
+    let preserve_cap = (input_chars / 3).clamp(128, PERFORMANCE_TAGS_ABSOLUTE_MAX_OUTPUT_TOKENS);
+    default_cap.max(preserve_cap)
+}
+
+fn shorten_min_output_chars(input_chars: usize, max_length: usize) -> usize {
+    input_chars.min(max_length).min(MIN_SHORTEN_OUTPUT_CHARS)
+}
+
+fn validate_shorten_output(
+    input_chars: usize,
+    prepared: &str,
+    max_length: usize,
+) -> SpeechResult<()> {
+    let min_chars = shorten_min_output_chars(input_chars, max_length);
+    let prepared_chars = prepared.chars().count();
+    if prepared_chars < min_chars {
+        return Err(SpeechError::Request(format!(
+            "speech prep shortened text below minimum: {prepared_chars} below {min_chars}"
+        )));
+    }
+    Ok(())
+}
+
+fn shorten_or_extract(input: &str, prepared: &str, max_length: usize) -> String {
+    let shortened = truncate_chars(prepared, max_length);
+    if validate_shorten_output(input.chars().count(), &shortened, max_length).is_ok() {
+        return shortened;
+    }
+    extractive_shorten_to_fit(input, max_length)
+}
+
+fn extractive_shorten_to_fit(input: &str, max_length: usize) -> String {
+    truncate_chars(input, max_length)
+}
+
+fn fallback_performance_tag<'a>(text: &str, tag_palette: &'a [String]) -> Option<&'a str> {
+    let lower = text.to_ascii_lowercase();
+    let candidates = [
+        (
+            "whispers",
+            ["whisper", "hushed", "under her breath", "under his breath"].as_slice(),
+        ),
+        (
+            "sigh of relief",
+            ["relief", "relieved", "finally breathe", "safe at last"].as_slice(),
+        ),
+        ("laughs", ["laugh", "laughed", "laughing"].as_slice()),
+        (
+            "light chuckle",
+            ["smile", "smiled", "grin", "amused"].as_slice(),
+        ),
+        (
+            "fearful",
+            ["fear", "afraid", "terrified", "dread", "panic"].as_slice(),
+        ),
+        (
+            "nervous",
+            ["tremor", "trembling", "anxious", "nervous"].as_slice(),
+        ),
+        ("angry", ["angry", "furious", "rage", "outraged"].as_slice()),
+        (
+            "sorrowful",
+            ["sorrow", "grief", "tears", "wept", "crying", "mourning"].as_slice(),
+        ),
+        (
+            "wistful",
+            ["remembered", "memory", "longed", "missed", "nostalgia"].as_slice(),
+        ),
+        (
+            "frustrated",
+            ["frustrated", "irritated", "annoyed", "stuck"].as_slice(),
+        ),
+        (
+            "reassuring",
+            ["safe", "steady", "promise", "trust", "breathe"].as_slice(),
+        ),
+        (
+            "tender",
+            [
+                "tender",
+                "gentle",
+                "soft",
+                "carefully",
+                "held",
+                "kiss",
+                "kisses",
+                "kissing",
+                "lips",
+                "leans over",
+            ]
+            .as_slice(),
+        ),
+        (
+            "urgent",
+            ["hurry", "urgent", "quickly", "now", "immediately"].as_slice(),
+        ),
+        (
+            "breathless",
+            ["breathless", "gasped", "panting", "ran"].as_slice(),
+        ),
+        (
+            "proud",
+            ["proud", "triumph", "victory", "accomplished"].as_slice(),
+        ),
+        (
+            "excited",
+            ["excited", "thrilled", "delighted", "eager"].as_slice(),
+        ),
+    ];
+
+    candidates
+        .iter()
+        .find(|(tag, needles)| {
+            tag_palette.iter().any(|palette_tag| palette_tag == tag)
+                && needles.iter().any(|needle| lower.contains(needle))
+        })
+        .map(|(tag, _)| *tag)
+}
+
+fn validate_performance_tags_output(original: &str, prepared: &str) -> SpeechResult<()> {
+    let tags = collect_bracket_tags(prepared);
+    if tags.is_empty() && original.trim() != prepared.trim() {
+        return Err(SpeechError::Request(
+            "speech prep added performance direction without square-bracket tags".into(),
+        ));
+    }
+    let word_count = words_without_tags(original).len().max(1);
+    let max_tags = word_count.div_ceil(40).clamp(2, 16);
+    if tags.len() > max_tags {
+        return Err(SpeechError::Request(format!(
+            "speech prep returned too many performance tags: {} above max {}",
+            tags.len(),
+            max_tags
+        )));
+    }
+
+    let preserve = preservation_ratio(original, prepared);
+    let original_words = words_without_tags(original);
+    let prepared_words = words_without_tags(prepared);
+    let tail_preserved = original_words
+        .last()
+        .is_none_or(|tail| prepared_words.iter().any(|word| word == tail));
+    if preserve < 0.97 || !tail_preserved {
+        return Err(SpeechError::Request(format!(
+            "speech prep changed text too much: preservation ratio {:.3}",
+            preserve
+        )));
+    }
+    Ok(())
+}
+
+fn repair_bare_leading_performance_cue(
+    original: &str,
+    prepared: &str,
+    tag_palette: &[String],
+) -> String {
+    if original.trim() == prepared.trim() {
+        return prepared.to_string();
+    }
+
+    let prepared = repair_leading_bare_cue(original, prepared, tag_palette);
+    repair_sentence_boundary_bare_cues(original, &prepared, tag_palette)
+}
+
+fn repair_leading_bare_cue(original: &str, prepared: &str, tag_palette: &[String]) -> String {
+    let trimmed = prepared.trim_start();
+    let leading_ws_len = prepared.len().saturating_sub(trimmed.len());
+    let Some(source_start) = preserved_text_start(original, trimmed) else {
+        return prepared.to_string();
+    };
+    if source_start == 0 {
+        return prepared.to_string();
+    }
+
+    let cue = trimmed[..source_start].trim_matches(is_bare_cue_delimiter);
+    if cue.is_empty() || !looks_like_bare_performance_cue(cue, tag_palette) {
+        return prepared.to_string();
+    }
+
+    let rest = trimmed[source_start..].trim_start();
+    if rest.is_empty() {
+        return prepared.to_string();
+    }
+
+    let repaired = format!("{}[{cue}] {rest}", &prepared[..leading_ws_len]);
+    if preservation_ratio(original, &repaired) >= 0.97 {
+        repaired
+    } else {
+        prepared.to_string()
+    }
+}
+
+fn repair_sentence_boundary_bare_cues(
+    original: &str,
+    prepared: &str,
+    tag_palette: &[String],
+) -> String {
+    let phrases = bare_performance_cue_phrases(tag_palette);
+    if phrases.is_empty() {
+        return prepared.to_string();
+    }
+
+    let original_lower = original.to_ascii_lowercase();
+    let mut repaired = prepared.to_string();
+    for _ in 0..8 {
+        let Some((start, phrase_len, after_len, phrase)) =
+            find_sentence_boundary_bare_cue(&repaired, &phrases, &original_lower)
+        else {
+            break;
+        };
+        let candidate = format!(
+            "{}[{}] {}",
+            &repaired[..start],
+            phrase,
+            repaired[start + phrase_len + after_len..].trim_start()
+        );
+        if preservation_ratio(original, &candidate) >= 0.97 {
+            repaired = candidate;
+        } else {
+            break;
+        }
+    }
+
+    repaired
+}
+
+fn preserved_text_start(original: &str, prepared: &str) -> Option<usize> {
+    let original_words = words_without_tags(original);
+    let first_words = original_words.iter().take(3).collect::<Vec<_>>();
+    if first_words.is_empty() {
+        return None;
+    }
+
+    let prepared_words = word_spans_without_tags(prepared);
+    prepared_words
+        .iter()
+        .enumerate()
+        .find(|(index, _)| {
+            first_words.iter().enumerate().all(|(offset, expected)| {
+                prepared_words
+                    .get(index + offset)
+                    .is_some_and(|(candidate, _, _)| candidate == *expected)
+            })
+        })
+        .map(|(_, (_, start, _))| *start)
+}
+
+fn find_sentence_boundary_bare_cue(
+    text: &str,
+    phrases: &[String],
+    original_lower: &str,
+) -> Option<(usize, usize, usize, String)> {
+    for (start, _) in text.char_indices() {
+        if !is_sentence_boundary(text, start) || is_inside_bracket_tag(text, start) {
+            continue;
+        }
+        let rest = &text[start..];
+        for phrase in phrases {
+            if original_lower.contains(phrase) {
+                continue;
+            }
+            let Some(after) = strip_ascii_prefix_ignore_case(rest, phrase) else {
+                continue;
+            };
+            let after_len = cue_trailing_delimiter_len(after)?;
+            return Some((start, phrase.len(), after_len, phrase.clone()));
+        }
+    }
+    None
+}
+
+fn is_sentence_boundary(text: &str, index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    let prefix = &text[..index];
+    let mut chars = prefix.chars().rev();
+    let mut skipped_newline = false;
+    while matches!(chars.clone().next(), Some(ch) if ch.is_whitespace()) {
+        skipped_newline |= chars.next() == Some('\n');
+    }
+    if skipped_newline {
+        return true;
+    }
+    matches!(chars.next(), Some('.') | Some('!') | Some('?') | Some('\n'))
+}
+
+fn is_inside_bracket_tag(text: &str, index: usize) -> bool {
+    let prefix = &text[..index];
+    prefix
+        .rfind('[')
+        .is_some_and(|open| prefix[open..].find(']').is_none())
+}
+
+fn cue_trailing_delimiter_len(value: &str) -> Option<usize> {
+    let mut len = 0;
+    let mut saw_separator = false;
+    for (index, ch) in value.char_indices() {
+        if ch == ':' || ch == ',' || ch == '-' || ch == '.' || ch == '!' || ch == '?' {
+            len = index + ch.len_utf8();
+            saw_separator = true;
+            continue;
+        }
+        if ch.is_whitespace() {
+            len = index + ch.len_utf8();
+            saw_separator = true;
+            continue;
+        }
+        break;
+    }
+    saw_separator.then_some(len)
+}
+
+fn looks_like_bare_performance_cue(cue: &str, tag_palette: &[String]) -> bool {
+    let lower = cue.to_ascii_lowercase();
+    let words = words_without_tags(cue);
+    if words.is_empty() || words.len() > 5 {
+        return false;
+    }
+    if tag_palette
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case(lower.as_str()))
+    {
+        return true;
+    }
+
+    const CUE_WORDS: &[&str] = &[
+        "affectionate",
+        "amused",
+        "angry",
+        "breathless",
+        "calm",
+        "chuckle",
+        "chuckles",
+        "deadpan",
+        "dryly",
+        "exhale",
+        "exhales",
+        "fearful",
+        "flatly",
+        "frustrated",
+        "gasp",
+        "gasps",
+        "hesitates",
+        "laugh",
+        "laughing",
+        "laughs",
+        "leans",
+        "lowers",
+        "kiss",
+        "kisses",
+        "kissing",
+        "lips",
+        "moan",
+        "moans",
+        "nervous",
+        "pause",
+        "proud",
+        "relieved",
+        "reassuring",
+        "scoffs",
+        "serious",
+        "shaky",
+        "sigh",
+        "sighs",
+        "sleepy",
+        "smile",
+        "smiles",
+        "smiling",
+        "softly",
+        "sorrowful",
+        "swallows",
+        "tender",
+        "teasing",
+        "urgent",
+        "vulnerable",
+        "warmly",
+        "whisper",
+        "whispers",
+        "wistful",
+    ];
+    words
+        .iter()
+        .any(|word| CUE_WORDS.iter().any(|cue_word| word == cue_word))
+}
+
+fn bare_performance_cue_phrases(tag_palette: &[String]) -> Vec<String> {
+    let mut phrases = vec![
+        "smiles softly",
+        "smiles and lowers my voice",
+        "smiles and lowers her voice",
+        "smiles and lowers his voice",
+        "smiles and lowers their voice",
+        "lowers my voice",
+        "lowers her voice",
+        "lowers his voice",
+        "lowers their voice",
+        "leans over and kisses your lips softly",
+        "leans over and kisses her lips softly",
+        "leans over and kisses his lips softly",
+        "leans over and kisses their lips softly",
+        "leans over and kisses you softly",
+        "leans over and kisses her softly",
+        "leans over and kisses him softly",
+        "leans over and kisses them softly",
+        "laughs softly",
+        "chuckles softly",
+        "sighs softly",
+        "whispers softly",
+        "smiles",
+        "smiling",
+        "laughs",
+        "laughing",
+        "chuckles",
+        "sighs",
+        "sigh",
+        "whispers",
+        "gasps",
+        "exhales",
+        "moans",
+        "hesitates",
+        "swallows",
+        "voice breaks",
+        "leans closer",
+        "under breath",
+        "softly",
+        "warmly",
+        "dryly",
+        "flatly",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    phrases.extend(
+        tag_palette
+            .iter()
+            .filter(|tag| looks_like_bare_performance_cue(tag, tag_palette))
+            .map(|tag| tag.to_ascii_lowercase()),
+    );
+    phrases.sort_by_key(|phrase| std::cmp::Reverse(phrase.len()));
+    phrases.dedup();
+    phrases
+}
+
+fn is_bare_cue_delimiter(ch: char) -> bool {
+    ch == ':' || ch == ',' || ch == '-' || ch == '.' || ch == '!' || ch == '?' || ch.is_whitespace()
+}
+
+fn strip_ascii_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let prefix_len = prefix.len();
+    if value.len() < prefix_len {
+        return None;
+    }
+    let candidate = &value[..prefix_len];
+    if candidate.eq_ignore_ascii_case(prefix) {
+        Some(&value[prefix_len..])
+    } else {
+        None
+    }
+}
+
+fn validate_style_instruction_output(original: &str, instruction: &str) -> SpeechResult<()> {
+    let trimmed = instruction.trim();
+    if trimmed.chars().count() > STYLE_INSTRUCTION_MAX_CHARS {
+        return Err(SpeechError::Request(format!(
+            "speech prep delivery instruction returned {} characters, above max {}",
+            trimmed.chars().count(),
+            STYLE_INSTRUCTION_MAX_CHARS
+        )));
+    }
+    if trimmed.contains('[') || trimmed.contains(']') {
+        return Err(SpeechError::Request(
+            "speech prep delivery instruction contained bracket tags".into(),
+        ));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("delivery instruction:")
+        || lower.starts_with("instruction:")
+        || lower.starts_with("here")
+        || lower.contains("```")
+    {
+        return Err(SpeechError::Request(
+            "speech prep delivery instruction included formatting or preamble".into(),
+        ));
+    }
+    let original_words = words_without_tags(original);
+    let instruction_words = words_without_tags(trimmed);
+    if original_words.len() >= 8 && preservation_ratio(original, trimmed) > 0.45 {
+        return Err(SpeechError::Request(
+            "speech prep delivery instruction repeated too much source text".into(),
+        ));
+    }
+    if instruction_words.len() < 3 {
+        return Err(SpeechError::Request(
+            "speech prep delivery instruction was too short".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn collect_bracket_tags(text: &str) -> Vec<&str> {
+    let mut tags = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('[') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find(']') else {
+            break;
+        };
+        let tag = &rest[..end];
+        if !tag.is_empty() && tag.len() <= 80 && !tag.contains('\n') {
+            tags.push(tag);
+        }
+        rest = &rest[end + 1..];
+    }
+    tags
+}
+
+fn words_without_tags(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut in_tag = false;
+    let mut current = String::new();
+    for ch in text.chars() {
+        match ch {
+            '[' if current.is_empty() => {
+                in_tag = true;
+            }
+            ']' if in_tag => {
+                in_tag = false;
+            }
+            _ if in_tag => {}
+            _ if ch.is_ascii_alphanumeric() || ch == '\'' => {
+                current.push(ch.to_ascii_lowercase());
+            }
+            _ if !current.is_empty() => {
+                words.push(std::mem::take(&mut current));
+            }
+            _ => {}
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn word_spans_without_tags(text: &str) -> Vec<(String, usize, usize)> {
+    let mut words = Vec::new();
+    let mut in_tag = false;
+    let mut current = String::new();
+    let mut start = 0;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '[' if current.is_empty() => {
+                in_tag = true;
+            }
+            ']' if in_tag => {
+                in_tag = false;
+            }
+            _ if in_tag => {}
+            _ if ch.is_ascii_alphanumeric() || ch == '\'' => {
+                if current.is_empty() {
+                    start = index;
+                }
+                current.push(ch.to_ascii_lowercase());
+            }
+            _ if !current.is_empty() => {
+                words.push((std::mem::take(&mut current), start, index));
+            }
+            _ => {}
+        }
+    }
+    if !current.is_empty() {
+        words.push((current, start, text.len()));
+    }
+    words
+}
+
+fn preservation_ratio(original: &str, prepared: &str) -> f64 {
+    let original_words = words_without_tags(original);
+    if original_words.is_empty() {
+        return 1.0;
+    }
+    let prepared_words = words_without_tags(prepared);
+    let mut found = 0_usize;
+    let mut cursor = 0_usize;
+    for word in &original_words {
+        while cursor < prepared_words.len() && prepared_words[cursor] != *word {
+            cursor += 1;
+        }
+        if cursor >= prepared_words.len() {
+            continue;
+        }
+        found += 1;
+        cursor += 1;
+    }
+    found as f64 / original_words.len() as f64
 }
 
 fn extract_text(json: &serde_json::Value) -> Option<String> {
@@ -240,15 +1205,37 @@ fn truncate_chars(text: &str, max_length: usize) -> String {
 mod tests {
     use super::*;
 
+    fn default_test_palette() -> Vec<String> {
+        vec![
+            "tender".to_string(),
+            "softly".to_string(),
+            "amused".to_string(),
+            "nervous".to_string(),
+            "sigh of relief".to_string(),
+        ]
+    }
+
+    fn test_target(
+        provider: crate::config::ProviderKind,
+        model_id: &'static str,
+        supports_inline_audio_tags: bool,
+    ) -> SpeechPrepTarget<'static> {
+        SpeechPrepTarget {
+            provider,
+            model_id,
+            supports_inline_audio_tags,
+        }
+    }
+
     #[test]
     fn strips_provider_prefix_from_google_model() {
         assert_eq!(
-            normalize_google_model_name("google/gemini-3-flash-preview"),
-            "gemini-3-flash-preview"
+            normalize_google_model_name("google/gemini-3.5-flash"),
+            "gemini-3.5-flash"
         );
         assert_eq!(
-            normalize_google_model_name("gemini-3-flash-preview"),
-            "gemini-3-flash-preview"
+            normalize_google_model_name("gemini-3.5-flash"),
+            "gemini-3.5-flash"
         );
     }
 
@@ -273,37 +1260,132 @@ mod tests {
     #[test]
     fn speech_prep_config_keeps_input_cap_at_or_above_threshold() {
         let config = SpeechPrepConfig {
-            provider: crate::config::ProviderKind::Google,
+            provider: crate::config::SpeechPrepProviderKind::Google,
             mode: SpeechPrepMode::Shorten,
-            api_key: "key".to_string(),
+            api_key: Some("key".to_string()),
             base_url: "https://example.test".to_string(),
-            model: "gemini-3-flash-preview".to_string(),
+            model: "gemini-3.5-flash".to_string(),
+            fallback_models: Vec::new(),
+            auth_file: None,
+            reasoning_effort: None,
+            strategies: crate::config::SpeechPrepStrategies::default(),
+            tag_palette: default_test_palette(),
             threshold: 700,
             max_input_length: 700,
             max_length: 420,
+            attempt_timeout: std::time::Duration::from_secs(1),
             timeout: std::time::Duration::from_secs(1),
         };
         let client = SpeechPrepClient::new(config).unwrap();
 
-        assert!(client.should_prepare(&"x".repeat(701), false));
+        let target = test_target(
+            crate::config::ProviderKind::Google,
+            "gemini-3.5-flash",
+            false,
+        );
+        assert!(client.should_prepare(&"x".repeat(701), &target));
     }
 
     #[test]
     fn speech_prep_skips_text_that_already_fits_output_limit() {
         let config = SpeechPrepConfig {
-            provider: crate::config::ProviderKind::Google,
+            provider: crate::config::SpeechPrepProviderKind::Google,
             mode: SpeechPrepMode::Shorten,
-            api_key: "key".to_string(),
+            api_key: Some("key".to_string()),
             base_url: "https://example.test".to_string(),
-            model: "gemini-3-flash-preview".to_string(),
+            model: "gemini-3.5-flash".to_string(),
+            fallback_models: Vec::new(),
+            auth_file: None,
+            reasoning_effort: None,
+            strategies: crate::config::SpeechPrepStrategies::default(),
+            tag_palette: default_test_palette(),
             threshold: 500,
             max_input_length: 12_000,
             max_length: 3000,
+            attempt_timeout: std::time::Duration::from_secs(1),
             timeout: std::time::Duration::from_secs(1),
         };
         let client = SpeechPrepClient::new(config).unwrap();
 
-        assert!(!client.should_prepare(&"x".repeat(700), false));
+        let target = test_target(
+            crate::config::ProviderKind::Google,
+            "gemini-3.5-flash",
+            false,
+        );
+        assert!(!client.should_prepare(&"x".repeat(700), &target));
+    }
+
+    #[test]
+    fn shorten_mode_skips_inputs_below_4000_when_provider_allows_it() {
+        let config = SpeechPrepConfig {
+            provider: crate::config::SpeechPrepProviderKind::Google,
+            mode: SpeechPrepMode::Shorten,
+            api_key: Some("key".to_string()),
+            base_url: "https://example.test".to_string(),
+            model: "gemini-3.5-flash".to_string(),
+            fallback_models: Vec::new(),
+            auth_file: None,
+            reasoning_effort: None,
+            strategies: crate::config::SpeechPrepStrategies::default(),
+            tag_palette: default_test_palette(),
+            threshold: 500,
+            max_input_length: 12_000,
+            max_length: 4000,
+            attempt_timeout: std::time::Duration::from_secs(1),
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let client = SpeechPrepClient::new(config).unwrap();
+
+        let target = test_target(
+            crate::config::ProviderKind::Google,
+            "gemini-3.5-flash",
+            false,
+        );
+        assert!(!client.should_prepare(&"x".repeat(3999), &target));
+        assert!(client.should_prepare(&"x".repeat(4001), &target));
+    }
+
+    #[test]
+    fn shorten_prompt_and_validation_enforce_minimum_output_floor() {
+        let context = SpeechPrepContext {
+            target: test_target(
+                crate::config::ProviderKind::Google,
+                "gemini-3.5-flash",
+                false,
+            ),
+            persona: None,
+            instructions: None,
+        };
+
+        let prompt = build_prompt(
+            &"a".repeat(6000),
+            4000,
+            SpeechPrepMode::Shorten,
+            SpeechPrepStrategy::InlineTags,
+            &default_test_palette(),
+            &context,
+        );
+
+        assert!(prompt.contains("at least 4000 characters"));
+        assert!(prompt.contains("Do not collapse prose into a short abstract"));
+        validate_shorten_output(6000, &"a".repeat(3999), 4000).unwrap_err();
+        validate_shorten_output(6000, &"a".repeat(4000), 4000).unwrap();
+    }
+
+    #[test]
+    fn shorten_falls_back_to_source_excerpt_when_model_collapses_text() {
+        let input = "source ".repeat(1000);
+        let output = shorten_or_extract(&input, "tiny summary", 5000);
+
+        assert!(output.chars().count() >= 4000);
+        assert!(output.chars().count() <= 5000);
+        assert!(output.starts_with("source source"));
+    }
+
+    #[test]
+    fn performance_tag_token_budget_scales_for_long_text() {
+        assert_eq!(performance_tags_max_output_tokens(225, 6000), 384);
+        assert_eq!(performance_tags_max_output_tokens(5400, 6000), 1800);
     }
 
     #[test]
@@ -320,26 +1402,45 @@ mod tests {
     #[test]
     fn performance_tags_only_prepare_when_model_supports_tags() {
         let config = SpeechPrepConfig {
-            provider: crate::config::ProviderKind::Google,
+            provider: crate::config::SpeechPrepProviderKind::Google,
             mode: SpeechPrepMode::PerformanceTags,
-            api_key: "key".to_string(),
+            api_key: Some("key".to_string()),
             base_url: "https://example.test".to_string(),
-            model: "gemini-3-flash-preview".to_string(),
-            threshold: 1,
+            model: "gemini-3.5-flash".to_string(),
+            fallback_models: Vec::new(),
+            auth_file: None,
+            reasoning_effort: None,
+            strategies: crate::config::SpeechPrepStrategies::default(),
+            tag_palette: default_test_palette(),
+            threshold: 120,
             max_input_length: 12_000,
             max_length: 3000,
+            attempt_timeout: std::time::Duration::from_secs(1),
             timeout: std::time::Duration::from_secs(1),
         };
         let client = SpeechPrepClient::new(config).unwrap();
 
-        assert!(client.should_prepare("I did it.", true));
-        assert!(!client.should_prepare("I did it.", false));
+        let elevenlabs_v3 = test_target(crate::config::ProviderKind::ElevenLabs, "eleven_v3", true);
+        let elevenlabs_flash = test_target(
+            crate::config::ProviderKind::ElevenLabs,
+            "eleven_flash_v2_5",
+            false,
+        );
+        let google_tts = test_target(
+            crate::config::ProviderKind::Google,
+            "gemini-3.1-flash-tts-preview",
+            true,
+        );
+
+        assert!(client.should_prepare(&"I did it. ".repeat(20), &elevenlabs_v3));
+        assert!(!client.should_prepare(&"I did it. ".repeat(20), &elevenlabs_flash));
+        assert!(client.should_prepare(&"I did it. ".repeat(20), &google_tts));
     }
 
     #[test]
     fn performance_tags_prompt_forbids_summarization() {
         let context = SpeechPrepContext {
-            supports_inline_audio_tags: true,
+            target: test_target(crate::config::ProviderKind::ElevenLabs, "eleven_v3", true),
             persona: None,
             instructions: Some("Keep it warm."),
         };
@@ -348,12 +1449,224 @@ mod tests {
             "I was worried, but it worked.",
             1000,
             SpeechPrepMode::PerformanceTags,
+            SpeechPrepStrategy::InlineTags,
+            &default_test_palette(),
             &context,
         );
 
         assert!(prompt.contains("Do not summarize"));
         assert!(prompt.contains("Do not rewrite the text"));
+        assert!(
+            prompt.contains("Every performance cue you add must be enclosed in square brackets")
+        );
         assert!(prompt.contains("[sigh of relief]"));
         assert!(prompt.contains("Return only the tagged text"));
+    }
+
+    #[test]
+    fn fallback_performance_tags_adds_one_valid_local_cue() {
+        let config = SpeechPrepConfig {
+            provider: SpeechPrepProviderKind::Google,
+            mode: SpeechPrepMode::PerformanceTags,
+            api_key: Some("key".to_string()),
+            base_url: "https://example.test".to_string(),
+            model: "gemini-3.5-flash".to_string(),
+            fallback_models: Vec::new(),
+            auth_file: None,
+            reasoning_effort: None,
+            strategies: crate::config::SpeechPrepStrategies::default(),
+            tag_palette: default_test_palette(),
+            threshold: 120,
+            max_input_length: 12_000,
+            max_length: 6000,
+            attempt_timeout: std::time::Duration::from_secs(1),
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let client = SpeechPrepClient::new(config).unwrap();
+        let target = test_target(crate::config::ProviderKind::ElevenLabs, "eleven_v3", true);
+        let input = "Mara felt a tremor in her chest, but she kept reading the letter.";
+
+        let tagged = client
+            .fallback_performance_tags(input, &target)
+            .unwrap()
+            .unwrap();
+
+        assert!(tagged.starts_with("[nervous] "));
+        validate_performance_tags_output(input, &tagged).unwrap();
+    }
+
+    #[test]
+    fn fallback_performance_tags_marks_intimate_action_tender() {
+        let config = SpeechPrepConfig {
+            provider: SpeechPrepProviderKind::Google,
+            mode: SpeechPrepMode::PerformanceTags,
+            api_key: Some("key".to_string()),
+            base_url: "https://example.test".to_string(),
+            model: "gemini-3.5-flash".to_string(),
+            fallback_models: Vec::new(),
+            auth_file: None,
+            reasoning_effort: None,
+            strategies: crate::config::SpeechPrepStrategies::default(),
+            tag_palette: default_test_palette(),
+            threshold: 120,
+            max_input_length: 12_000,
+            max_length: 6000,
+            attempt_timeout: std::time::Duration::from_secs(1),
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let client = SpeechPrepClient::new(config).unwrap();
+        let target = test_target(crate::config::ProviderKind::ElevenLabs, "eleven_v3", true);
+        let input = "Leans over and kisses your lips softly before saying goodnight.";
+
+        let tagged = client
+            .fallback_performance_tags(input, &target)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            tagged,
+            "[tender] Leans over and kisses your lips softly before saying goodnight."
+        );
+        validate_performance_tags_output(input, &tagged).unwrap();
+    }
+
+    #[test]
+    fn style_instruction_prompt_keeps_text_out_of_output() {
+        let context = SpeechPrepContext {
+            target: test_target(
+                crate::config::ProviderKind::Google,
+                "gemini-2.5-flash-preview-tts",
+                false,
+            ),
+            persona: None,
+            instructions: Some("Keep it warm."),
+        };
+
+        let prompt = build_prompt(
+            "I was worried, but it worked.",
+            1000,
+            SpeechPrepMode::PerformanceTags,
+            SpeechPrepStrategy::StyleInstruction,
+            &default_test_palette(),
+            &context,
+        );
+
+        assert!(prompt.contains("Do not rewrite"));
+        assert!(prompt.contains("Never include bracket tags"));
+        assert!(prompt.contains("Return only a 1-3 sentence"));
+    }
+
+    #[test]
+    fn performance_tag_validation_accepts_sparse_tags_preserving_text() {
+        validate_performance_tags_output(
+            "I was worried, but it worked. Thank you for staying with me.",
+            "[softly] I was worried, but it worked. Thank you for staying with me.",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn performance_tag_validation_accepts_two_sparse_tags_on_short_text() {
+        validate_performance_tags_output(
+            "I was worried, but it worked. Thank you for staying with me.",
+            "[nervous] I was worried, but it worked. [sigh of relief] Thank you for staying with me.",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn performance_tag_validation_rejects_changed_output_without_brackets() {
+        let error = validate_performance_tags_output(
+            "I was worried, but it worked. Thank you for staying with me.",
+            "softly I was worried, but it worked. Thank you for staying with me.",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("without square-bracket tags"));
+    }
+
+    #[test]
+    fn repairs_bare_leading_palette_cue_to_bracketed_tag() {
+        let input = "I was worried, but it worked. Thank you for staying with me.";
+        let repaired = repair_bare_leading_performance_cue(
+            input,
+            "softly, I was worried, but it worked. Thank you for staying with me.",
+            &default_test_palette(),
+        );
+
+        assert_eq!(
+            repaired,
+            "[softly] I was worried, but it worked. Thank you for staying with me."
+        );
+        validate_performance_tags_output(input, &repaired).unwrap();
+    }
+
+    #[test]
+    fn repairs_bare_leading_cue_phrase_to_bracketed_tag() {
+        let input = "I was worried, but it worked. Thank you for staying with me.";
+        let repaired = repair_bare_leading_performance_cue(
+            input,
+            "Smiles softly, I was worried, but it worked. Thank you for staying with me.",
+            &default_test_palette(),
+        );
+
+        assert_eq!(
+            repaired,
+            "[Smiles softly] I was worried, but it worked. Thank you for staying with me."
+        );
+        validate_performance_tags_output(input, &repaired).unwrap();
+    }
+
+    #[test]
+    fn repairs_lowered_voice_cue_phrase_to_bracketed_tag() {
+        let input = "I was worried, but it worked. Thank you for staying with me.";
+        let repaired = repair_bare_leading_performance_cue(
+            input,
+            "Smiles and lowers my voice, I was worried, but it worked. Thank you for staying with me.",
+            &default_test_palette(),
+        );
+
+        assert_eq!(
+            repaired,
+            "[Smiles and lowers my voice] I was worried, but it worked. Thank you for staying with me."
+        );
+        validate_performance_tags_output(input, &repaired).unwrap();
+    }
+
+    #[test]
+    fn repairs_sentence_boundary_cue_phrase_to_bracketed_tag() {
+        let input = "I was worried, but it worked. Thank you for staying with me.";
+        let repaired = repair_bare_leading_performance_cue(
+            input,
+            "[nervous] I was worried, but it worked. Smiles softly, Thank you for staying with me.",
+            &default_test_palette(),
+        );
+
+        assert_eq!(
+            repaired,
+            "[nervous] I was worried, but it worked. [smiles softly] Thank you for staying with me."
+        );
+        validate_performance_tags_output(input, &repaired).unwrap();
+    }
+
+    #[test]
+    fn performance_tag_validation_rejects_rewrites_or_truncation() {
+        let error = validate_performance_tags_output(
+            "I was worried, but it worked. Thank you for staying with me.",
+            "[softly] I was worried, but it worked.",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("changed text too much"));
+    }
+
+    #[test]
+    fn performance_tag_validation_rejects_tag_clutter() {
+        let original = "word ".repeat(120);
+        let prepared = format!("[softly] {} [tender] [whispers] [sigh] [laughs]", original);
+
+        let error = validate_performance_tags_output(&original, &prepared).unwrap_err();
+
+        assert!(error.to_string().contains("too many performance tags"));
     }
 }

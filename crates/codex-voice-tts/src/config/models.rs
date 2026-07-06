@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,75 @@ pub enum SpeechPrepMode {
     PerformanceTags,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechPrepProviderKind {
+    Google,
+    Codex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechPrepStrategy {
+    InlineTags,
+    StyleInstruction,
+    Off,
+}
+
+impl SpeechPrepStrategy {
+    pub fn from_name(s: &str) -> Option<Self> {
+        if s.eq_ignore_ascii_case("inline-tags") || s.eq_ignore_ascii_case("performance-tags") {
+            Some(Self::InlineTags)
+        } else if s.eq_ignore_ascii_case("style-instruction")
+            || s.eq_ignore_ascii_case("delivery-instruction")
+        {
+            Some(Self::StyleInstruction)
+        } else if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("none") {
+            Some(Self::Off)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_name(self) -> &'static str {
+        match self {
+            Self::InlineTags => "inline-tags",
+            Self::StyleInstruction => "style-instruction",
+            Self::Off => "off",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeechPrepStrategies {
+    pub google: SpeechPrepStrategy,
+    pub elevenlabs: SpeechPrepStrategy,
+    pub default: SpeechPrepStrategy,
+}
+
+impl Default for SpeechPrepStrategies {
+    fn default() -> Self {
+        Self {
+            google: SpeechPrepStrategy::InlineTags,
+            elevenlabs: SpeechPrepStrategy::InlineTags,
+            default: SpeechPrepStrategy::Off,
+        }
+    }
+}
+
+impl SpeechPrepProviderKind {
+    pub fn from_name(s: &str) -> Option<Self> {
+        if s.eq_ignore_ascii_case("google") {
+            Some(Self::Google)
+        } else if s.eq_ignore_ascii_case("codex")
+            || s.eq_ignore_ascii_case("openai")
+            || s.eq_ignore_ascii_case("gpt")
+        {
+            Some(Self::Codex)
+        } else {
+            None
+        }
+    }
+}
+
 impl SpeechPrepMode {
     pub fn from_name(s: &str) -> Option<Self> {
         if s.eq_ignore_ascii_case("shorten") || s.eq_ignore_ascii_case("summarize") {
@@ -72,14 +142,20 @@ pub struct ResolvedTtsConfig {
 
 #[derive(Debug, Clone)]
 pub struct SpeechPrepConfig {
-    pub provider: ProviderKind,
+    pub provider: SpeechPrepProviderKind,
     pub mode: SpeechPrepMode,
-    pub api_key: String,
+    pub api_key: Option<String>,
     pub base_url: String,
     pub model: String,
+    pub fallback_models: Vec<String>,
+    pub auth_file: Option<PathBuf>,
+    pub reasoning_effort: Option<String>,
+    pub strategies: SpeechPrepStrategies,
+    pub tag_palette: Vec<String>,
     pub threshold: usize,
     pub max_input_length: usize,
     pub max_length: usize,
+    pub attempt_timeout: Duration,
     pub timeout: Duration,
 }
 

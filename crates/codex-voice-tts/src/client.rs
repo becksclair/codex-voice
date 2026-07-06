@@ -1,9 +1,21 @@
-use codex_voice_core::{SpeechClient, SpeechError, SpeechRequest, SpeechResult, SynthesizedSpeech};
+use std::collections::HashMap;
 
-use crate::config::{FallbackPolicy, ProviderKind, ResolvedPersona, ResolvedTtsConfig};
+use bytes::BytesMut;
+use codex_voice_core::{
+    SpeechClient, SpeechError, SpeechFormat, SpeechRequest, SpeechResult, SynthesizedSpeech,
+};
+
+use crate::config::{
+    FallbackPolicy, ProviderKind, ResolvedPersona, ResolvedTtsConfig, SpeechPrepMode,
+    SpeechPrepStrategy,
+};
+use crate::convert::{concatenate_wav_chunks, convert_speech};
 use crate::elevenlabs::ElevenLabsSpeechClient;
 use crate::google::GoogleSpeechClient;
-use crate::speech_prep::{SpeechPrepClient, SpeechPrepContext};
+use crate::speech_prep::{SpeechPrepClient, SpeechPrepContext, SpeechPrepOutput, SpeechPrepTarget};
+
+const CHUNKED_TTS_MIN_CHARS: usize = 1_600;
+const CHUNKED_TTS_MAX_CHARS: usize = 900;
 
 /// Orchestrates TTS synthesis across configured providers with persona-aware fallback.
 pub struct ConfiguredSpeechClient {
@@ -109,11 +121,63 @@ impl ConfiguredSpeechClient {
         }
     }
 
+    fn provider_model_id<'a>(
+        &'a self,
+        provider: ProviderKind,
+        request: &'a SpeechRequest,
+    ) -> String {
+        match provider {
+            ProviderKind::Google => self
+                .google
+                .as_ref()
+                .map(|client| client.resolved_model_id(request).to_string())
+                .unwrap_or_else(|| request.model_hint.clone()),
+            ProviderKind::ElevenLabs => self
+                .elevenlabs
+                .as_ref()
+                .and_then(|client| client.resolved_model_id(request).ok())
+                .unwrap_or_else(|| request.model_hint.clone()),
+        }
+    }
+
+    fn provider_speech_prep_strategy(
+        &self,
+        provider: ProviderKind,
+        request: &SpeechRequest,
+    ) -> Option<SpeechPrepStrategy> {
+        let prep = self.speech_prep.as_ref()?;
+        let supports_inline_audio_tags =
+            self.provider_supports_inline_audio_tags(provider, request);
+        let model_id = self.provider_model_id(provider, request);
+        let target = SpeechPrepTarget {
+            provider,
+            model_id: &model_id,
+            supports_inline_audio_tags,
+        };
+        Some(prep.strategy_for_target(&target))
+    }
+
+    fn provider_max_text_length(&self, provider: ProviderKind) -> usize {
+        match provider {
+            ProviderKind::Google => self
+                .google
+                .as_ref()
+                .map(|client| client.max_text_length())
+                .unwrap_or(self.config.max_text_length),
+            ProviderKind::ElevenLabs => self
+                .elevenlabs
+                .as_ref()
+                .map(|client| client.max_text_length())
+                .unwrap_or(self.config.max_text_length),
+        }
+    }
+
     async fn prepare_request_for_provider(
         &self,
         provider: ProviderKind,
         request: &SpeechRequest,
         persona: Option<&ResolvedPersona>,
+        cache: &mut HashMap<(String, String), SpeechRequest>,
     ) -> SpeechRequest {
         let Some(prep) = &self.speech_prep else {
             return request.clone();
@@ -121,22 +185,107 @@ impl ConfiguredSpeechClient {
 
         let supports_inline_audio_tags =
             self.provider_supports_inline_audio_tags(provider, request);
-        let context = SpeechPrepContext {
+        let model_id = self.provider_model_id(provider, request);
+        let target = SpeechPrepTarget {
+            provider,
+            model_id: &model_id,
             supports_inline_audio_tags,
+        };
+        let context = SpeechPrepContext {
+            target,
             persona,
             instructions: request.instructions.as_deref(),
         };
 
-        if !prep.should_prepare(&request.input, supports_inline_audio_tags) {
-            return request.clone();
+        let provider_limit = self.provider_max_text_length(provider);
+        let fit_limit = speech_prep_fit_limit(provider_limit);
+        let mut request = request.clone();
+        if prep.should_shorten_to_fit(&request.input, provider_limit) {
+            let cache_key = (request.input.clone(), format!("shorten-to-fit:{fit_limit}"));
+            if let Some(cached) = cache.get(&cache_key) {
+                request = cached.clone();
+            } else {
+                match prep
+                    .prepare_to_fit(&request.input, context, fit_limit)
+                    .await
+                {
+                    Ok(Some(input)) => {
+                        tracing::info!(
+                            original_chars = request.input.chars().count(),
+                            prepared_chars = input.chars().count(),
+                            provider = ?provider,
+                            model = %model_id,
+                            max_text_length = fit_limit,
+                            "shortened TTS text to fit provider limit"
+                        );
+                        request = SpeechRequest {
+                            input,
+                            ..request.clone()
+                        };
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, provider = ?provider, "speech prep failed while shortening over-limit TTS text; using extractive fallback");
+                        match prep.extractive_shorten_to_fit(&request.input, fit_limit) {
+                            Ok(input) => {
+                                tracing::info!(
+                                    original_chars = request.input.chars().count(),
+                                    prepared_chars = input.chars().count(),
+                                    provider = ?provider,
+                                    model = %model_id,
+                                    max_text_length = fit_limit,
+                                    "extractively shortened TTS text after speech prep failure"
+                                );
+                                request = SpeechRequest {
+                                    input,
+                                    ..request.clone()
+                                };
+                            }
+                            Err(fallback_error) => {
+                                tracing::warn!(%fallback_error, provider = ?provider, "extractive speech prep fallback failed; using original TTS text");
+                            }
+                        }
+                    }
+                }
+                cache.insert(cache_key, request.clone());
+            }
         }
 
-        match prep.prepare(&request.input, context).await {
-            Ok(Some(input)) => {
+        if prep.mode() == SpeechPrepMode::Shorten {
+            return request;
+        }
+
+        let supports_inline_audio_tags =
+            self.provider_supports_inline_audio_tags(provider, &request);
+        let model_id = self.provider_model_id(provider, &request);
+        let target = SpeechPrepTarget {
+            provider,
+            model_id: &model_id,
+            supports_inline_audio_tags,
+        };
+        let context = SpeechPrepContext {
+            target,
+            persona,
+            instructions: request.instructions.as_deref(),
+        };
+
+        if !prep.should_prepare(&request.input, &context.target) {
+            return request;
+        }
+        let strategy = prep.strategy_for_target(&context.target);
+        let cache_key = (request.input.clone(), strategy.as_name().to_string());
+        if let Some(cached) = cache.get(&cache_key) {
+            return cached.clone();
+        }
+
+        let prepared_request = match prep.prepare(&request.input, context).await {
+            Ok(Some(SpeechPrepOutput::Input(input))) => {
                 tracing::info!(
                     original_chars = request.input.chars().count(),
                     prepared_chars = input.chars().count(),
                     provider = ?provider,
+                    model = %model_id,
+                    strategy = %strategy.as_name(),
                     inline_audio_tags = supports_inline_audio_tags,
                     "prepared TTS text before synthesis"
                 );
@@ -145,16 +294,55 @@ impl ConfiguredSpeechClient {
                     ..request.clone()
                 }
             }
+            Ok(Some(SpeechPrepOutput::DeliveryInstruction(instruction))) => {
+                tracing::info!(
+                    original_chars = request.input.chars().count(),
+                    instruction_chars = instruction.chars().count(),
+                    provider = ?provider,
+                    model = %model_id,
+                    strategy = %strategy.as_name(),
+                    "prepared TTS delivery instruction before synthesis"
+                );
+                SpeechRequest {
+                    instructions: Some(merge_instructions(
+                        request.instructions.as_deref(),
+                        &instruction,
+                    )),
+                    ..request.clone()
+                }
+            }
             Ok(None) => request.clone(),
             Err(error) => {
                 tracing::warn!(%error, provider = ?provider, "speech prep failed; using original TTS text");
-                request.clone()
+                match prep.fallback_performance_tags(&request.input, &context.target) {
+                    Ok(Some(input)) => {
+                        tracing::info!(
+                            original_chars = request.input.chars().count(),
+                            prepared_chars = input.chars().count(),
+                            provider = ?provider,
+                            model = %model_id,
+                            strategy = %strategy.as_name(),
+                            "applied local fallback performance tag after speech prep failure"
+                        );
+                        SpeechRequest {
+                            input,
+                            ..request.clone()
+                        }
+                    }
+                    Ok(None) => request.clone(),
+                    Err(fallback_error) => {
+                        tracing::warn!(%fallback_error, provider = ?provider, "fallback performance tagging failed; using original TTS text");
+                        request.clone()
+                    }
+                }
             }
-        }
+        };
+        cache.insert(cache_key, prepared_request.clone());
+        prepared_request
     }
 
-    /// Dispatch synthesis to the requested provider.
-    async fn synthesize_with(
+    /// Dispatch one synthesis request to the requested provider.
+    async fn synthesize_single_with(
         &self,
         provider: ProviderKind,
         request: &SpeechRequest,
@@ -180,14 +368,152 @@ impl ConfiguredSpeechClient {
             }
         }
     }
+
+    /// Dispatch synthesis to the requested provider, chunking long WAV requests so providers do not
+    /// have to generate several minutes of audio in a single upstream call.
+    async fn synthesize_with(
+        &self,
+        provider: ProviderKind,
+        request: &SpeechRequest,
+        persona: Option<&ResolvedPersona>,
+        native_voice: Option<&str>,
+    ) -> SpeechResult<SynthesizedSpeech> {
+        if request.format != SpeechFormat::Wav
+            || request.input.chars().count() < CHUNKED_TTS_MIN_CHARS
+        {
+            return self
+                .synthesize_single_with(provider, request, persona, native_voice)
+                .await;
+        }
+
+        let chunks = split_tts_text(&request.input, CHUNKED_TTS_MAX_CHARS);
+        if chunks.len() < 2 {
+            return self
+                .synthesize_single_with(provider, request, persona, native_voice)
+                .await;
+        }
+
+        tracing::info!(
+            provider = ?provider,
+            chunks = chunks.len(),
+            text_chars = request.input.chars().count(),
+            max_chunk_chars = CHUNKED_TTS_MAX_CHARS,
+            "chunking long TTS request"
+        );
+
+        let chunk_format = match provider {
+            ProviderKind::ElevenLabs => SpeechFormat::Pcm,
+            ProviderKind::Google => request.format,
+        };
+        let mut synthesized_chunks = Vec::with_capacity(chunks.len());
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            tracing::debug!(
+                provider = ?provider,
+                chunk_index = index,
+                chunk_chars = chunk.chars().count(),
+                "synthesizing TTS chunk"
+            );
+            let chunk_request = SpeechRequest {
+                input: chunk,
+                format: chunk_format,
+                ..request.clone()
+            };
+            synthesized_chunks.push(
+                self.synthesize_single_with(provider, &chunk_request, persona, native_voice)
+                    .await?,
+            );
+        }
+
+        match chunk_format {
+            SpeechFormat::Wav => concatenate_wav_chunks(synthesized_chunks).await,
+            SpeechFormat::Pcm | SpeechFormat::Mp3 => {
+                let mut bytes = BytesMut::new();
+                for chunk in synthesized_chunks {
+                    if chunk.format != chunk_format {
+                        return Err(SpeechError::Request(format!(
+                            "cannot concatenate non-{} speech chunk",
+                            chunk_format.to_openai()
+                        )));
+                    }
+                    bytes.extend_from_slice(&chunk.bytes);
+                }
+                convert_speech(
+                    SynthesizedSpeech {
+                        bytes: bytes.freeze(),
+                        format: chunk_format,
+                        mime_type: synthesized_chunk_mime_type(chunk_format).to_string(),
+                        prepared_input: None,
+                    },
+                    request.format,
+                )
+                .await
+            }
+            _ => unreachable!("chunked TTS only requests WAV, PCM, or MP3 chunks"),
+        }
+    }
+}
+
+fn synthesized_chunk_mime_type(format: SpeechFormat) -> &'static str {
+    match format {
+        SpeechFormat::Pcm => "audio/L16;codec=pcm;rate=24000",
+        _ => format.mime_type(),
+    }
+}
+
+fn speech_prep_fit_limit(provider_limit: usize) -> usize {
+    provider_limit.min(4_000)
+}
+
+fn split_tts_text(input: &str, max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut remaining = input.trim();
+    while remaining.chars().count() > max_chars {
+        let split_at = split_index_at_or_before(remaining, max_chars);
+        let (head, tail) = remaining.split_at(split_at);
+        let head = head.trim();
+        if !head.is_empty() {
+            chunks.push(head.to_string());
+        }
+        remaining = tail.trim_start();
+    }
+    if !remaining.is_empty() {
+        chunks.push(remaining.to_string());
+    }
+    chunks
+}
+
+fn split_index_at_or_before(input: &str, max_chars: usize) -> usize {
+    let hard_limit = input
+        .char_indices()
+        .nth(max_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(input.len());
+    let prefix = &input[..hard_limit];
+    for pattern in [". ", "! ", "? ", "\n\n", "\n", "; ", ", ", " "] {
+        if let Some(index) = prefix.rfind(pattern) {
+            let split = index + pattern.len();
+            if split > 0 {
+                return split;
+            }
+        }
+    }
+    hard_limit
+}
+
+fn merge_instructions(existing: Option<&str>, generated: &str) -> String {
+    match existing.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(existing) => format!("{existing}\n\nPer-message delivery direction: {generated}"),
+        None => format!("Per-message delivery direction: {generated}"),
+    }
 }
 
 #[async_trait::async_trait]
 impl SpeechClient for ConfiguredSpeechClient {
     async fn synthesize(&self, request: &SpeechRequest) -> SpeechResult<SynthesizedSpeech> {
         let (primary_provider, persona, native_voice) = self.resolve_request(request)?;
+        let mut prep_cache = HashMap::new();
         let primary_request = self
-            .prepare_request_for_provider(primary_provider, request, persona)
+            .prepare_request_for_provider(primary_provider, request, persona, &mut prep_cache)
             .await;
 
         let primary_prepared_input =
@@ -215,9 +541,20 @@ impl SpeechClient for ConfiguredSpeechClient {
                     ProviderKind::Google => ProviderKind::ElevenLabs,
                     ProviderKind::ElevenLabs => ProviderKind::Google,
                 };
-                let fallback_request = self
-                    .prepare_request_for_provider(fallback_provider, request, Some(persona))
-                    .await;
+                let fallback_request = if primary_prepared_input.is_some()
+                    && self.provider_speech_prep_strategy(fallback_provider, &primary_request)
+                        == Some(SpeechPrepStrategy::InlineTags)
+                {
+                    primary_request.clone()
+                } else {
+                    self.prepare_request_for_provider(
+                        fallback_provider,
+                        request,
+                        Some(persona),
+                        &mut prep_cache,
+                    )
+                    .await
+                };
                 let fallback_prepared_input = (fallback_request.input != request.input)
                     .then(|| fallback_request.input.clone());
 
@@ -240,5 +577,27 @@ impl SpeechClient for ConfiguredSpeechClient {
             "all TTS providers failed. primary error: {}",
             primary_err
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_tts_text;
+
+    #[test]
+    fn split_tts_text_prefers_sentence_boundaries() {
+        let chunks = split_tts_text("First sentence. Second sentence. Third sentence.", 25);
+
+        assert_eq!(
+            chunks,
+            vec!["First sentence.", "Second sentence.", "Third sentence."]
+        );
+    }
+
+    #[test]
+    fn split_tts_text_preserves_long_words_without_empty_chunks() {
+        let chunks = split_tts_text("abcdefghij klm", 5);
+
+        assert_eq!(chunks, vec!["abcde", "fghij", "klm"]);
     }
 }

@@ -9,7 +9,8 @@ use codex_voice_core::SpeechError;
 pub use models::{
     ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ElevenLabsVoiceSettings, FallbackPolicy,
     GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, ResolvedTtsConfig,
-    SpeechPrepConfig, SpeechPrepMode,
+    SpeechPrepConfig, SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies,
+    SpeechPrepStrategy,
 };
 
 #[derive(Debug, Clone)]
@@ -81,6 +82,38 @@ mod tests {
         assert_eq!(google.api_key, "test-google-key-value");
         assert_eq!(google.voice, "Sulafat");
         assert_eq!(google.model, "gemini-2.5-flash-preview-tts");
+
+        let speech_prep = resolved.speech_prep.expect("speech prep defaults on");
+        assert_eq!(speech_prep.provider, SpeechPrepProviderKind::Codex);
+        assert_eq!(speech_prep.model, "gpt-5.3-codex-spark");
+        assert_eq!(speech_prep.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            speech_prep.strategies.google,
+            SpeechPrepStrategy::InlineTags
+        );
+        assert_eq!(
+            speech_prep.strategies.elevenlabs,
+            SpeechPrepStrategy::InlineTags
+        );
+        assert!(speech_prep.tag_palette.contains(&"excited".to_string()));
+        assert!(speech_prep
+            .tag_palette
+            .contains(&"leans closer".to_string()));
+        assert!(speech_prep.tag_palette.len() >= 36);
+        for tag in [
+            "delighted",
+            "fearful",
+            "angry",
+            "wistful",
+            "reassuring",
+            "dryly",
+            "urgent",
+            "breathless",
+            "voice breaks",
+            "long pause",
+        ] {
+            assert!(speech_prep.tag_palette.contains(&tag.to_string()));
+        }
     }
 
     #[test]
@@ -262,12 +295,27 @@ mod tests {
         let resolved = file.resolve().unwrap();
         let speech_prep = resolved.speech_prep.expect("speech prep missing");
 
-        assert_eq!(speech_prep.provider, ProviderKind::Google);
+        assert_eq!(speech_prep.provider, SpeechPrepProviderKind::Google);
         assert_eq!(speech_prep.mode, SpeechPrepMode::PerformanceTags);
         assert_eq!(speech_prep.model, "google/gemini-3.5-flash");
+        assert!(speech_prep.fallback_models.is_empty());
+        assert_eq!(
+            speech_prep.strategies.google,
+            SpeechPrepStrategy::InlineTags
+        );
+        assert_eq!(
+            speech_prep.strategies.elevenlabs,
+            SpeechPrepStrategy::InlineTags
+        );
+        assert_eq!(speech_prep.strategies.default, SpeechPrepStrategy::Off);
+        assert!(speech_prep.tag_palette.contains(&"softly".to_string()));
         assert_eq!(speech_prep.threshold, 700);
         assert_eq!(speech_prep.max_input_length, 9000);
         assert_eq!(speech_prep.max_length, 420);
+        assert_eq!(
+            speech_prep.attempt_timeout,
+            std::time::Duration::from_secs(10)
+        );
         assert_eq!(speech_prep.timeout, std::time::Duration::from_secs(20));
     }
 
@@ -304,8 +352,60 @@ mod tests {
         let resolved = file.resolve().unwrap();
         let speech_prep = resolved.speech_prep.expect("speech prep missing");
 
-        assert_eq!(speech_prep.api_key, "test-google-key-value");
+        assert_eq!(
+            speech_prep.api_key.as_deref(),
+            Some("test-google-key-value")
+        );
         assert_eq!(speech_prep.base_url, "https://google.example.test/v1beta");
+    }
+
+    #[test]
+    fn parses_codex_speech_prep_config() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "google",
+                    "speechPrep": {
+                        "enabled": true,
+                        "provider": "codex",
+                        "model": "gpt-5.3-codex-spark",
+                        "baseUrl": "https://chatgpt.example.test/backend-api/codex",
+                        "authFile": "/tmp/codex-auth.json",
+                        "reasoningEffort": "none",
+                        "timeoutMs": 12000
+                    },
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_CODEX_PREP" },
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var("TEST_GOOGLE_KEY_CODEX_PREP", "test-google-key-value");
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+        let speech_prep = resolved.speech_prep.expect("speech prep missing");
+
+        assert_eq!(speech_prep.provider, SpeechPrepProviderKind::Codex);
+        assert_eq!(speech_prep.model, "gpt-5.3-codex-spark");
+        assert!(speech_prep.fallback_models.is_empty());
+        assert_eq!(
+            speech_prep.base_url,
+            "https://chatgpt.example.test/backend-api/codex"
+        );
+        assert_eq!(speech_prep.api_key, None);
+        assert_eq!(
+            speech_prep.auth_file.as_deref(),
+            Some(std::path::Path::new("/tmp/codex-auth.json"))
+        );
+        assert_eq!(speech_prep.reasoning_effort, None);
+        assert_eq!(speech_prep.timeout, std::time::Duration::from_secs(12));
     }
 
     #[test]
@@ -343,6 +443,46 @@ mod tests {
 
         assert_eq!(resolved.max_text_length, 3000);
         assert_eq!(speech_prep.max_length, 3000);
+    }
+
+    #[test]
+    fn shorten_speech_prep_clamps_low_limits_to_4000_when_provider_allows_it() {
+        let config = r#"
+        {
+            "messages": {
+                "tts": {
+                    "provider": "google",
+                    "maxTextLength": 12000,
+                    "speechPrep": {
+                        "enabled": true,
+                        "provider": "google",
+                        "mode": "shorten",
+                        "threshold": 500,
+                        "maxLength": 800
+                    },
+                    "providers": {
+                        "google": {
+                            "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_SPEECH_PREP_SHORTEN_FLOOR" },
+                            "voice": "Sulafat",
+                            "model": "gemini-2.5-flash-preview-tts"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        std::env::set_var(
+            "TEST_GOOGLE_KEY_SPEECH_PREP_SHORTEN_FLOOR",
+            "test-google-key-value",
+        );
+        let file: serde::ReadAloudDefaultsFile = serde_json::from_str(config).unwrap();
+
+        let resolved = file.resolve().unwrap();
+        let speech_prep = resolved.speech_prep.expect("speech prep missing");
+
+        assert_eq!(speech_prep.threshold, 4000);
+        assert_eq!(speech_prep.max_length, 4000);
+        assert_eq!(speech_prep.max_input_length, 12000);
     }
 
     #[test]
@@ -416,7 +556,7 @@ mod tests {
 
         assert_eq!(resolved.max_text_length, 300);
         assert_eq!(speech_prep.mode, SpeechPrepMode::PerformanceTags);
-        assert_eq!(speech_prep.threshold, 1);
+        assert_eq!(speech_prep.threshold, 120);
         assert_eq!(speech_prep.model, "google/gemini-3.5-flash");
     }
 
@@ -431,7 +571,13 @@ mod tests {
                     "speechPrep": {
                         "enabled": true,
                         "provider": "google",
-                        "mode": "performance-tags"
+                        "mode": "performance-tags",
+                        "tagPalette": ["sleepy", "relieved"],
+                        "strategies": {
+                            "google": "off",
+                            "elevenlabs": "inline-tags",
+                            "*": "style-instruction"
+                        }
                     },
                     "providers": {
                         "google": {
@@ -458,7 +604,17 @@ mod tests {
 
         assert_eq!(speech_prep.mode, SpeechPrepMode::PerformanceTags);
         assert_eq!(speech_prep.model, "google/gemini-3.5-flash");
-        assert_eq!(speech_prep.threshold, 1);
+        assert_eq!(speech_prep.threshold, 120);
+        assert_eq!(speech_prep.tag_palette, vec!["sleepy", "relieved"]);
+        assert_eq!(speech_prep.strategies.google, SpeechPrepStrategy::Off);
+        assert_eq!(
+            speech_prep.strategies.elevenlabs,
+            SpeechPrepStrategy::InlineTags
+        );
+        assert_eq!(
+            speech_prep.strategies.default,
+            SpeechPrepStrategy::StyleInstruction
+        );
         assert_eq!(elevenlabs.inline_audio_tags, None);
     }
 

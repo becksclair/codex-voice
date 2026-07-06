@@ -3,6 +3,7 @@ use reqwest::Client;
 
 use crate::config::{ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ResolvedPersona};
 use crate::convert::convert_speech;
+use crate::provider_timeout::tts_timeout_for_input;
 use crate::sanitize::sanitize_for_tts;
 
 pub struct ElevenLabsSpeechClient {
@@ -13,18 +14,26 @@ pub struct ElevenLabsSpeechClient {
 impl ElevenLabsSpeechClient {
     pub fn new(config: ElevenLabsRuntimeConfig) -> Result<Self, SpeechError> {
         let client = Client::builder()
-            .timeout(config.timeout)
             .build()
             .map_err(|e| SpeechError::Request(format!("failed to build HTTP client: {}", e)))?;
         Ok(Self { config, client })
     }
 
     pub fn supports_inline_audio_tags(&self, request: &SpeechRequest) -> bool {
-        let model_id = resolve_model_id(&request.model_hint, &self.config.model_id)
+        let model_id = self
+            .resolved_model_id(request)
             .unwrap_or_else(|_| self.config.model_id.clone());
         self.config
             .inline_audio_tags
             .unwrap_or_else(|| elevenlabs_model_supports_inline_audio_tags(&model_id))
+    }
+
+    pub fn resolved_model_id(&self, request: &SpeechRequest) -> SpeechResult<String> {
+        resolve_model_id(&request.model_hint, &self.config.model_id)
+    }
+
+    pub fn max_text_length(&self) -> usize {
+        self.config.max_text_length
     }
 
     pub async fn synthesize(
@@ -47,7 +56,7 @@ impl ElevenLabsSpeechClient {
             ));
         }
 
-        let model_id = resolve_model_id(&request.model_hint, &self.config.model_id)?;
+        let model_id = self.resolved_model_id(request)?;
 
         let persona_settings = persona.and_then(|p| p.elevenlabs.as_ref());
         let body = build_request_body(
@@ -61,13 +70,24 @@ impl ElevenLabsSpeechClient {
 
         let url = format!("{}/v1/text-to-speech/{}", self.config.base_url, voice_id);
 
-        tracing::debug!(url = %url, voice_id = %voice_id, "sending ElevenLabs TTS request");
+        let timeout = tts_timeout_for_input(self.config.timeout, &sanitized);
 
-        let bytes = tokio::time::timeout(self.config.timeout, async {
+        tracing::debug!(
+            url = %url,
+            voice_id = %voice_id,
+            timeout_secs = timeout.as_secs(),
+            text_chars = sanitized.chars().count(),
+            "sending ElevenLabs TTS request"
+        );
+
+        let bytes = tokio::time::timeout(timeout, async {
+            let output_format =
+                output_format_for_request(request.format, &self.config.output_format);
             let response = self
                 .client
                 .post(&url)
-                .query(&[("output_format", &self.config.output_format)])
+                .timeout(timeout)
+                .query(&[("output_format", output_format)])
                 .header("xi-api-key", &self.config.api_key)
                 .header("Content-Type", "application/json")
                 .json(&body)
@@ -102,7 +122,7 @@ impl ElevenLabsSpeechClient {
         .map_err(|_| {
             SpeechError::Request(format!(
                 "ElevenLabs request timed out after {}s",
-                self.config.timeout.as_secs()
+                timeout.as_secs()
             ))
         })??;
 
@@ -112,8 +132,9 @@ impl ElevenLabsSpeechClient {
             ));
         }
 
-        let format = format_from_elevenlabs_output(&self.config.output_format);
-        let mime_type = format.mime_type().to_string();
+        let output_format = output_format_for_request(request.format, &self.config.output_format);
+        let format = format_from_elevenlabs_output(output_format);
+        let mime_type = mime_type_from_elevenlabs_output(output_format, format).to_string();
 
         let native = SynthesizedSpeech {
             bytes,
@@ -215,10 +236,32 @@ fn format_from_elevenlabs_output(output_format: &str) -> SpeechFormat {
     }
 }
 
+fn output_format_for_request(request_format: SpeechFormat, configured: &str) -> &str {
+    match request_format {
+        SpeechFormat::Pcm => "pcm_24000",
+        _ => configured,
+    }
+}
+
+fn mime_type_from_elevenlabs_output(output_format: &str, format: SpeechFormat) -> &'static str {
+    match format {
+        SpeechFormat::Pcm if output_format.contains("44100") => "audio/L16;codec=pcm;rate=44100",
+        SpeechFormat::Pcm if output_format.contains("22050") => "audio/L16;codec=pcm;rate=22050",
+        SpeechFormat::Pcm if output_format.contains("16000") => "audio/L16;codec=pcm;rate=16000",
+        SpeechFormat::Pcm => "audio/L16;codec=pcm;rate=24000",
+        _ => format.mime_type(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_request_body, elevenlabs_model_supports_inline_audio_tags, normalize_speed};
+    use super::{
+        build_request_body, elevenlabs_model_supports_inline_audio_tags,
+        format_from_elevenlabs_output, mime_type_from_elevenlabs_output, normalize_speed,
+        output_format_for_request,
+    };
     use crate::config::{ElevenLabsPersonaConfig, ElevenLabsVoiceSettings};
+    use codex_voice_core::SpeechFormat;
 
     #[test]
     fn normalize_speed_serializes_upper_bound_without_f32_artifact() {
@@ -347,5 +390,27 @@ mod tests {
         assert!(!elevenlabs_model_supports_inline_audio_tags(
             "eleven_multilingual_v2"
         ));
+    }
+
+    #[test]
+    fn pcm_requests_use_native_pcm_output_format() {
+        assert_eq!(
+            output_format_for_request(SpeechFormat::Pcm, "mp3_44100_128"),
+            "pcm_24000"
+        );
+        assert_eq!(
+            output_format_for_request(SpeechFormat::Opus, "opus_48000_32"),
+            "opus_48000_32"
+        );
+    }
+
+    #[test]
+    fn pcm_output_mime_type_preserves_sample_rate() {
+        let format = format_from_elevenlabs_output("pcm_24000");
+        assert_eq!(format, SpeechFormat::Pcm);
+        assert_eq!(
+            mime_type_from_elevenlabs_output("pcm_24000", format),
+            "audio/L16;codec=pcm;rate=24000"
+        );
     }
 }
