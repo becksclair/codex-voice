@@ -7,7 +7,7 @@ use codex_voice_core::{
 use codex_voice_tts::config::{
     ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ElevenLabsVoiceSettings, FallbackPolicy,
     GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, ResolvedTtsConfig,
-    SpeechPrepConfig, SpeechPrepMode,
+    SpeechPrepConfig, SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -83,6 +83,7 @@ pub(crate) fn test_state_with_speech_backend(
         backend: Arc::new(FakeBackend::default()),
         speech,
         web_tts_config: None,
+        web_speech_jobs: Arc::new(Mutex::new(HashMap::new())),
         auth: ServiceAuth {
             token: "test-token".into(),
             no_auth: false,
@@ -134,14 +135,24 @@ pub(crate) fn sample_tts_config() -> ResolvedTtsConfig {
         max_text_length: 4000,
         timeout: Duration::from_secs(30),
         speech_prep: Some(SpeechPrepConfig {
-            provider: ProviderKind::Google,
+            provider: SpeechPrepProviderKind::Google,
             mode: SpeechPrepMode::PerformanceTags,
-            api_key: "google-prep-key".to_string(),
+            api_key: Some("google-prep-key".to_string()),
             base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
             model: "google/gemini-3.5-flash".to_string(),
-            threshold: 1,
+            fallback_models: Vec::new(),
+            auth_file: None,
+            reasoning_effort: None,
+            strategies: SpeechPrepStrategies::default(),
+            tag_palette: vec![
+                "tender".to_string(),
+                "softly".to_string(),
+                "amused".to_string(),
+            ],
+            threshold: 120,
             max_input_length: 12000,
             max_length: 4000,
+            attempt_timeout: Duration::from_secs(4),
             timeout: Duration::from_secs(20),
         }),
         google: Some(GoogleRuntimeConfig {

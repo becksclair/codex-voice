@@ -2,6 +2,7 @@
 name = "codex-voice-transcriber"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
