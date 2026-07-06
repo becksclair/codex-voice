@@ -1868,19 +1868,20 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       }
     }
 
-    function wavBlobFromPcm(pcmBytes, sampleRate) {
+    function wavBlobFromPcm(pcmBytes, sampleRate, channels = 1) {
       const header = new ArrayBuffer(44);
       const view = new DataView(header);
+      const blockAlign = channels * 2;
       writeAscii(view, 0, 'RIFF');
       view.setUint32(4, 36 + pcmBytes.length, true);
       writeAscii(view, 8, 'WAVE');
       writeAscii(view, 12, 'fmt ');
       view.setUint32(16, 16, true);
       view.setUint16(20, 1, true);
-      view.setUint16(22, 1, true);
+      view.setUint16(22, channels, true);
       view.setUint32(24, sampleRate, true);
-      view.setUint32(28, sampleRate * 2, true);
-      view.setUint16(32, 2, true);
+      view.setUint32(28, sampleRate * blockAlign, true);
+      view.setUint16(32, blockAlign, true);
       view.setUint16(34, 16, true);
       writeAscii(view, 36, 'data');
       view.setUint32(40, pcmBytes.length, true);
@@ -1889,6 +1890,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
 
     const ttsChunkMinChars = 1600;
     const ttsChunkMaxChars = 900;
+    const ttsChunkBoundarySilenceMs = 180;
 
     function splitTtsText(input, maxChars = ttsChunkMaxChars) {
       const chunks = [];
@@ -1923,6 +1925,78 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         offset += part.length;
       }
       return output;
+    }
+
+    function pcmBoundarySilence(sampleRate, channels = 1) {
+      const frames = Math.floor((sampleRate * ttsChunkBoundarySilenceMs) / 1000);
+      return new Uint8Array(frames * channels * 2);
+    }
+
+    function concatPcmChunksWithBoundarySilence(parts, sampleRate, channels = 1) {
+      if (parts.length <= 1) return concatUint8Arrays(parts);
+      const silence = pcmBoundarySilence(sampleRate, channels);
+      const interleaved = [];
+      parts.forEach((part, index) => {
+        if (index > 0) interleaved.push(silence);
+        interleaved.push(part);
+      });
+      return concatUint8Arrays(interleaved);
+    }
+
+    function asciiFromBytes(bytes, offset, length) {
+      let value = '';
+      for (let i = 0; i < length; i += 1) value += String.fromCharCode(bytes[offset + i]);
+      return value;
+    }
+
+    function wavPcmData(bytes) {
+      if (bytes.length < 44) throw new Error('WAV chunk is too small.');
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      if (asciiFromBytes(bytes, 0, 4) !== 'RIFF' || asciiFromBytes(bytes, 8, 4) !== 'WAVE') {
+        throw new Error('WAV chunk has invalid RIFF/WAVE header.');
+      }
+      let offset = 12;
+      let format = null;
+      let data = null;
+      while (offset + 8 <= bytes.length) {
+        const id = asciiFromBytes(bytes, offset, 4);
+        const size = view.getUint32(offset + 4, true);
+        const body = offset + 8;
+        if (body + size > bytes.length) break;
+        if (id === 'fmt ') {
+          format = {
+            audioFormat: view.getUint16(body, true),
+            channels: view.getUint16(body + 2, true),
+            sampleRate: view.getUint32(body + 4, true),
+            bitsPerSample: view.getUint16(body + 14, true)
+          };
+        } else if (id === 'data') {
+          data = bytes.slice(body, body + size);
+        }
+        offset = body + size + (size % 2);
+      }
+      if (!format || !data) throw new Error('WAV chunk is missing fmt or data.');
+      if (format.audioFormat !== 1 || format.bitsPerSample !== 16) {
+        throw new Error('Only 16-bit PCM WAV chunks can be stitched.');
+      }
+      return { ...format, data };
+    }
+
+    function concatWavChunksWithBoundarySilence(parts) {
+      const decoded = parts.map(wavPcmData);
+      const first = decoded[0];
+      if (!first) throw new Error('No WAV chunks to stitch.');
+      for (const chunk of decoded) {
+        if (chunk.sampleRate !== first.sampleRate || chunk.channels !== first.channels) {
+          throw new Error('WAV chunks have mismatched sample rates or channels.');
+        }
+      }
+      const pcm = concatPcmChunksWithBoundarySilence(
+        decoded.map((chunk) => chunk.data),
+        first.sampleRate,
+        first.channels
+      );
+      return wavBlobFromPcm(pcm, first.sampleRate, first.channels);
     }
 
     async function fetchGoogleAudio(config, input, persona, instructions) {
@@ -1967,8 +2041,12 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
             audios.push(await fetchGoogleAudio(config, chunk, persona, instructions));
           }
           const mimeType = audios[0].mimeType || 'audio/L16;codec=pcm;rate=24000';
+          const sampleRate = parseSampleRate(mimeType);
           if (audios.every((audio) => (audio.mimeType || '').toLowerCase().startsWith('audio/l16') || (audio.mimeType || '').toLowerCase().startsWith('audio/pcm'))) {
-            return wavBlobFromPcm(concatUint8Arrays(audios.map((audio) => audio.bytes)), parseSampleRate(mimeType));
+            return wavBlobFromPcm(concatPcmChunksWithBoundarySilence(audios.map((audio) => audio.bytes), sampleRate), sampleRate);
+          }
+          if (audios.every((audio) => (audio.mimeType || '').toLowerCase().startsWith('audio/wav'))) {
+            return concatWavChunksWithBoundarySilence(audios.map((audio) => audio.bytes));
           }
           return new Blob(audios.map((audio) => audio.bytes), { type: mimeType });
         }
@@ -2041,7 +2119,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
             const blob = await synthesizeElevenLabsSingle(config, chunk, persona, outputFormat, true);
             parts.push(new Uint8Array(await blob.arrayBuffer()));
           }
-          return wavBlobFromPcm(concatUint8Arrays(parts), elevenLabsSampleRate(outputFormat));
+          const sampleRate = elevenLabsSampleRate(outputFormat);
+          return wavBlobFromPcm(concatPcmChunksWithBoundarySilence(parts, sampleRate), sampleRate);
         }
       }
       return synthesizeElevenLabsSingle(config, input, persona);
@@ -3752,9 +3831,15 @@ mod tests {
         assert!(html.contains("fetch('/web/config'"));
         assert!(html.contains("function splitTtsText"));
         assert!(html.contains("function concatUint8Arrays"));
+        assert!(html.contains("ttsChunkBoundarySilenceMs = 180"));
+        assert!(html.contains("function concatPcmChunksWithBoundarySilence"));
+        assert!(html.contains("function concatWavChunksWithBoundarySilence"));
         assert!(html.contains("function synthesizeGoogle"));
         assert!(html.contains("async function fetchGoogleAudio"));
         assert!(html.contains("function wavBlobFromPcm"));
+        assert!(html.contains(
+            "return concatWavChunksWithBoundarySilence(audios.map((audio) => audio.bytes));"
+        ));
         assert!(html.contains("function synthesizeElevenLabs"));
         assert!(html.contains("async function synthesizeElevenLabsSingle"));
         assert!(html.contains("rawPcm = false"));
@@ -3764,7 +3849,7 @@ mod tests {
             html.contains("synthesizeElevenLabsSingle(config, chunk, persona, outputFormat, true)")
         );
         assert!(html.contains(
-            "wavBlobFromPcm(concatUint8Arrays(parts), elevenLabsSampleRate(outputFormat))"
+            "wavBlobFromPcm(concatPcmChunksWithBoundarySilence(parts, sampleRate), sampleRate)"
         ));
         assert!(html.contains("Emotion prep failed"));
         assert!(html.contains("function generateViaServer"));

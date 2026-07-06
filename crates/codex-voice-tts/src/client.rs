@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use bytes::BytesMut;
 use codex_voice_core::{
     SpeechClient, SpeechError, SpeechFormat, SpeechRequest, SpeechResult, SynthesizedSpeech,
 };
@@ -9,7 +8,7 @@ use crate::config::{
     FallbackPolicy, ProviderKind, ResolvedPersona, ResolvedTtsConfig, SpeechPrepMode,
     SpeechPrepStrategy,
 };
-use crate::convert::{concatenate_wav_chunks, convert_speech};
+use crate::convert::{concatenate_pcm_chunks, concatenate_wav_chunks, convert_speech};
 use crate::elevenlabs::ElevenLabsSpeechClient;
 use crate::google::GoogleSpeechClient;
 use crate::speech_prep::{SpeechPrepClient, SpeechPrepContext, SpeechPrepOutput, SpeechPrepTarget};
@@ -426,24 +425,10 @@ impl ConfiguredSpeechClient {
 
         match chunk_format {
             SpeechFormat::Wav => concatenate_wav_chunks(synthesized_chunks).await,
-            SpeechFormat::Pcm | SpeechFormat::Mp3 => {
-                let mut bytes = BytesMut::new();
-                for chunk in synthesized_chunks {
-                    if chunk.format != chunk_format {
-                        return Err(SpeechError::Request(format!(
-                            "cannot concatenate non-{} speech chunk",
-                            chunk_format.to_openai()
-                        )));
-                    }
-                    bytes.extend_from_slice(&chunk.bytes);
-                }
+            SpeechFormat::Pcm => concatenate_pcm_chunks(synthesized_chunks).await,
+            SpeechFormat::Mp3 => {
                 convert_speech(
-                    SynthesizedSpeech {
-                        bytes: bytes.freeze(),
-                        format: chunk_format,
-                        mime_type: synthesized_chunk_mime_type(chunk_format).to_string(),
-                        prepared_input: None,
-                    },
+                    concatenate_encoded_chunks(synthesized_chunks, chunk_format)?,
                     request.format,
                 )
                 .await
@@ -458,6 +443,28 @@ fn synthesized_chunk_mime_type(format: SpeechFormat) -> &'static str {
         SpeechFormat::Pcm => "audio/L16;codec=pcm;rate=24000",
         _ => format.mime_type(),
     }
+}
+
+fn concatenate_encoded_chunks(
+    chunks: Vec<SynthesizedSpeech>,
+    format: SpeechFormat,
+) -> SpeechResult<SynthesizedSpeech> {
+    let mut bytes = bytes::BytesMut::new();
+    for chunk in chunks {
+        if chunk.format != format {
+            return Err(SpeechError::Request(format!(
+                "cannot concatenate non-{} speech chunk",
+                format.to_openai()
+            )));
+        }
+        bytes.extend_from_slice(&chunk.bytes);
+    }
+    Ok(SynthesizedSpeech {
+        bytes: bytes.freeze(),
+        format,
+        mime_type: synthesized_chunk_mime_type(format).to_string(),
+        prepared_input: None,
+    })
 }
 
 fn speech_prep_fit_limit(provider_limit: usize) -> usize {

@@ -6,8 +6,9 @@ use codex_voice_core::{SpeechError, SpeechFormat, SpeechResult, SynthesizedSpeec
 use tokio::{io::AsyncWriteExt, process::Command, time};
 
 const FFMPEG_CONVERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CHUNK_BOUNDARY_SILENCE_MS: u32 = 180;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PcmSpec {
     sample_rate: u32,
     channels: u16,
@@ -34,6 +35,14 @@ pub async fn concatenate_wav_chunks(
     tokio::task::spawn_blocking(move || concatenate_wav_chunks_blocking(chunks))
         .await
         .map_err(|e| SpeechError::Request(format!("WAV concat task failed: {e}")))?
+}
+
+pub async fn concatenate_pcm_chunks(
+    chunks: Vec<SynthesizedSpeech>,
+) -> SpeechResult<SynthesizedSpeech> {
+    tokio::task::spawn_blocking(move || concatenate_pcm_chunks_blocking(chunks))
+        .await
+        .map_err(|e| SpeechError::Request(format!("PCM concat task failed: {e}")))?
 }
 
 fn concatenate_wav_chunks_blocking(
@@ -77,6 +86,9 @@ fn concatenate_wav_chunks_blocking(
                     "cannot concatenate WAV chunk {index} with mismatched spec"
                 )));
             }
+            if index > 0 {
+                write_wav_silence(&mut writer, spec, index)?;
+            }
             for sample in reader.samples::<i16>() {
                 writer
                     .write_sample(sample.map_err(|e| {
@@ -98,6 +110,76 @@ fn concatenate_wav_chunks_blocking(
         mime_type: SpeechFormat::Wav.mime_type().to_string(),
         prepared_input: None,
     })
+}
+
+fn write_wav_silence<W: std::io::Write + std::io::Seek>(
+    writer: &mut hound::WavWriter<W>,
+    spec: hound::WavSpec,
+    chunk_index: usize,
+) -> SpeechResult<()> {
+    let frames = (u64::from(spec.sample_rate) * u64::from(CHUNK_BOUNDARY_SILENCE_MS)) / 1_000;
+    let samples = frames.saturating_mul(u64::from(spec.channels));
+    for _ in 0..samples {
+        writer.write_sample(0_i16).map_err(|e| {
+            SpeechError::Request(format!(
+                "failed to write WAV boundary silence before chunk {chunk_index}: {e}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn concatenate_pcm_chunks_blocking(
+    chunks: Vec<SynthesizedSpeech>,
+) -> SpeechResult<SynthesizedSpeech> {
+    let first = chunks
+        .first()
+        .ok_or_else(|| SpeechError::Request("cannot concatenate zero PCM chunks".into()))?;
+    if first.format != SpeechFormat::Pcm {
+        return Err(SpeechError::Request(
+            "cannot concatenate non-PCM speech chunks".into(),
+        ));
+    }
+
+    let spec = parse_pcm_spec(&first.mime_type);
+    let silence = boundary_silence_bytes(spec);
+    let capacity = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>()
+        + silence.len().saturating_mul(chunks.len().saturating_sub(1));
+    let mut bytes = Vec::with_capacity(capacity);
+    let mime_type = first.mime_type.clone();
+
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        if chunk.format != SpeechFormat::Pcm {
+            return Err(SpeechError::Request(format!(
+                "cannot concatenate non-PCM speech chunk {index}"
+            )));
+        }
+        if parse_pcm_spec(&chunk.mime_type) != spec {
+            return Err(SpeechError::Request(format!(
+                "cannot concatenate PCM chunk {index} with mismatched spec"
+            )));
+        }
+        if index > 0 {
+            bytes.extend_from_slice(&silence);
+        }
+        bytes.extend_from_slice(&chunk.bytes);
+    }
+
+    pcm_to_wav(SynthesizedSpeech {
+        bytes: Bytes::from(bytes),
+        format: SpeechFormat::Pcm,
+        mime_type,
+        prepared_input: None,
+    })
+}
+
+fn boundary_silence_bytes(spec: PcmSpec) -> Vec<u8> {
+    let frames = (u64::from(spec.sample_rate) * u64::from(CHUNK_BOUNDARY_SILENCE_MS)) / 1_000;
+    let bytes = frames
+        .saturating_mul(u64::from(spec.channels))
+        .saturating_mul(2)
+        .min(usize::MAX as u64) as usize;
+    vec![0; bytes]
 }
 
 async fn pcm_to_wav_blocking(speech: SynthesizedSpeech) -> SpeechResult<SynthesizedSpeech> {
@@ -319,6 +401,27 @@ mod tests {
         }
     }
 
+    fn test_pcm(samples: &[i16]) -> SynthesizedSpeech {
+        let mut bytes = Vec::with_capacity(samples.len() * 2);
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        SynthesizedSpeech {
+            bytes: Bytes::from(bytes),
+            format: SpeechFormat::Pcm,
+            mime_type: "audio/L16;codec=pcm;rate=24000".to_string(),
+            prepared_input: None,
+        }
+    }
+
+    fn read_wav_samples(speech: SynthesizedSpeech) -> Vec<i16> {
+        let mut reader = hound::WavReader::new(Cursor::new(speech.bytes)).unwrap();
+        reader
+            .samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn wraps_pcm_as_wav() {
         let speech = SynthesizedSpeech {
@@ -337,17 +440,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concatenates_wav_chunks() {
+    async fn concatenates_wav_chunks_with_boundary_silence() {
         let combined = concatenate_wav_chunks(vec![test_wav(&[1, 2]), test_wav(&[3, 4])])
             .await
             .unwrap();
-        let mut reader = hound::WavReader::new(Cursor::new(combined.bytes)).unwrap();
-        let samples = reader
-            .samples::<i16>()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let samples = read_wav_samples(combined.clone());
+        let silence_samples = (24_000 * CHUNK_BOUNDARY_SILENCE_MS / 1_000) as usize;
 
         assert_eq!(combined.format, SpeechFormat::Wav);
-        assert_eq!(samples, vec![1, 2, 3, 4]);
+        assert_eq!(&samples[..2], &[1, 2]);
+        assert!(samples[2..2 + silence_samples]
+            .iter()
+            .all(|sample| *sample == 0));
+        assert_eq!(&samples[2 + silence_samples..], &[3, 4]);
+    }
+
+    #[tokio::test]
+    async fn concatenates_pcm_chunks_with_boundary_silence() {
+        let combined = concatenate_pcm_chunks(vec![test_pcm(&[1, 2]), test_pcm(&[3, 4])])
+            .await
+            .unwrap();
+        let samples = read_wav_samples(combined.clone());
+        let silence_samples = (24_000 * CHUNK_BOUNDARY_SILENCE_MS / 1_000) as usize;
+
+        assert_eq!(combined.format, SpeechFormat::Wav);
+        assert_eq!(&samples[..2], &[1, 2]);
+        assert!(samples[2..2 + silence_samples]
+            .iter()
+            .all(|sample| *sample == 0));
+        assert_eq!(&samples[2 + silence_samples..], &[3, 4]);
     }
 }
