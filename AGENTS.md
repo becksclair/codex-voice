@@ -29,6 +29,7 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"
 - Keep crates small and boundary-focused; shared contracts live in `crates/codex-voice-core`.
 - Prefer typed errors in library crates and `anyhow::Result` only at app/CLI boundaries.
 - Keep generated/runtime artifacts out of git; `target/` is ignored.
+- For PWA/web assets, never reference immutable assets through bare stable URLs. If an asset route uses long-lived or `immutable` caching, every HTML, manifest, and service-worker precache reference must include the current build revision or another cache-busting content version.
 - Update `README.md` and `docs/execplan-rust-native-cross-platform.md` when command contracts change.
 - Preserve Linux-first scope until portal hotkey/paste proof is complete.
 

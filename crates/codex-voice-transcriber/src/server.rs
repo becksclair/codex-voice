@@ -48,15 +48,17 @@ const TTS_CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const TTS_CONFIG_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 const WEB_SW_BODY_JS: &str = r#"const SHELL_ASSETS = [
   '/web',
-  '/web/manifest.webmanifest',
-  '/web/icon-192.png',
-  '/web/icon-512.png',
-  '/web/icon-maskable-512.png',
-  '/web/apple-touch-icon.png'
+  `/web/manifest.webmanifest?v=${WEB_BUILD_REVISION}`,
+  `/web/manifest-light.webmanifest?v=${WEB_BUILD_REVISION}`,
+  `/web/icon-192.png?v=${WEB_BUILD_REVISION}`,
+  `/web/icon-512.png?v=${WEB_BUILD_REVISION}`,
+  `/web/icon-maskable-512.png?v=${WEB_BUILD_REVISION}`,
+  `/web/apple-touch-icon.png?v=${WEB_BUILD_REVISION}`
 ];
 const NETWORK_FIRST_ASSETS = new Set([
   '/web',
-  '/web/manifest.webmanifest'
+  '/web/manifest.webmanifest',
+  '/web/manifest-light.webmanifest'
 ]);
 const CACHE_FIRST_ASSETS = new Set([
   '/web/icon-192.png',
@@ -139,27 +141,176 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="theme-color" content="#101214">
+  <meta name="theme-color" content="#17091f">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Codex Voice">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <link rel="manifest" href="/web/manifest.webmanifest">
-  <link rel="icon" type="image/png" sizes="192x192" href="/web/icon-192.png">
-  <link rel="icon" type="image/png" sizes="512x512" href="/web/icon-512.png">
-  <link rel="apple-touch-icon" href="/web/apple-touch-icon.png">
+  <link rel="manifest" href="__WEB_MANIFEST_URL__" data-manifest-dark="__WEB_MANIFEST_URL__" data-manifest-light="__WEB_MANIFEST_LIGHT_URL__">
+  <link rel="icon" type="image/png" sizes="192x192" href="__WEB_ICON_192_URL__">
+  <link rel="icon" type="image/png" sizes="512x512" href="__WEB_ICON_512_URL__">
+  <link rel="apple-touch-icon" href="__WEB_APPLE_TOUCH_ICON_URL__">
   <title>Codex Voice</title>
+  <script>
+    (() => {
+      const darkThemeColor = '#17091f';
+      const lightThemeColor = '#f3dff1';
+      const setManifest = (resolved) => {
+        const manifest = document.querySelector('link[rel="manifest"]');
+        if (!manifest) return;
+        manifest.href = resolved === 'light'
+          ? manifest.dataset.manifestLight || manifest.href
+          : manifest.dataset.manifestDark || manifest.href;
+      };
+      try {
+        const raw = localStorage.getItem('codex-voice.web.settings.v1');
+        const preference = raw ? JSON.parse(raw).theme || 'auto' : 'auto';
+        const resolved = preference === 'dark' || preference === 'light'
+          ? preference
+          : (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.dataset.theme = resolved;
+        document.querySelector('meta[name="theme-color"]')?.setAttribute(
+          'content',
+          resolved === 'light' ? lightThemeColor : darkThemeColor
+        );
+        setManifest(resolved);
+      } catch (_) {
+        document.documentElement.dataset.theme = 'dark';
+        setManifest('dark');
+      }
+    })();
+  </script>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #101214;
-      --panel: #191d21;
-      --text: #f2f5f7;
-      --muted: #a8b0b8;
-      --line: #30363d;
-      --accent: #5dc7b7;
-      --accent-strong: #78e0d0;
-      --danger: #ff8f8f;
+      --bg: #17091f;
+      --panel: #24122f;
+      --panel-soft: #2d1638;
+      --panel-strong: #4a1d51;
+      --text: #f6eaf4;
+      --muted: #b79bb8;
+      --line: #55315f;
+      --accent: #ee5ea5;
+      --accent-strong: #ff73b5;
+      --mint: #64e2bd;
+      --danger: #ff9aab;
+      --theme-color: #17091f;
+      --icon-shadow: 0 4px 12px rgba(238, 94, 165, 0.18);
+      --count-color: rgba(255, 255, 255, 0.9);
+      --count-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.46),
+        0 -1px 0 rgba(66, 27, 80, 0.72),
+        0 0 4px rgba(255, 255, 255, 0.48),
+        0 0 12px rgba(210, 230, 255, 0.36),
+        0 0 18px rgba(238, 94, 165, 0.22);
+      --control-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 20px rgba(0, 0, 0, 0.18);
+      --error-border: rgba(255, 154, 171, 0.42);
+      --error-text: #ffdce5;
+      --error-bg: rgba(92, 23, 49, 0.58);
+      --focus-ring: rgba(238, 94, 165, 0.2);
+      --overlay-color: rgba(255, 239, 248, 0.96);
+      --overlay-bg: linear-gradient(135deg, rgba(255, 124, 190, 0.04), rgba(50, 20, 63, 0.06));
+      --overlay-border: rgba(255, 184, 221, 0.08);
+      --overlay-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.06),
+        0 10px 24px rgba(238, 94, 165, 0.12),
+        0 8px 24px rgba(0, 0, 0, 0.16);
+      --overlay-hover-bg: linear-gradient(135deg, rgba(255, 124, 190, 0.08), rgba(50, 20, 63, 0.1));
+      --overlay-hover-border: rgba(255, 184, 221, 0.12);
+      --overlay-active-bg: linear-gradient(135deg, rgba(255, 124, 190, 0.06), rgba(50, 20, 63, 0.12));
+      --overlay-active-shadow:
+        inset 0 1px 2px rgba(0, 0, 0, 0.12),
+        0 8px 20px rgba(238, 94, 165, 0.1),
+        0 4px 14px rgba(0, 0, 0, 0.12);
+      --glass-button-color: rgba(255, 250, 253, 0.98);
+      --glass-button-bg:
+        radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 0.92), transparent 34%),
+        linear-gradient(145deg, rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0.32) 52%, rgba(255, 255, 255, 0.18));
+      --glass-button-border: rgba(255, 255, 255, 0.66);
+      --glass-button-shadow:
+        inset 0 1px 1px rgba(255, 255, 255, 0.86),
+        inset 0 -14px 18px rgba(255, 255, 255, 0.11),
+        0 14px 30px rgba(238, 94, 165, 0.18),
+        0 8px 24px rgba(0, 0, 0, 0.18);
+      --glass-button-hover-bg:
+        radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 0.98), transparent 36%),
+        linear-gradient(145deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.38) 52%, rgba(255, 255, 255, 0.22));
+      --glass-button-hover-border: rgba(255, 255, 255, 0.76);
+      --button-text: #fff7fb;
+      --button-shadow: 0 10px 24px rgba(238, 94, 165, 0.22);
+      --secondary-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 20px rgba(0, 0, 0, 0.16);
+      --spinner-ring: rgba(255, 247, 251, 0.34);
+      --spinner-top: #fff7fb;
+      --progress-track: rgba(74, 29, 81, 0.36);
+      --progress-fill: var(--panel-strong);
+      --settings-bg: rgba(36, 18, 47, 0.72);
+      --settings-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f3dff1;
+      --panel: #fbf6fb;
+      --panel-soft: #f4c6df;
+      --panel-strong: #f0b9d7;
+      --text: #3a1735;
+      --muted: #876f85;
+      --line: #d7bdd4;
+      --accent: #e53786;
+      --accent-strong: #f0529d;
+      --mint: #078d70;
+      --danger: #b73f5b;
+      --theme-color: #f3dff1;
+      --icon-shadow: 0 4px 14px rgba(229, 55, 134, 0.16);
+      --count-color: rgba(58, 23, 53, 0.78);
+      --count-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.84),
+        0 -1px 0 rgba(131, 83, 126, 0.22),
+        0 0 5px rgba(255, 255, 255, 0.62),
+        0 0 14px rgba(229, 55, 134, 0.18);
+      --control-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74), 0 8px 20px rgba(103, 50, 89, 0.12);
+      --error-border: rgba(183, 63, 91, 0.22);
+      --error-text: #8e2941;
+      --error-bg: rgba(255, 230, 237, 0.78);
+      --focus-ring: rgba(229, 55, 134, 0.18);
+      --overlay-color: rgba(58, 23, 53, 0.88);
+      --overlay-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.32), rgba(240, 185, 215, 0.18));
+      --overlay-border: rgba(183, 126, 169, 0.2);
+      --overlay-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.52),
+        inset 0 -1px 0 rgba(151, 86, 137, 0.08),
+        0 10px 24px rgba(229, 55, 134, 0.12),
+        0 8px 22px rgba(103, 50, 89, 0.14);
+      --overlay-hover-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.44), rgba(240, 185, 215, 0.24));
+      --overlay-hover-border: rgba(183, 126, 169, 0.26);
+      --overlay-active-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.24), rgba(240, 185, 215, 0.3));
+      --overlay-active-shadow:
+        inset 0 1px 2px rgba(151, 86, 137, 0.12),
+        0 8px 20px rgba(229, 55, 134, 0.1),
+        0 4px 14px rgba(103, 50, 89, 0.12);
+      --glass-button-color: rgba(58, 23, 53, 0.84);
+      --glass-button-bg:
+        radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 0.98), transparent 36%),
+        linear-gradient(145deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.7) 52%, rgba(255, 255, 255, 0.48));
+      --glass-button-border: rgba(255, 255, 255, 0.9);
+      --glass-button-shadow:
+        inset 0 1px 1px rgba(255, 255, 255, 0.98),
+        inset 0 -14px 18px rgba(238, 214, 230, 0.22),
+        0 12px 24px rgba(229, 55, 134, 0.16),
+        0 8px 22px rgba(103, 50, 89, 0.14);
+      --glass-button-hover-bg:
+        radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 1), transparent 38%),
+        linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.78) 52%, rgba(255, 255, 255, 0.56));
+      --glass-button-hover-border: rgba(255, 255, 255, 0.98);
+      --button-text: #fff7fb;
+      --button-shadow: 0 10px 22px rgba(229, 55, 134, 0.22);
+      --secondary-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), 0 8px 20px rgba(103, 50, 89, 0.11);
+      --spinner-ring: rgba(255, 247, 251, 0.42);
+      --spinner-top: #fff7fb;
+      --progress-track: rgba(240, 185, 215, 0.62);
+      --progress-fill: #8d397f;
+      --settings-bg: rgba(251, 246, 251, 0.78);
+      --settings-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78), 0 8px 24px rgba(103, 50, 89, 0.08);
     }
     * { box-sizing: border-box; }
     html, body {
@@ -179,8 +330,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       min-height: 0;
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      padding: max(10px, env(safe-area-inset-top)) 16px max(18px, env(safe-area-inset-bottom));
+      gap: 12px;
+      padding: max(12px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
       max-width: 760px;
       margin: 0 auto;
       overflow: hidden;
@@ -193,14 +344,17 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       gap: 10px;
     }
     .app-icon {
-      width: 24px;
-      height: 24px;
+      width: 14px;
+      height: 14px;
       display: block;
-      border-radius: 5px;
+      border-radius: 4px;
+      box-shadow: var(--icon-shadow);
     }
     #count {
-      color: var(--muted);
-      font-size: 0.78rem;
+      color: var(--count-color);
+      font-size: 0.76rem;
+      font-weight: 600;
+      text-shadow: var(--count-shadow);
       white-space: nowrap;
     }
     .header-actions {
@@ -217,8 +371,12 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       align-items: center;
       justify-content: center;
       color: var(--text);
-      background: #252b31;
+      background: var(--panel-strong);
       border: 1px solid var(--line);
+      border-radius: 999px;
+      box-shadow: var(--control-shadow);
+      backdrop-filter: blur(10px) saturate(1.25);
+      -webkit-backdrop-filter: blur(10px) saturate(1.25);
     }
     .icon-button svg,
     button svg {
@@ -236,10 +394,10 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       min-height: 44px;
       align-items: center;
       padding: 10px 12px;
-      border: 1px solid rgba(255, 143, 143, 0.45);
-      border-radius: 8px;
-      color: #ffd4d4;
-      background: rgba(120, 38, 38, 0.34);
+      border: 1px solid var(--error-border);
+      border-radius: 16px;
+      color: var(--error-text);
+      background: var(--error-bg);
       font-size: 0.95rem;
     }
     .error-banner.visible { display: flex; }
@@ -248,57 +406,60 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       flex: 1 1 auto;
       display: flex;
       min-height: 260px;
+      --text-edge-pad: 8px;
+      --text-button-clearance: 126px;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--panel);
+      overflow: hidden;
     }
     textarea {
       flex: 1 1 auto;
       width: 100%;
-      height: auto;
+      height: 100%;
       min-height: 0;
       resize: none;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 16px;
-      background: var(--panel);
+      border: 0;
+      border-radius: 0;
+      padding: var(--text-edge-pad) 16px calc(var(--text-button-clearance) + var(--text-edge-pad));
+      scroll-padding: var(--text-edge-pad) 16px calc(var(--text-button-clearance) + var(--text-edge-pad));
+      background: transparent;
       color: var(--text);
       font: inherit;
-      font-size: 1.08rem;
+      font-size: 0.94rem;
       line-height: 1.45;
       outline: none;
     }
-    textarea:focus {
+    .text-shell:focus-within {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(93, 199, 183, 0.18);
+      box-shadow: 0 0 0 3px var(--focus-ring);
     }
     #paste {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-    }
-    #clear {
       position: absolute;
       right: 10px;
       bottom: 10px;
     }
+    #clear {
+      position: absolute;
+      right: 10px;
+      bottom: 70px;
+    }
     .text-shell .icon-button {
-      color: rgba(239, 244, 243, 0.94);
-      background: linear-gradient(135deg, rgba(255, 255, 255, 0.18), rgba(18, 24, 28, 0.26));
-      border: 1px solid rgba(255, 255, 255, 0.22);
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.22),
-        inset 0 -1px 0 rgba(0, 0, 0, 0.16),
-        0 8px 22px rgba(0, 0, 0, 0.24);
-      backdrop-filter: blur(18px) saturate(1.6);
-      -webkit-backdrop-filter: blur(18px) saturate(1.6);
+      color: var(--overlay-color);
+      background: var(--overlay-bg);
+      border: 1px solid var(--overlay-border);
+      box-shadow: var(--overlay-shadow);
+      backdrop-filter: blur(6px) saturate(1.25);
+      -webkit-backdrop-filter: blur(6px) saturate(1.25);
     }
     .text-shell .icon-button:hover {
-      background: linear-gradient(135deg, rgba(255, 255, 255, 0.24), rgba(18, 24, 28, 0.32));
-      border-color: rgba(255, 255, 255, 0.28);
+      background: var(--overlay-hover-bg);
+      border-color: var(--overlay-hover-border);
     }
     .text-shell .icon-button:active {
-      background: linear-gradient(135deg, rgba(255, 255, 255, 0.14), rgba(18, 24, 28, 0.36));
-      box-shadow:
-        inset 0 1px 2px rgba(0, 0, 0, 0.24),
-        0 4px 14px rgba(0, 0, 0, 0.2);
+      background: var(--overlay-active-bg);
+      box-shadow: var(--overlay-active-shadow);
     }
     #clear[hidden] { display: none; }
     .controls {
@@ -308,30 +469,63 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     }
     .buttons {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) repeat(3, 44px);
+      grid-template-columns: minmax(0, 1fr) 20px repeat(3, 44px);
       align-items: center;
-      gap: 8px;
+      gap: 8px 12px;
+    }
+    #play {
+      grid-column: 3;
     }
     button {
       min-height: 44px;
       padding: 0 10px;
       border: 0;
-      border-radius: 8px;
-      color: #081110;
+      border-radius: 18px;
+      color: var(--button-text);
       background: var(--accent);
       font: inherit;
       font-size: 0.98rem;
       font-weight: 700;
       cursor: pointer;
       touch-action: manipulation;
+      box-shadow: var(--button-shadow);
     }
     .buttons button {
       height: 44px;
     }
     button.secondary {
       color: var(--text);
-      background: #252b31;
+      background: var(--panel-strong);
       border: 1px solid var(--line);
+      box-shadow: var(--secondary-shadow);
+    }
+    .buttons .icon-button {
+      position: relative;
+      overflow: hidden;
+      color: var(--glass-button-color);
+      background: var(--glass-button-bg);
+      border-color: var(--glass-button-border);
+      box-shadow: var(--glass-button-shadow);
+      backdrop-filter: blur(18px) saturate(1.65);
+      -webkit-backdrop-filter: blur(18px) saturate(1.65);
+    }
+    .buttons .icon-button::after {
+      content: "";
+      position: absolute;
+      inset: 1px 1px auto 1px;
+      height: 45%;
+      border-radius: inherit;
+      background: linear-gradient(rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0));
+      pointer-events: none;
+    }
+    .buttons .icon-button svg {
+      position: relative;
+      z-index: 1;
+      filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.2));
+    }
+    .buttons .icon-button:hover {
+      background: var(--glass-button-hover-bg);
+      border-color: var(--glass-button-hover-border);
     }
     #generate {
       position: relative;
@@ -353,8 +547,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       display: none;
       width: 18px;
       height: 18px;
-      border: 2px solid rgba(8, 17, 16, 0.28);
-      border-top-color: #081110;
+      border: 2px solid var(--spinner-ring);
+      border-top-color: var(--spinner-top);
       border-radius: 999px;
       animation: spin 0.8s linear infinite;
     }
@@ -365,14 +559,14 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       right: 0;
       bottom: 0;
       height: 3px;
-      background: rgba(8, 17, 16, 0.22);
+      background: var(--progress-track);
       overflow: hidden;
     }
     .generate-progress span {
       display: block;
       width: calc(var(--generate-progress, 0) * 100%);
       height: 100%;
-      background: #081110;
+      background: var(--progress-fill);
       transition: width 180ms ease;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -382,7 +576,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     }
     input[type="range"] {
       width: 100%;
-      accent-color: var(--accent-strong);
+      accent-color: var(--accent);
     }
     .scrubber {
       display: grid;
@@ -396,8 +590,9 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     }
     .settings {
       border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(25, 29, 33, 0.72);
+      border-radius: 22px;
+      background: var(--settings-bg);
+      box-shadow: var(--settings-shadow);
     }
     .settings[hidden] {
       display: none;
@@ -417,9 +612,9 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       min-height: 42px;
       width: 100%;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 16px;
       padding: 0 10px;
-      background: #252b31;
+      background: var(--panel-soft);
       color: var(--text);
       font: inherit;
     }
@@ -435,15 +630,15 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       gap: 8px;
       padding: 0 10px;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 999px;
       color: var(--text);
-      background: #252b31;
+      background: var(--panel-soft);
       font-weight: 650;
     }
     .toggle input {
       width: 18px;
       height: 18px;
-      accent-color: var(--accent-strong);
+      accent-color: var(--mint);
     }
     html.keyboard-open main {
       padding-bottom: max(10px, env(safe-area-inset-bottom));
@@ -459,7 +654,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
 <body>
   <main>
     <header>
-      <img class="app-icon" src="/web/icon-192.png" alt="Codex Voice">
+      <img class="app-icon" src="__WEB_ICON_192_URL__" alt="Codex Voice">
       <div class="header-actions">
         <span id="count">0 chars</span>
       </div>
@@ -509,6 +704,14 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
             Model
             <select id="model"></select>
           </label>
+          <label class="field">
+            Theme
+            <select id="theme">
+              <option value="auto">Auto</option>
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </label>
           <div class="toggles">
             <label class="toggle">
               <input id="emotion" type="checkbox">
@@ -537,6 +740,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     const providerSelect = document.getElementById('provider');
     const voiceSelect = document.getElementById('voice');
     const modelSelect = document.getElementById('model');
+    const themeSelect = document.getElementById('theme');
     const emotion = document.getElementById('emotion');
     const summarize = document.getElementById('summarize');
     const seek = document.getElementById('seek');
@@ -557,6 +761,9 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     const performanceTagsAbsoluteMaxOutputTokens = 4096;
     const minShortenOutputChars = 4000;
     const speechModelHint = 'gpt-4o-mini-tts';
+    const darkThemeColor = '#17091f';
+    const lightThemeColor = '#f3dff1';
+    const themeMedia = window.matchMedia?.('(prefers-color-scheme: light)') || null;
     let audio = new Audio();
     let objectUrl = null;
     let currentAudioBlob = null;
@@ -568,6 +775,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     let generationActive = false;
     let lifecycleInterruptedGeneration = false;
     let activeStreamPlayback = null;
+    applyThemeSetting(settings.theme);
 
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
@@ -660,6 +868,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         provider: 'auto',
         voice: 'default',
         model: 'default',
+        theme: 'auto',
         emotionPreprocessing: true,
         summarization: false
       };
@@ -675,10 +884,12 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         provider: providerSelect.value || 'auto',
         voice: voiceSelect.value || 'default',
         model: modelSelect.value || 'default',
+        theme: themeSelect.value || 'auto',
         emotionPreprocessing: emotion.checked,
         summarization: summarize.checked
       };
       localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
+      applyThemeSetting(settings.theme);
     }
 
     function option(value, label) {
@@ -692,8 +903,28 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       providerSelect.value = settings.provider;
       voiceSelect.value = settings.voice;
       modelSelect.value = settings.model;
+      themeSelect.value = settings.theme || 'auto';
       emotion.checked = settings.emotionPreprocessing;
       summarize.checked = settings.summarization;
+    }
+
+    function resolvedTheme(preference = settings.theme || 'auto') {
+      if (preference === 'dark' || preference === 'light') return preference;
+      return themeMedia?.matches ? 'light' : 'dark';
+    }
+
+    function applyThemeSetting(preference = settings.theme || 'auto') {
+      const resolved = resolvedTheme(preference);
+      document.documentElement.dataset.theme = resolved;
+      document
+        .querySelector('meta[name="theme-color"]')
+        ?.setAttribute('content', resolved === 'light' ? lightThemeColor : darkThemeColor);
+      const manifest = document.querySelector('link[rel="manifest"]');
+      if (manifest) {
+        manifest.href = resolved === 'light'
+          ? manifest.dataset.manifestLight || manifest.href
+          : manifest.dataset.manifestDark || manifest.href;
+      }
     }
 
     function personaEntries(config) {
@@ -2934,8 +3165,18 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     providerSelect.addEventListener('change', populateSettings);
     voiceSelect.addEventListener('change', saveSettings);
     modelSelect.addEventListener('change', saveSettings);
+    themeSelect.addEventListener('change', saveSettings);
     emotion.addEventListener('change', saveSettings);
     summarize.addEventListener('change', saveSettings);
+    function handleThemeMediaChange() {
+      if ((settings.theme || 'auto') === 'auto') applyThemeSetting('auto');
+    }
+
+    if (themeMedia?.addEventListener) {
+      themeMedia.addEventListener('change', handleThemeMediaChange);
+    } else if (themeMedia?.addListener) {
+      themeMedia.addListener(handleThemeMediaChange);
+    }
 
     settingsToggle.addEventListener('click', () => {
       const open = settingsPanel.hasAttribute('hidden');
@@ -3617,6 +3858,7 @@ fn service_router(state: ServiceState) -> Router {
         .route("/web", get(web_app))
         .route("/web/config", get(web_config))
         .route("/web/manifest.webmanifest", get(web_manifest))
+        .route("/web/manifest-light.webmanifest", get(web_manifest_light))
         .route("/web-sw.js", get(web_service_worker))
         .route("/web/icon-192.png", get(web_icon_192))
         .route("/web/icon-512.png", get(web_icon_512))
@@ -3675,8 +3917,32 @@ async fn transcribe(
     })
 }
 
-async fn web_app() -> Html<&'static str> {
-    Html(WEB_APP_HTML)
+async fn web_app() -> Html<String> {
+    Html(web_app_body())
+}
+
+fn web_app_body() -> String {
+    WEB_APP_HTML
+        .replace(
+            "__WEB_MANIFEST_URL__",
+            &versioned_web_asset("/web/manifest.webmanifest"),
+        )
+        .replace(
+            "__WEB_MANIFEST_LIGHT_URL__",
+            &versioned_web_asset("/web/manifest-light.webmanifest"),
+        )
+        .replace(
+            "__WEB_ICON_192_URL__",
+            &versioned_web_asset("/web/icon-192.png"),
+        )
+        .replace(
+            "__WEB_ICON_512_URL__",
+            &versioned_web_asset("/web/icon-512.png"),
+        )
+        .replace(
+            "__WEB_APPLE_TOUCH_ICON_URL__",
+            &versioned_web_asset("/web/apple-touch-icon.png"),
+        )
 }
 
 async fn web_config(State(state): State<ServiceState>) -> Result<impl IntoResponse, ApiError> {
@@ -3710,7 +3976,7 @@ fn versioned_web_asset(path: &str) -> String {
     format!("{path}?v={WEB_BUILD_REVISION}")
 }
 
-fn web_manifest_body() -> String {
+fn web_manifest_body(background_color: &str, theme_color: &str) -> String {
     serde_json::json!({
         "name": "Codex Voice",
         "short_name": "Voice",
@@ -3719,8 +3985,8 @@ fn web_manifest_body() -> String {
         "start_url": "/web",
         "scope": "/web",
         "display": "standalone",
-        "background_color": "#101214",
-        "theme_color": "#101214",
+        "background_color": background_color,
+        "theme_color": theme_color,
         "version": web_build_version(),
         "build_revision": WEB_BUILD_REVISION,
         "icons": [
@@ -3760,7 +4026,17 @@ async fn web_manifest() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/manifest+json"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        web_manifest_body(),
+        web_manifest_body("#17091f", "#17091f"),
+    )
+}
+
+async fn web_manifest_light() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/manifest+json"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        web_manifest_body("#f3dff1", "#f3dff1"),
     )
 }
 
@@ -4432,13 +4708,18 @@ mod tests {
             r#"<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">"#
         ));
         assert!(html.contains("<textarea id=\"text\""));
-        assert!(
-            html.contains(r#"<img class="app-icon" src="/web/icon-192.png" alt="Codex Voice">"#)
-        );
+        assert!(html.contains(&format!(
+            r#"<img class="app-icon" src="{}" alt="Codex Voice">"#,
+            versioned_web_asset("/web/icon-192.png")
+        )));
         assert!(!html.contains("<h1>Codex Voice</h1>"));
         assert!(html.contains("id=\"provider\""));
         assert!(html.contains("id=\"voice\""));
         assert!(html.contains("id=\"model\""));
+        assert!(html.contains("id=\"theme\""));
+        assert!(html.contains("<option value=\"auto\">Auto</option>"));
+        assert!(html.contains("<option value=\"dark\">Dark</option>"));
+        assert!(html.contains("<option value=\"light\">Light</option>"));
         assert!(html.contains("id=\"emotion\""));
         assert!(html.contains("id=\"summarize\""));
         assert!(html.contains("id=\"generate\""));
@@ -4452,8 +4733,16 @@ mod tests {
         assert!(!html.contains("id=\"status\""));
         assert!(html.contains("codex-voice.web.config.v1"));
         assert!(html.contains("codex-voice.web.settings.v1"));
+        assert!(html
+            .contains("const themeMedia = window.matchMedia?.('(prefers-color-scheme: light)')"));
+        assert!(html.contains("function applyThemeSetting"));
+        assert!(html.contains("themeSelect.addEventListener('change', saveSettings)"));
+        assert!(html.contains("function handleThemeMediaChange()"));
+        assert!(html.contains("themeMedia.addEventListener('change', handleThemeMediaChange)"));
+        assert!(html.contains("themeMedia.addListener(handleThemeMediaChange)"));
         assert!(html.contains("emotionPreprocessing"));
         assert!(html.contains("summarization"));
+        assert!(html.contains("theme: 'auto'"));
         assert!(html.contains("function providerCanGenerate"));
         assert!(html.contains("function firstPersonaForProvider"));
         assert!(html.contains("personaSupportsProvider(persona, providerSelect.value)"));
@@ -4676,11 +4965,36 @@ mod tests {
         ));
         assert!(html.contains("Configured emotion prep is server-only."));
         assert!(html.contains("'/web/speech-jobs'"));
-        assert!(html.contains(r#"<link rel="manifest" href="/web/manifest.webmanifest">"#));
-        assert!(html.contains(r##"<meta name="theme-color" content="#101214">"##));
-        assert!(html.contains(r#"<link rel="apple-touch-icon" href="/web/apple-touch-icon.png">"#));
+        assert!(html.contains(&format!(
+            r#"<link rel="manifest" href="{}" data-manifest-dark="{}" data-manifest-light="{}">"#,
+            versioned_web_asset("/web/manifest.webmanifest"),
+            versioned_web_asset("/web/manifest.webmanifest"),
+            versioned_web_asset("/web/manifest-light.webmanifest")
+        )));
+        assert!(html.contains(r##"<meta name="theme-color" content="#17091f">"##));
+        assert!(html.contains("setManifest(resolved)"));
+        assert!(html.contains("const manifest = document.querySelector('link[rel=\"manifest\"]');"));
+        assert!(html.contains("manifest.dataset.manifestLight || manifest.href"));
+        assert!(html.contains("manifest.dataset.manifestDark || manifest.href"));
+        assert!(html.contains(&format!(
+            r#"<link rel="apple-touch-icon" href="{}">"#,
+            versioned_web_asset("/web/apple-touch-icon.png")
+        )));
         assert!(html.contains("navigator.serviceWorker.register('/web-sw.js'"));
         assert!(html.contains("updateViaCache: 'none'"));
+        assert!(html.contains(r#":root[data-theme="light"]"#));
+        assert!(html.contains("--bg: #f3dff1;"));
+        assert!(html.contains("--panel: #fbf6fb;"));
+        assert!(html.contains("--accent: #e53786;"));
+        assert!(html.contains("--text-edge-pad: 8px;"));
+        assert!(html.contains("--text-button-clearance: 126px;"));
+        assert!(html.contains(
+            "padding: var(--text-edge-pad) 16px calc(var(--text-button-clearance) + var(--text-edge-pad));"
+        ));
+        assert!(html.contains(
+            "scroll-padding: var(--text-edge-pad) 16px calc(var(--text-button-clearance) + var(--text-edge-pad));"
+        ));
+        assert!(html.contains("backdrop-filter: blur(18px) saturate(1.65);"));
     }
 
     #[tokio::test]
@@ -4976,8 +5290,8 @@ mod tests {
         assert_eq!(manifest["start_url"], "/web");
         assert_eq!(manifest["scope"], "/web");
         assert_eq!(manifest["display"], "standalone");
-        assert_eq!(manifest["theme_color"], "#101214");
-        assert_eq!(manifest["background_color"], "#101214");
+        assert_eq!(manifest["theme_color"], "#17091f");
+        assert_eq!(manifest["background_color"], "#17091f");
         assert_eq!(manifest["version"], web_build_version());
         assert_eq!(manifest["build_revision"], WEB_BUILD_REVISION);
         let icons = manifest["icons"].as_array().expect("icons array");
@@ -4996,6 +5310,25 @@ mod tests {
                 && icon["sizes"] == "512x512"
                 && icon["purpose"] == "maskable"
         }));
+
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/web/manifest-light.webmanifest")
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("manifest is valid json");
+        assert_eq!(manifest["theme_color"], "#f3dff1");
+        assert_eq!(manifest["background_color"], "#f3dff1");
     }
 
     #[tokio::test]
@@ -5039,8 +5372,12 @@ mod tests {
         assert!(script.contains("if (cached) return cached;"));
         assert!(script.contains("NETWORK_FIRST_ASSETS"));
         assert!(script.contains("'/web/manifest.webmanifest'"));
+        assert!(script.contains("'/web/manifest-light.webmanifest'"));
+        assert!(script.contains("`/web/manifest-light.webmanifest?v=${WEB_BUILD_REVISION}`"));
+        assert!(script.contains("`/web/icon-192.png?v=${WEB_BUILD_REVISION}`"));
+        assert!(script.contains("`/web/apple-touch-icon.png?v=${WEB_BUILD_REVISION}`"));
         assert!(script.contains("networkFirst(request, url.pathname)"));
-        assert!(script.contains("'/web/icon-maskable-512.png'"));
+        assert!(script.contains("`/web/icon-maskable-512.png?v=${WEB_BUILD_REVISION}`"));
     }
 
     #[tokio::test]
