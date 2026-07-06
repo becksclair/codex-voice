@@ -10,17 +10,21 @@ use base64::Engine;
 use bytes::Bytes;
 use codex_voice_codex::{CodexAuthService, CodexTranscriptionClient};
 use codex_voice_core::{SpeechClient, SpeechFormat, SpeechRequest, TranscriptionClient};
-use codex_voice_tts::config::{
-    ElevenLabsPersonaConfig, FallbackPolicy, GooglePersonaConfig, ProviderKind, ResolvedPersona,
-    ResolvedTtsConfig, SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies,
-    SpeechPrepStrategy,
+use codex_voice_tts::{
+    config::{
+        ElevenLabsPersonaConfig, FallbackPolicy, GooglePersonaConfig, ProviderKind,
+        ResolvedPersona, ResolvedTtsConfig, SpeechPrepMode, SpeechPrepProviderKind,
+        SpeechPrepStrategies, SpeechPrepStrategy,
+    },
+    ConfiguredSpeechClient, ReadAloudConfigLoader,
 };
 
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    path::{Path as FsPath, PathBuf},
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::net::TcpListener;
 
@@ -40,6 +44,8 @@ const WEB_ICON_MASKABLE_512: &[u8] = include_bytes!("../assets/web/icon-maskable
 const WEB_APPLE_TOUCH_ICON: &[u8] = include_bytes!("../assets/web/apple-touch-icon.png");
 const WEB_BUILD_REVISION: &str = env!("CODEX_VOICE_WEB_REVISION");
 const WEB_SPEECH_JOB_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const TTS_CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(2);
+const TTS_CONFIG_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 const WEB_SW_BODY_JS: &str = r#"const SHELL_ASSETS = [
   '/web',
   '/web/manifest.webmanifest',
@@ -173,8 +179,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       min-height: 0;
       display: flex;
       flex-direction: column;
-      gap: 14px;
-      padding: max(18px, env(safe-area-inset-top)) 16px max(18px, env(safe-area-inset-bottom));
+      gap: 10px;
+      padding: max(10px, env(safe-area-inset-top)) 16px max(18px, env(safe-area-inset-bottom));
       max-width: 760px;
       margin: 0 auto;
       overflow: hidden;
@@ -184,17 +190,17 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 14px;
+      gap: 10px;
     }
     .app-icon {
-      width: 44px;
-      height: 44px;
+      width: 24px;
+      height: 24px;
       display: block;
-      border-radius: 8px;
+      border-radius: 5px;
     }
     #count {
       color: var(--muted);
-      font-size: 0.92rem;
+      font-size: 0.78rem;
       white-space: nowrap;
     }
     .header-actions {
@@ -251,7 +257,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       resize: none;
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 16px 58px 58px 16px;
+      padding: 16px;
       background: var(--panel);
       color: var(--text);
       font: inherit;
@@ -267,16 +273,34 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       position: absolute;
       top: 10px;
       right: 10px;
-      background: rgba(37, 43, 49, 0.72);
-      backdrop-filter: blur(8px);
     }
     #clear {
       position: absolute;
       right: 10px;
       bottom: 10px;
-      background: rgba(37, 43, 49, 0.72);
-      backdrop-filter: blur(8px);
     }
+    .text-shell .icon-button {
+      color: rgba(239, 244, 243, 0.94);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.18), rgba(18, 24, 28, 0.26));
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.22),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.16),
+        0 8px 22px rgba(0, 0, 0, 0.24);
+      backdrop-filter: blur(18px) saturate(1.6);
+      -webkit-backdrop-filter: blur(18px) saturate(1.6);
+    }
+    .text-shell .icon-button:hover {
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.24), rgba(18, 24, 28, 0.32));
+      border-color: rgba(255, 255, 255, 0.28);
+    }
+    .text-shell .icon-button:active {
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.14), rgba(18, 24, 28, 0.36));
+      box-shadow:
+        inset 0 1px 2px rgba(0, 0, 0, 0.24),
+        0 4px 14px rgba(0, 0, 0, 0.2);
+    }
+    #clear[hidden] { display: none; }
     .controls {
       flex: 0 0 auto;
       display: grid;
@@ -284,7 +308,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     }
     .buttons {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 52px;
+      grid-template-columns: minmax(0, 1fr) repeat(3, 44px);
       align-items: center;
       gap: 8px;
     }
@@ -365,6 +389,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       grid-template-columns: auto minmax(0, 1fr) auto;
       align-items: center;
       gap: 10px;
+      padding: 10px 0;
       color: var(--muted);
       font-variant-numeric: tabular-nums;
       font-size: 0.95rem;
@@ -437,9 +462,6 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       <img class="app-icon" src="/web/icon-192.png" alt="Codex Voice">
       <div class="header-actions">
         <span id="count">0 chars</span>
-        <button id="settings-toggle" type="button" class="icon-button" aria-label="Toggle settings" aria-expanded="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.04 1.56V21a2 2 0 1 1-4 0v-.08a1.7 1.7 0 0 0-1.04-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.04H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.64 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.08a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.1.38.4.7.76.86.25.1.52.15.8.14H21a2 2 0 1 1 0 4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg>
-        </button>
       </div>
     </header>
     <div id="error-banner" class="error-banner" role="alert"></div>
@@ -448,7 +470,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       <button id="paste" type="button" class="icon-button" aria-label="Paste clipboard contents">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8"/><path d="M9 2h6a1 1 0 0 1 1 1v2H8V3a1 1 0 0 1 1-1Z"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>
       </button>
-      <button id="clear" type="button" class="secondary icon-button" aria-label="Clear text">
+      <button id="clear" type="button" class="secondary icon-button" aria-label="Clear text" hidden>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
       </button>
     </div>
@@ -465,6 +487,12 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         </button>
         <button id="play" type="button" class="secondary icon-button" disabled aria-label="Play">
           <svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7Z"/></svg>
+        </button>
+        <button id="download" type="button" class="secondary icon-button" disabled aria-label="Download audio">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+        </button>
+        <button id="settings-toggle" type="button" class="secondary icon-button" aria-label="Toggle settings" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.04 1.56V21a2 2 0 1 1-4 0v-.08a1.7 1.7 0 0 0-1.04-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.04H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.64 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.08a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.1.38.4.7.76.86.25.1.52.15.8.14H21a2 2 0 1 1 0 4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg>
         </button>
       </div>
       <div class="settings" id="settings-panel" hidden>
@@ -501,6 +529,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     const generateLabel = document.getElementById('generate-label');
     const play = document.getElementById('play');
     const playIcon = document.getElementById('play-icon');
+    const download = document.getElementById('download');
     const clear = document.getElementById('clear');
     const paste = document.getElementById('paste');
     const settingsToggle = document.getElementById('settings-toggle');
@@ -530,6 +559,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     const speechModelHint = 'gpt-4o-mini-tts';
     let audio = new Audio();
     let objectUrl = null;
+    let currentAudioBlob = null;
     let seeking = false;
     let directConfig = loadCachedConfig();
     let settings = loadSettings();
@@ -537,6 +567,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     let pendingWorkerReload = false;
     let generationActive = false;
     let lifecycleInterruptedGeneration = false;
+    let activeStreamPlayback = null;
 
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
@@ -546,12 +577,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       });
       navigator.serviceWorker.addEventListener('controllerchange', () => {
         if (serviceWorkerRefreshing) return;
-        if (generationActive) {
-          pendingWorkerReload = true;
-          return;
-        }
-        serviceWorkerRefreshing = true;
-        window.location.reload();
+        pendingWorkerReload = true;
+        reloadForWorkerUpdateWhenIdle();
       });
     }
 
@@ -758,6 +785,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     function updateCount() {
       const chars = Array.from(text.value).length;
       count.textContent = `${chars} ${chars === 1 ? 'char' : 'chars'}`;
+      clear.hidden = chars === 0;
     }
 
     function updatePosition() {
@@ -769,13 +797,60 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       duration.textContent = formatTime(total);
     }
 
+    function audioDownloadExtension(blob) {
+      const type = String(blob?.type || '').toLowerCase();
+      if (type.includes('mpeg') || type.includes('mp3')) return 'mp3';
+      if (type.includes('opus')) return 'opus';
+      if (type.includes('ogg')) return 'ogg';
+      if (type.includes('wav') || type.includes('pcm')) return 'wav';
+      return 'wav';
+    }
+
+    function downloadCurrentAudio() {
+      if (!currentAudioBlob) return;
+      const url = URL.createObjectURL(currentAudioBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `codex-voice-${new Date().toISOString().replace(/[:.]/g, '-')}.${audioDownloadExtension(currentAudioBlob)}`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function audioContextCtor() {
+      return window.AudioContext || window.webkitAudioContext || null;
+    }
+
+    function stopActiveStreamPlayback() {
+      if (!activeStreamPlayback) return;
+      const playback = activeStreamPlayback;
+      activeStreamPlayback = null;
+      playback.stop();
+      reloadForWorkerUpdateWhenIdle();
+    }
+
+    function shouldDeferWorkerReload() {
+      return generationActive || Boolean(activeStreamPlayback);
+    }
+
+    function reloadForWorkerUpdateWhenIdle() {
+      if (!pendingWorkerReload || shouldDeferWorkerReload()) return;
+      pendingWorkerReload = false;
+      serviceWorkerRefreshing = true;
+      window.location.reload();
+    }
+
     function resetAudio() {
+      stopActiveStreamPlayback();
       audio.pause();
       audio.removeAttribute('src');
       audio.load();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       objectUrl = null;
+      currentAudioBlob = null;
       play.disabled = true;
+      download.disabled = true;
       playSvg(true);
       seek.disabled = true;
       seek.value = 0;
@@ -785,11 +860,173 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
 
     function loadAudioBlob(blob) {
       resetAudio();
+      currentAudioBlob = blob;
       objectUrl = URL.createObjectURL(blob);
       audio.src = objectUrl;
       audio.load();
       play.disabled = false;
+      download.disabled = false;
       seek.disabled = false;
+    }
+
+    function ttsStreamPcmGain() {
+      const gain = Number(directConfig?.providers?.elevenlabs?.streamGain);
+      return Number.isFinite(gain) && gain > 0 ? gain : 2.0;
+    }
+
+    function clampPcm16(value) {
+      return Math.max(-32768, Math.min(32767, Math.round(value)));
+    }
+
+    function applyPcm16Gain(bytes, gain = ttsStreamPcmGain()) {
+      if (!Number.isFinite(gain) || gain === 1 || !bytes?.length) return bytes;
+      const output = new Uint8Array(bytes.length);
+      for (let offset = 0; offset + 1 < bytes.length; offset += 2) {
+        const value = bytes[offset] | (bytes[offset + 1] << 8);
+        const signed = value >= 0x8000 ? value - 0x10000 : value;
+        const amplified = clampPcm16(signed * gain);
+        output[offset] = amplified & 0xff;
+        output[offset + 1] = (amplified >> 8) & 0xff;
+      }
+      if (bytes.length % 2 === 1) output[bytes.length - 1] = bytes[bytes.length - 1];
+      return output;
+    }
+
+    function evenPcmBytes(bytes, pending) {
+      const hasPending = pending.value !== null;
+      const length = bytes.length + (hasPending ? 1 : 0);
+      const evenLength = length - (length % 2);
+      if (evenLength === 0) {
+        pending.value = hasPending ? pending.value : bytes[0];
+        return new Uint8Array();
+      }
+      const output = new Uint8Array(evenLength);
+      let outputOffset = 0;
+      if (hasPending) {
+        output[0] = pending.value;
+        outputOffset = 1;
+        pending.value = null;
+      }
+      const copyLength = evenLength - outputOffset;
+      output.set(bytes.slice(0, copyLength), outputOffset);
+      if (copyLength < bytes.length) pending.value = bytes[copyLength];
+      return output;
+    }
+
+    function pcm16ToAudioBuffer(context, bytes, sampleRate, channels = 1) {
+      const frameCount = Math.floor(bytes.length / (2 * channels));
+      const buffer = context.createBuffer(channels, frameCount, sampleRate);
+      for (let channel = 0; channel < channels; channel += 1) {
+        const output = buffer.getChannelData(channel);
+        for (let frame = 0; frame < frameCount; frame += 1) {
+          const offset = ((frame * channels) + channel) * 2;
+          const value = (bytes[offset] | (bytes[offset + 1] << 8));
+          const signed = value >= 0x8000 ? value - 0x10000 : value;
+          output[frame] = signed / 32768;
+        }
+      }
+      return buffer;
+    }
+
+    class StreamingPlayback {
+      constructor() {
+        const Ctor = audioContextCtor();
+        if (!Ctor) throw new Error('Streaming playback is not supported by this browser.');
+        this.context = new Ctor();
+        this.nextStartTime = 0;
+        this.startedAt = 0;
+        this.pendingSources = 0;
+        this.finished = false;
+        this.stopped = false;
+        this.replayBlob = null;
+        this.replayLoaded = false;
+        this.estimatedDuration = 0;
+        this.timer = null;
+        this.playing = true;
+      }
+
+      async start() {
+        stopActiveStreamPlayback();
+        resetAudio();
+        activeStreamPlayback = this;
+        this.startedAt = this.context.currentTime;
+        this.nextStartTime = this.context.currentTime + 0.08;
+        play.disabled = false;
+        seek.disabled = true;
+        seek.value = 0;
+        duration.textContent = 'Live';
+        playSvg(false);
+        await this.context.resume();
+        this.timer = setInterval(() => this.updatePosition(), 250);
+        this.updatePosition();
+      }
+
+      appendPcm(bytes, sampleRate, channels = 1) {
+        if (this.stopped || !bytes?.length) return;
+        const buffer = pcm16ToAudioBuffer(this.context, bytes, sampleRate, channels);
+        const source = this.context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.context.destination);
+        this.pendingSources += 1;
+        source.onended = () => {
+          this.pendingSources = Math.max(0, this.pendingSources - 1);
+          this.checkDrain();
+        };
+        const startAt = Math.max(this.nextStartTime, this.context.currentTime + 0.03);
+        source.start(startAt);
+        this.nextStartTime = startAt + buffer.duration;
+        this.estimatedDuration += buffer.duration;
+        this.updatePosition();
+      }
+
+      async toggle() {
+        if (this.context.state === 'suspended') {
+          await this.context.resume();
+          this.playing = true;
+          playSvg(false);
+        } else {
+          await this.context.suspend();
+          this.playing = false;
+          playSvg(true);
+        }
+        this.updatePosition();
+      }
+
+      setReplayBlob(blob) {
+        this.replayBlob = blob;
+        this.checkDrain();
+      }
+
+      markFinished() {
+        this.finished = true;
+        this.checkDrain();
+      }
+
+      updatePosition() {
+        if (activeStreamPlayback !== this || this.stopped) return;
+        elapsed.textContent = formatTime(Math.max(0, this.context.currentTime - this.startedAt));
+        duration.textContent = this.finished ? formatTime(this.estimatedDuration) : 'Live';
+        seek.disabled = true;
+        seek.value = 0;
+      }
+
+      checkDrain() {
+        if (this.stopped || activeStreamPlayback !== this) return;
+        if (!this.finished || this.pendingSources > 0 || !this.replayBlob || this.replayLoaded) return;
+        this.replayLoaded = true;
+        if (activeStreamPlayback === this) activeStreamPlayback = null;
+        this.stop({ keepButton: true });
+        loadAudioBlob(this.replayBlob);
+        reloadForWorkerUpdateWhenIdle();
+      }
+
+      stop(options = {}) {
+        this.stopped = true;
+        if (this.timer) clearInterval(this.timer);
+        this.timer = null;
+        this.context.close().catch(() => {});
+        if (!options.keepButton) playSvg(true);
+      }
     }
 
     function openGeneratedAudioDb() {
@@ -995,7 +1232,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         const elevenlabs = config.providers?.elevenlabs;
         if (!elevenlabs) return false;
         if (typeof elevenlabs.inlineAudioTags === 'boolean') return elevenlabs.inlineAudioTags;
-        const model = String(elevenlabs.modelId || '').toLowerCase();
+        const model = resolveElevenLabsModel(elevenlabs).toLowerCase();
         return model === 'eleven_v3' || model.startsWith('eleven_v3_');
       }
       return false;
@@ -1060,6 +1297,11 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       };
     }
 
+    function speechPrepForStreaming(prep) {
+      if (!prep || prep.mode !== 'performance-tags') return prep;
+      return { ...prep, threshold: 0 };
+    }
+
     function shortenFitLimit(providerMaxLength) {
       if (!Number.isFinite(providerMaxLength) || providerMaxLength <= minShortenOutputChars) {
         return providerMaxLength;
@@ -1114,7 +1356,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
 
     function performanceTagsOutputTokens(input, prep) {
       const inputChars = Array.from(input).length;
-      const defaultCap = clamp(Math.floor(prep.maxLength / 2), 128, performanceTagsMaxOutputTokens);
+      const maxDefaultTokens = prep?.capPerformanceTags ? performanceTagsMaxOutputTokens : performanceTagsAbsoluteMaxOutputTokens;
+      const defaultCap = clamp(Math.floor(prep.maxLength / 2), 128, maxDefaultTokens);
       const preserveCap = clamp(Math.floor(inputChars / 3), 128, performanceTagsAbsoluteMaxOutputTokens);
       return Math.max(defaultCap, preserveCap);
     }
@@ -1584,6 +1827,12 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return parts.join('');
     }
 
+    function nonRetryableError(message) {
+      const error = new Error(message);
+      error.retryable = false;
+      return error;
+    }
+
     async function fetchCodexPrepAttempt(prep, model, prompt, signal) {
       const send = async (auth) => fetch(`${String(prep.baseUrl || '').replace(/\/$/, '').replace(/\/responses$/, '')}/responses`, {
         method: 'POST',
@@ -1623,11 +1872,15 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return await fetchGooglePrepAttempt(prep, model, body, signal);
     }
 
-    async function prepareForProvider(config, provider, input, persona, prepCache) {
+    async function prepareForProvider(config, provider, input, persona, prepCache, options = {}) {
       const basePrep = browserSpeechPrepForDirect(config);
       const maxTextLength = providerMaxTextLength(config, provider);
       const mustShorten = Array.from(input).length > maxTextLength;
-      const prep = mustShorten ? speechPrepForProviderLimit(basePrep, maxTextLength) : basePrep;
+      const prep = mustShorten
+        ? speechPrepForProviderLimit(basePrep, maxTextLength)
+        : options.forcePerformanceTags
+          ? speechPrepForStreaming(basePrep)
+          : basePrep;
       const strategy = speechPrepStrategy({ ...config, speechPrep: prep }, provider);
       const decision = prepareDecision(input, prep, strategy);
       if (!decision.shouldPrepare) {
@@ -1636,14 +1889,16 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       const cacheKey = `${prep.provider}\n${prep.mode}\n${prep.maxLength}\n${strategy}\n${input}`;
       if (prepCache?.has(cacheKey)) return prepCache.get(cacheKey);
       if (!prep.browserSupported) {
+        const message = prep.mode === 'shorten'
+          ? 'Configured summarization prep is server-only.'
+          : 'Configured emotion prep is server-only.';
+        if (options.requireBrowserPrep) throw nonRetryableError(message);
         const result = {
           input,
           instructions: null,
           changed: false,
           skipped: true,
-          error: prep.mode === 'shorten'
-            ? 'Configured summarization prep is server-only.'
-            : 'Configured emotion prep is server-only.',
+          error: message,
           strategy,
           elapsedMs: 0
         };
@@ -1999,6 +2254,305 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return wavBlobFromPcm(pcm, first.sampleRate, first.channels);
     }
 
+    function createPcmStreamSink() {
+      const playback = new StreamingPlayback();
+      const parts = [];
+      const pendingByte = { value: null };
+      let sampleRate = 24000;
+      let channels = 1;
+      return {
+        playback,
+        async start() {
+          await playback.start();
+        },
+        onAudioChunk(bytes, meta = {}) {
+          if (!bytes?.length) return;
+          const pcm = evenPcmBytes(bytes, pendingByte);
+          if (!pcm.length) return;
+          const gained = applyPcm16Gain(pcm);
+          sampleRate = Number(meta.sampleRate) || sampleRate;
+          channels = Number(meta.channels) || channels;
+          parts.push(gained);
+          playback.appendPcm(gained, sampleRate, channels);
+          setGenerateProgress(0.72, 'Streaming');
+        },
+        finish() {
+          if (parts.length === 0) throw new Error('Streaming TTS did not return audio.');
+          pendingByte.value = null;
+          playback.markFinished();
+          return wavBlobFromPcm(concatUint8Arrays(parts), sampleRate, channels);
+        },
+        fail() {
+          playback.stop();
+          if (activeStreamPlayback === playback) activeStreamPlayback = null;
+        }
+      };
+    }
+
+    function websocketBaseUrl(baseUrl) {
+      const url = new URL(baseUrl || 'https://api.elevenlabs.io');
+      url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+      return url.toString().replace(/\/$/, '');
+    }
+
+    function elevenLabsWebSocketModelSupported(model) {
+      const normalized = String(model || '').toLowerCase();
+      return Boolean(normalized) && !normalized.startsWith('eleven_v3');
+    }
+
+    function resolveElevenLabsStreamingModel(elevenlabs) {
+      return resolveElevenLabsModel(elevenlabs);
+    }
+
+    function canStreamElevenLabs(config, persona) {
+      const elevenlabs = config?.providers?.elevenlabs;
+      if (!elevenlabs || !audioContextCtor() || !elevenlabs.apiKey || !persona?.elevenlabs?.voiceId) return false;
+      const model = resolveElevenLabsStreamingModel(elevenlabs);
+      return elevenLabsWebSocketModelSupported(model) ? Boolean(window.WebSocket) : Boolean(window.ReadableStream);
+    }
+
+    function canStreamGoogle(config) {
+      const google = config?.providers?.google;
+      if (!google || !audioContextCtor() || !window.ReadableStream) return false;
+      const selected = normalizeGoogleModelName(resolveGoogleModel(google));
+      return (google.streaming?.supportedModels || []).includes(selected);
+    }
+
+    function canStreamProvider(config, provider, persona) {
+      if (provider === 'elevenlabs') return canStreamElevenLabs(config, persona);
+      if (provider === 'google') return canStreamGoogle(config);
+      return false;
+    }
+
+    async function streamElevenLabs(config, input, persona) {
+      const elevenlabs = config.providers?.elevenlabs;
+      if (!canStreamElevenLabs(config, persona)) throw new Error('ElevenLabs streaming is not available.');
+      const streamConfig = elevenlabs.streaming || {};
+      const outputFormat = streamConfig.outputFormat || 'pcm_24000';
+      const sampleRate = Number(streamConfig.sampleRate) || elevenLabsSampleRate(outputFormat);
+      const channels = Number(streamConfig.channels) || 1;
+      const modelId = resolveElevenLabsStreamingModel(elevenlabs);
+      if (!elevenLabsWebSocketModelSupported(modelId)) {
+        return streamElevenLabsHttp(config, input, persona, { outputFormat, sampleRate, channels, modelId });
+      }
+      const voiceId = persona.elevenlabs.voiceId;
+      const url = new URL(`${websocketBaseUrl(elevenlabs.baseUrl)}/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream-input`);
+      url.searchParams.set('model_id', modelId);
+      url.searchParams.set('output_format', outputFormat);
+      if (elevenlabs.languageCode) url.searchParams.set('language_code', elevenlabs.languageCode);
+      if (elevenlabs.applyTextNormalization) {
+        url.searchParams.set('apply_text_normalization', elevenlabs.applyTextNormalization);
+      }
+
+      const sink = createPcmStreamSink();
+      await sink.start();
+      setGenerateProgress(0.48, 'Connecting');
+
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let opened = false;
+        let receivedAudio = false;
+        const socket = new WebSocket(url.toString());
+        const finish = () => {
+          if (settled) return;
+          try {
+            const blob = sink.finish();
+            settled = true;
+            resolve({ blob, playback: sink.playback, streamingModel: modelId });
+          } catch (error) {
+            fail(error);
+          }
+        };
+        const fail = (error) => {
+          if (settled) return;
+          settled = true;
+          sink.fail();
+          reject(error instanceof Error ? error : new Error(String(error || 'ElevenLabs stream failed.')));
+        };
+        socket.addEventListener('open', () => {
+          opened = true;
+          const voiceSettings = persona?.elevenlabs?.voiceSettings
+            ? { ...persona.elevenlabs.voiceSettings, speed: resolveElevenLabsSpeed(persona) }
+            : { speed: 1.0 };
+          socket.send(JSON.stringify({
+            text: ' ',
+            voice_settings: voiceSettings,
+            generation_config: {
+              chunk_length_schedule: streamConfig.chunkLengthSchedule || [120, 160, 250, 290]
+            },
+            xi_api_key: elevenlabs.apiKey
+          }));
+          socket.send(JSON.stringify({ text: input, flush: true }));
+          socket.send(JSON.stringify({ text: '' }));
+        });
+        socket.addEventListener('message', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.audio) {
+              receivedAudio = true;
+              sink.onAudioChunk(bytesFromBase64(data.audio), { sampleRate, channels });
+            }
+            if (data.isFinal) {
+              socket.close();
+              finish();
+            }
+          } catch (error) {
+            try { socket.close(); } catch (_) {}
+            fail(error);
+          }
+        });
+        socket.addEventListener('error', () => fail(new Error('ElevenLabs WebSocket stream failed.')));
+        socket.addEventListener('close', () => {
+          if (!settled && opened && receivedAudio) finish();
+          if (!settled) fail(new Error('ElevenLabs WebSocket closed before streaming audio.'));
+        });
+      });
+    }
+
+    async function streamElevenLabsHttp(config, input, persona, streamMeta) {
+      const elevenlabs = config.providers?.elevenlabs;
+      const voiceId = persona.elevenlabs.voiceId;
+      const outputFormat = streamMeta.outputFormat || 'pcm_24000';
+      const sampleRate = Number(streamMeta.sampleRate) || elevenLabsSampleRate(outputFormat);
+      const channels = Number(streamMeta.channels) || 1;
+      const modelId = streamMeta.modelId || resolveElevenLabsStreamingModel(elevenlabs);
+      const sink = createPcmStreamSink();
+      await sink.start();
+      setGenerateProgress(0.48, 'Connecting');
+      const url = new URL(`${String(elevenlabs.baseUrl || 'https://api.elevenlabs.io').replace(/\/$/, '')}/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`);
+      url.searchParams.set('output_format', outputFormat);
+      const voiceSettings = persona?.elevenlabs?.voiceSettings
+        ? { ...persona.elevenlabs.voiceSettings, speed: resolveElevenLabsSpeed(persona) }
+        : { speed: 1.0 };
+      const body = {
+        text: input,
+        model_id: modelId,
+        voice_settings: voiceSettings,
+        apply_text_normalization: elevenlabs.applyTextNormalization
+      };
+      if (elevenlabs.languageCode) body.language_code = elevenlabs.languageCode;
+      const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'xi-api-key': elevenlabs.apiKey
+        },
+        body: JSON.stringify(body)
+      });
+      if (!response.ok) {
+        sink.fail();
+        throw await providerError(response, 'ElevenLabs streaming TTS failed');
+      }
+      if (!response.body?.getReader) {
+        sink.fail();
+        throw new Error('ElevenLabs streaming response is not readable.');
+      }
+      try {
+        const reader = response.body.getReader();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          sink.onAudioChunk(value, { sampleRate, channels });
+        }
+        const blob = sink.finish();
+        return { blob, playback: sink.playback, streamingModel: modelId };
+      } catch (error) {
+        sink.fail();
+        throw error;
+      }
+    }
+
+    function googleInteractionsBaseUrl(baseUrl) {
+      return String(baseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '').replace(/\/models$/, '');
+    }
+
+    async function readGoogleInteractionStream(response, sink, sampleRate, channels) {
+      if (!response.body?.getReader) throw new Error('Google streaming response is not readable.');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      const handleEvent = (raw) => {
+        const data = raw
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trim())
+          .join('');
+        const payload = data || raw.trim();
+        if (!payload || payload === '[DONE]') return;
+        const event = JSON.parse(payload);
+        const delta = event.delta || event.step?.delta || event.output_audio || event.outputAudio;
+        if (event.event_type === 'step.delta' || event.eventType === 'step.delta' || delta?.type === 'audio') {
+          const audioData = delta?.data || delta?.audio || event.delta?.data;
+          if (audioData) sink.onAudioChunk(bytesFromBase64(audioData), { sampleRate, channels });
+        }
+      };
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary;
+        while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0) {
+          const raw = buffer.slice(0, boundary);
+          buffer = buffer.slice(buffer[boundary] === '\r' ? boundary + 4 : boundary + 2);
+          handleEvent(raw);
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) handleEvent(buffer);
+    }
+
+    async function streamGoogle(config, input, persona, instructions) {
+      const google = config.providers?.google;
+      if (!canStreamGoogle(config)) throw new Error('Google streaming is not available for this model.');
+      const streamConfig = google.streaming || {};
+      const sampleRate = Number(streamConfig.sampleRate) || 24000;
+      const channels = Number(streamConfig.channels) || 1;
+      const model = normalizeGoogleModelName(resolveGoogleModel(google));
+      const voiceName = persona?.google?.voiceName || google.voice;
+      const sink = createPcmStreamSink();
+      await sink.start();
+      setGenerateProgress(0.48, 'Connecting');
+      const response = await fetch(`${googleInteractionsBaseUrl(google.baseUrl)}/interactions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Api-Revision': '2026-05-20',
+          'x-goog-api-key': google.apiKey
+        },
+        body: JSON.stringify({
+          model,
+          input: buildGoogleTtsPrompt(input, persona, instructions),
+          response_format: { type: 'audio' },
+          generation_config: {
+            speech_config: [{ voice: voiceName }]
+          },
+          stream: true
+        })
+      });
+      if (!response.ok) {
+        sink.fail();
+        throw await providerError(response, 'Google streaming TTS failed');
+      }
+      try {
+        await readGoogleInteractionStream(response, sink, sampleRate, channels);
+        const blob = sink.finish();
+        return { blob, playback: sink.playback, streamingModel: model };
+      } catch (error) {
+        sink.fail();
+        throw error;
+      }
+    }
+
+    async function tryStreamProvider(config, provider, input, persona, instructions) {
+      if (provider === 'elevenlabs' && canStreamElevenLabs(config, persona)) {
+        return streamElevenLabs(config, input, persona);
+      }
+      if (provider === 'google' && canStreamGoogle(config)) {
+        return streamGoogle(config, input, persona, instructions);
+      }
+      return null;
+    }
+
     async function fetchGoogleAudio(config, input, persona, instructions) {
       const google = config.providers?.google;
       if (!google) throw new Error('Google TTS is not configured.');
@@ -2085,19 +2639,20 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         : { speed: 1.0 };
       const outputFormat = outputFormatOverride || elevenlabs.outputFormat;
       const url = `${elevenlabs.baseUrl}/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=${encodeURIComponent(outputFormat)}`;
+      const body = {
+        text: input,
+        model_id: resolveElevenLabsModel(elevenlabs),
+        voice_settings: voiceSettings,
+        apply_text_normalization: elevenlabs.applyTextNormalization
+      };
+      if (elevenlabs.languageCode) body.language_code = elevenlabs.languageCode;
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'xi-api-key': elevenlabs.apiKey
         },
-        body: JSON.stringify({
-          text: input,
-          model_id: resolveElevenLabsModel(elevenlabs),
-          voice_settings: voiceSettings,
-          language_code: elevenlabs.languageCode,
-          apply_text_normalization: elevenlabs.applyTextNormalization
-        })
+        body: JSON.stringify(body)
       });
       if (!response.ok) throw await providerError(response, 'ElevenLabs TTS failed');
       const bytes = await response.arrayBuffer();
@@ -2127,15 +2682,17 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     }
 
     function isRetryable(error) {
+      if (error?.retryable === false) return false;
       if (!error?.status) return true;
       return error.status === 401 || error.status === 403 || error.status === 429 || error.status >= 500;
     }
 
     async function synthesizeProvider(config, provider, input, persona, prepCache) {
       setGenerateProgress(0.32, 'Preparing');
-      let prep = await prepareForProvider(config, provider, input, persona, prepCache);
+      const forcePerformanceTags = canStreamProvider(config, provider, persona);
+      let prep = await prepareForProvider(config, provider, input, persona, prepCache, { forcePerformanceTags, requireBrowserPrep: true });
       if (prep.strategy === 'shorten' && prep.input !== input) {
-        const performancePrep = await prepareForProvider(config, provider, prep.input, persona, prepCache);
+        const performancePrep = await prepareForProvider(config, provider, prep.input, persona, prepCache, { forcePerformanceTags, requireBrowserPrep: true });
         if (performancePrep.input !== prep.input || performancePrep.instructions) {
           prep = {
             ...performancePrep,
@@ -2145,6 +2702,27 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         }
       }
       const ttsStartedAt = performance.now();
+      setGenerateProgress(0.44, 'Connecting');
+      try {
+        const streamed = await tryStreamProvider(config, provider, prep.input, persona, prep.instructions);
+        if (streamed) {
+          return {
+            blob: streamed.blob,
+            input: prep.input,
+            inputChanged: prep.input !== input,
+            provider,
+            prep,
+            streamed: true,
+            playback: streamed.playback,
+            streamingModel: streamed.streamingModel,
+            ttsElapsedMs: elapsedMs(ttsStartedAt)
+          };
+        }
+      } catch (error) {
+        console.warn(error);
+        stopActiveStreamPlayback();
+        setGenerateProgress(0.58, 'Fallback');
+      }
       setGenerateProgress(0.64, 'Synthesizing');
       const blob = provider === 'google'
         ? await synthesizeGoogle(config, prep.input, persona, prep.instructions)
@@ -2185,14 +2763,6 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         && settings.model === 'default'
         && settings.emotionPreprocessing === true
         && settings.summarization === false;
-    }
-
-    function shouldPreferServerGeneration(config) {
-      return config?.speechPrep?.provider === 'codex' && settingsMatchServerDefaults();
-    }
-
-    function serverGenerationUnavailable(error) {
-      return error?.name === 'TypeError' || /failed to fetch/i.test(error?.message || '');
     }
 
     const serverJobPollMs = 1200;
@@ -2272,19 +2842,18 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         let result;
         if (resumeJobId) {
           result = await generateViaServer(input, resumeJobId);
-        } else if (directConfig && shouldPreferServerGeneration(directConfig)) {
+        } else if (directConfig && canGenerateDirectWithConfiguredPrep(directConfig)) {
+          setGenerateProgress(0.25, 'Direct');
           try {
-            result = await generateViaServer(input);
-          } catch (error) {
-            if (!serverGenerationUnavailable(error) || !canGenerateDirectWithConfiguredPrep(directConfig)) throw error;
-            setGenerateProgress(0.25, 'Direct');
             result = await generateDirect(input);
+          } catch (error) {
+            if (!settingsMatchServerDefaults()) throw error;
+            setGenerateProgress(0.25, 'Server');
+            result = await generateViaServer(input);
           }
         } else {
-          setGenerateProgress(0.25, directConfig && canGenerateDirectWithConfiguredPrep(directConfig) ? 'Direct' : 'Server');
-          result = directConfig && canGenerateDirectWithConfiguredPrep(directConfig)
-            ? await generateDirect(input)
-            : await generateViaServer(input);
+          setGenerateProgress(0.25, 'Server');
+          result = await generateViaServer(input);
         }
         if (
           typeof result.input === 'string'
@@ -2296,8 +2865,16 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
           updateCount();
         }
         setGenerateProgress(0.9, 'Saving');
-        loadAudioBlob(result.blob);
         await saveLastGeneratedAudio(result.blob, result.input, result.inputChanged);
+        if (result.streamed && result.playback) {
+          currentAudioBlob = result.blob;
+          download.disabled = false;
+          result.playback.setReplayBlob(result.blob);
+          play.disabled = false;
+          seek.disabled = true;
+        } else {
+          loadAudioBlob(result.blob);
+        }
         clearPendingGeneration();
         clearError();
         setGenerateProgress(1, 'Done');
@@ -2316,11 +2893,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         setTimeout(() => {
           if (!generationActive) setGenerating(false, 'Generate', 0);
         }, 350);
-        if (pendingWorkerReload) {
-          pendingWorkerReload = false;
-          serviceWorkerRefreshing = true;
-          window.location.reload();
-        }
+        reloadForWorkerUpdateWhenIdle();
         if (
           resumeAfterLifecycleInterruption
           && document.visibilityState === 'visible'
@@ -2373,7 +2946,12 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     paste.addEventListener('click', async () => {
       try {
         const value = await navigator.clipboard.readText();
-        if (!value) return;
+        text.value = '';
+        if (!value) {
+          localStorage.removeItem(textStorageKey);
+          updateCount();
+          return;
+        }
         text.value = value;
         localStorage.setItem(textStorageKey, text.value);
         updateCount();
@@ -2405,6 +2983,14 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     });
 
     play.addEventListener('click', async () => {
+      if (activeStreamPlayback) {
+        try {
+          await activeStreamPlayback.toggle();
+        } catch (error) {
+          showError(error.message || 'Streaming playback failed.');
+        }
+        return;
+      }
       if (!audio.src) return;
       if (audio.paused) {
         try {
@@ -2416,6 +3002,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         audio.pause();
       }
     });
+
+    download.addEventListener('click', downloadCurrentAudio);
 
     seek.addEventListener('input', () => {
       seeking = true;
@@ -2474,6 +3062,7 @@ struct BrowserSpeechPrepConfig {
     mode: String,
     strategies: BrowserSpeechPrepStrategies,
     tag_palette: Vec<String>,
+    cap_performance_tags: bool,
     browser_supported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     browser_fallback: Option<BrowserSpeechPrepFallbackConfig>,
@@ -2517,6 +3106,7 @@ struct BrowserGoogleConfig {
     voice: String,
     model: String,
     fallback_models: Vec<String>,
+    streaming: BrowserGoogleStreamingConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     inline_audio_tags: Option<bool>,
     max_text_length: usize,
@@ -2538,13 +3128,37 @@ struct BrowserElevenLabsConfig {
     api_key: String,
     base_url: String,
     model_id: String,
+    streaming: BrowserElevenLabsStreamingConfig,
     apply_text_normalization: String,
     output_format: String,
-    language_code: String,
+    stream_gain: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inline_audio_tags: Option<bool>,
     max_text_length: usize,
     timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserGoogleStreamingConfig {
+    transport: String,
+    supported_models: Vec<String>,
+    output_format: String,
+    sample_rate: u32,
+    channels: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserElevenLabsStreamingConfig {
+    transport: String,
+    preferred_model: String,
+    output_format: String,
+    sample_rate: u32,
+    channels: u16,
+    chunk_length_schedule: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2606,6 +3220,13 @@ impl BrowserTtsConfig {
                     voice: google.voice.clone(),
                     model: google.model.clone(),
                     fallback_models: google.fallback_models.clone(),
+                    streaming: BrowserGoogleStreamingConfig {
+                        transport: "interactions-stream".to_string(),
+                        supported_models: vec!["gemini-3.1-flash-tts-preview".to_string()],
+                        output_format: "pcm_24000".to_string(),
+                        sample_rate: 24_000,
+                        channels: 1,
+                    },
                     inline_audio_tags: google.inline_audio_tags,
                     max_text_length: google.max_text_length,
                     timeout_ms: duration_millis(google.timeout),
@@ -2622,8 +3243,17 @@ impl BrowserTtsConfig {
                         api_key: elevenlabs.api_key.clone(),
                         base_url: elevenlabs.base_url.clone(),
                         model_id: elevenlabs.model_id.clone(),
+                        streaming: BrowserElevenLabsStreamingConfig {
+                            transport: "websocket".to_string(),
+                            preferred_model: "eleven_flash_v2_5".to_string(),
+                            output_format: "pcm_24000".to_string(),
+                            sample_rate: 24_000,
+                            channels: 1,
+                            chunk_length_schedule: vec![120, 160, 250, 290],
+                        },
                         apply_text_normalization: elevenlabs.apply_text_normalization.clone(),
                         output_format: elevenlabs.output_format.clone(),
+                        stream_gain: elevenlabs.stream_gain,
                         language_code: elevenlabs.language_code.clone(),
                         inline_audio_tags: elevenlabs.inline_audio_tags,
                         max_text_length: elevenlabs.max_text_length,
@@ -2638,6 +3268,7 @@ impl BrowserTtsConfig {
                     mode: speech_prep_mode_name(prep.mode).to_string(),
                     strategies: browser_speech_prep_strategies(prep.strategies),
                     tag_palette: prep.tag_palette.clone(),
+                    cap_performance_tags: prep.cap_performance_tags,
                     browser_supported: prep.provider == SpeechPrepProviderKind::Google,
                     browser_fallback: browser_speech_prep_fallback(prep, config),
                     api_key: prep.api_key.clone(),
@@ -2761,14 +3392,38 @@ fn duration_millis(duration: std::time::Duration) -> u64 {
 #[derive(Clone)]
 pub(crate) struct ServiceState {
     pub(crate) backend: Arc<dyn TranscriptionClient>,
-    pub(crate) speech: Option<Arc<dyn SpeechClient>>,
-    pub(crate) web_tts_config: Option<BrowserTtsConfig>,
+    pub(crate) tts: Arc<RwLock<TtsServiceState>>,
     pub(crate) web_speech_jobs: WebSpeechJobStore,
     pub(crate) auth: ServiceAuth,
     pub(crate) codex_upload_limit_bytes: u64,
     pub(crate) client_upload_limit_bytes: u64,
     pub(crate) chunk_seconds: u64,
     pub(crate) ffmpeg_binary: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct TtsServiceState {
+    pub(crate) speech: Option<Arc<dyn SpeechClient>>,
+    pub(crate) web_tts_config: Option<BrowserTtsConfig>,
+}
+
+impl TtsServiceState {
+    pub(crate) fn from_parts(
+        speech: Option<Arc<dyn SpeechClient>>,
+        tts_config: Option<&ResolvedTtsConfig>,
+    ) -> Self {
+        Self {
+            speech,
+            web_tts_config: tts_config.map(BrowserTtsConfig::from_resolved),
+        }
+    }
+
+    fn configured(speech: Arc<dyn SpeechClient>, tts_config: &ResolvedTtsConfig) -> Self {
+        Self {
+            speech: Some(speech),
+            web_tts_config: Some(BrowserTtsConfig::from_resolved(tts_config)),
+        }
+    }
 }
 
 pub(crate) type WebSpeechJobStore = Arc<Mutex<HashMap<String, WebSpeechJobRecord>>>;
@@ -2806,10 +3461,79 @@ pub(crate) struct ServiceAuth {
     pub(crate) no_auth: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConfigFingerprint {
+    modified: SystemTime,
+    len: u64,
+}
+
+async fn watch_tts_config(tts: Arc<RwLock<TtsServiceState>>, path: PathBuf) {
+    tracing::info!(path = %path.display(), "watching TTS config for live reload");
+    let mut last_seen = None;
+
+    loop {
+        let current = config_fingerprint(&path).await;
+        if current != last_seen {
+            tokio::time::sleep(TTS_CONFIG_RELOAD_DEBOUNCE).await;
+            let stable = config_fingerprint(&path).await;
+            if stable == current {
+                match stable {
+                    Some(_) => match reload_tts_config_once(&tts, &path).await {
+                        Ok(()) => tracing::info!(
+                            path = %path.display(),
+                            "TTS config reloaded successfully"
+                        ),
+                        Err(error) => tracing::warn!(
+                            path = %path.display(),
+                            %error,
+                            "TTS config reload failed; keeping previous working config"
+                        ),
+                    },
+                    None => tracing::warn!(
+                        path = %path.display(),
+                        "TTS config disappeared; keeping previous working config"
+                    ),
+                }
+                last_seen = stable;
+            }
+        }
+
+        tokio::time::sleep(TTS_CONFIG_WATCH_INTERVAL).await;
+    }
+}
+
+async fn config_fingerprint(path: &FsPath) -> Option<ConfigFingerprint> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    Some(ConfigFingerprint {
+        modified: metadata.modified().ok()?,
+        len: metadata.len(),
+    })
+}
+
+async fn reload_tts_config_once(tts: &Arc<RwLock<TtsServiceState>>, path: &FsPath) -> Result<()> {
+    let path = path.to_path_buf();
+    let (speech, config) = tokio::task::spawn_blocking(move || {
+        let loader = ReadAloudConfigLoader::new(path);
+        let config = loader.load().context("failed to load read-aloud config")?;
+        let client = ConfiguredSpeechClient::try_new(config.clone())
+            .context("failed to create TTS client from config")?;
+        if !client.has_any_provider() {
+            anyhow::bail!("TTS config parsed but no usable provider is configured");
+        }
+        Ok::<_, anyhow::Error>((Arc::new(client) as Arc<dyn SpeechClient>, config))
+    })
+    .await
+    .context("TTS config reload task failed")??;
+
+    *tts.write().expect("TTS state lock") = TtsServiceState::configured(speech, &config);
+    Ok(())
+}
+
 pub async fn serve(
     config: super::ServeConfig,
     speech: Option<Arc<dyn SpeechClient>>,
     tts_config: Option<ResolvedTtsConfig>,
+    tts_config_path: Option<PathBuf>,
 ) -> Result<()> {
     let listener = TcpListener::bind(config.bind)
         .await
@@ -2829,10 +3553,17 @@ pub async fn serve(
     let discovery = TranscriberDiscoveryFile::new(root_url, token, capabilities.clone());
     write_discovery_file(&discovery)?;
 
+    let tts = Arc::new(RwLock::new(TtsServiceState::from_parts(
+        speech,
+        tts_config.as_ref(),
+    )));
+    if let Some(path) = tts_config_path {
+        tokio::spawn(watch_tts_config(tts.clone(), path));
+    }
+
     let app = service_router(ServiceState {
         backend,
-        speech,
-        web_tts_config: tts_config.as_ref().map(BrowserTtsConfig::from_resolved),
+        tts,
         web_speech_jobs: Arc::new(Mutex::new(HashMap::new())),
         auth: ServiceAuth {
             token: discovery.token.clone(),
@@ -2908,9 +3639,10 @@ async fn health(
     headers: HeaderMap,
 ) -> Result<Json<Health>, ApiError> {
     authorize(&headers, &state.auth)?;
+    let tts = state.tts.read().expect("TTS state lock");
     let capabilities = ServiceCapabilities {
         transcriptions: true,
-        speech: state.speech.is_some(),
+        speech: tts.speech.is_some(),
     };
     Ok(Json(Health {
         ok: true,
@@ -2949,6 +3681,9 @@ async fn web_app() -> Html<&'static str> {
 
 async fn web_config(State(state): State<ServiceState>) -> Result<impl IntoResponse, ApiError> {
     let config = state
+        .tts
+        .read()
+        .expect("TTS state lock")
         .web_tts_config
         .as_ref()
         .cloned()
@@ -3308,6 +4043,9 @@ async fn web_speech_job_status(
 
 fn web_speech_client(state: &ServiceState) -> Result<Arc<dyn SpeechClient>, ApiError> {
     state
+        .tts
+        .read()
+        .expect("TTS state lock")
         .speech
         .as_ref()
         .cloned()
@@ -3370,8 +4108,12 @@ async fn speech(State(state): State<ServiceState>, request: Request) -> Result<R
     authorize(request.headers(), &state.auth)?;
 
     let speech_client = state
+        .tts
+        .read()
+        .expect("TTS state lock")
         .speech
         .as_ref()
+        .cloned()
         .ok_or_else(|| ApiError::service_unavailable("TTS service is not configured"))?;
 
     let Json(body) = Json::<OpenAiSpeechRequest>::from_request(request, &state)
@@ -3703,6 +4445,7 @@ mod tests {
         assert!(html.contains("id=\"generate-label\""));
         assert!(html.contains("id=\"clear\""));
         assert!(html.contains("id=\"paste\""));
+        assert!(html.contains("id=\"download\""));
         assert!(html.contains("id=\"settings-toggle\""));
         assert!(html.contains("id=\"error-banner\""));
         assert!(html.contains("id=\"seek\""));
@@ -3721,10 +4464,20 @@ mod tests {
         let clear_idx = html.find("id=\"clear\"").expect("clear button exists");
         let scrubber_idx = html.find("class=\"scrubber\"").expect("scrubber exists");
         let buttons_idx = html.find("class=\"buttons\"").expect("buttons exist");
+        let play_idx = html.find("id=\"play\"").expect("play button exists");
+        let download_idx = html
+            .find("id=\"download\"")
+            .expect("download button exists");
+        let settings_idx = html
+            .find("id=\"settings-toggle\"")
+            .expect("settings button exists");
         assert!(text_idx < scrubber_idx);
         assert!(text_idx < clear_idx);
         assert!(clear_idx < scrubber_idx);
         assert!(scrubber_idx < buttons_idx);
+        assert!(buttons_idx < play_idx);
+        assert!(play_idx < download_idx);
+        assert!(download_idx < settings_idx);
         assert!(html.contains("modelSelect.addEventListener('change', saveSettings)"));
         assert!(html.contains("codex-voice-web-audio"));
         assert!(html.contains("codex-voice.web.generation.v1"));
@@ -3748,6 +4501,10 @@ mod tests {
         assert!(html.contains("window.addEventListener('pagehide'"));
         assert!(html.contains("pendingWorkerReload"));
         assert!(html.contains("generationActive"));
+        assert!(html.contains("function shouldDeferWorkerReload"));
+        assert!(html.contains("return generationActive || Boolean(activeStreamPlayback);"));
+        assert!(html.contains("function reloadForWorkerUpdateWhenIdle"));
+        assert!(html.contains("reloadForWorkerUpdateWhenIdle();"));
         assert!(html.contains("lifecycleInterruptedGeneration"));
         assert!(html.contains("function shouldKeepPendingGeneration"));
         assert!(html.contains("if (error?.status) return false;"));
@@ -3759,6 +4516,8 @@ mod tests {
         assert!(html.contains("model_id: resolveElevenLabsModel(elevenlabs)"));
         assert!(html.contains("prep.mode === 'shorten'"));
         assert!(html.contains("function prepareDecision"));
+        assert!(html.contains("function speechPrepForStreaming"));
+        assert!(html.contains("threshold: 0"));
         assert!(html.contains("minShortenOutputChars = 4000"));
         assert!(html.contains("function shortenPrepareFloor"));
         assert!(html.contains("function shortenMinOutputChars"));
@@ -3770,6 +4529,9 @@ mod tests {
         assert!(html.contains("prep.forceSummarization"));
         assert!(html.contains("function truncateToChars"));
         assert!(html.contains("performancePrep = await prepareForProvider"));
+        assert!(html
+            .contains("const forcePerformanceTags = canStreamProvider(config, provider, persona)"));
+        assert!(html.contains("{ forcePerformanceTags, requireBrowserPrep: true }"));
         assert!(html.contains("Do not collapse prose into a short abstract"));
         assert!(html.contains("a fitted source excerpt was used"));
         assert!(html.contains("clamp(Math.floor(prep.maxLength / 3), 64, 4096)"));
@@ -3796,14 +4558,19 @@ mod tests {
         assert!(html.contains("function setGenerateProgress"));
         assert!(html.contains("function setGenerating"));
         assert!(html.contains("function playSvg"));
+        assert!(html.contains("function audioDownloadExtension"));
+        assert!(html.contains("function downloadCurrentAudio"));
+        assert!(html.contains("download.addEventListener('click', downloadCurrentAudio)"));
         assert!(html.contains("settingsToggle.addEventListener('click'"));
         assert!(html.contains("paste.addEventListener('click'"));
         assert!(html.contains("navigator.clipboard.readText()"));
+        assert!(html.contains("text.value = '';"));
         assert!(html.contains("setGenerateProgress(0.64, 'Synthesizing')"));
         assert!(html.contains("setGenerateProgress(0.9, 'Saving')"));
         assert!(html.contains("setGenerateProgress(1, 'Done')"));
         assert!(html.contains("performanceTagsMaxOutputTokens = 384"));
         assert!(html.contains("performanceTagsAbsoluteMaxOutputTokens = 4096"));
+        assert!(html.contains("prep?.capPerformanceTags ? performanceTagsMaxOutputTokens"));
         assert!(html.contains("function performanceTagsOutputTokens"));
         assert!(html.contains("defaultSpeechPrepAttemptTimeoutMs = 4000"));
         assert!(html.contains("function speechPrepModels"));
@@ -3829,11 +4596,54 @@ mod tests {
         assert!(html.contains("prepared = repairBareLeadingPerformanceCue(input, prepared, prep)"));
         assert!(html.contains("function fallbackPerformanceTags"));
         assert!(html.contains("fetch('/web/config'"));
+        assert!(html.contains("function nonRetryableError"));
+        assert!(html.contains("error.retryable = false;"));
+        assert!(html.contains("if (options.requireBrowserPrep) throw nonRetryableError(message);"));
+        assert!(html.contains("if (error?.retryable === false) return false;"));
         assert!(html.contains("function splitTtsText"));
         assert!(html.contains("function concatUint8Arrays"));
         assert!(html.contains("ttsChunkBoundarySilenceMs = 180"));
         assert!(html.contains("function concatPcmChunksWithBoundarySilence"));
         assert!(html.contains("function concatWavChunksWithBoundarySilence"));
+        assert!(html.contains("let activeStreamPlayback = null"));
+        assert!(html.contains("function ttsStreamPcmGain"));
+        assert!(html.contains("providers?.elevenlabs?.streamGain"));
+        assert!(html.contains(
+            "if (elevenlabs.languageCode) body.language_code = elevenlabs.languageCode;"
+        ));
+        assert!(html.contains("function applyPcm16Gain"));
+        assert!(html.contains("function evenPcmBytes"));
+        assert!(html.contains("const model = resolveElevenLabsModel(elevenlabs).toLowerCase();"));
+        assert!(html.contains("class StreamingPlayback"));
+        assert!(html.contains("if (this.stopped || activeStreamPlayback !== this) return;"));
+        assert!(html.contains("function createPcmStreamSink"));
+        assert!(html.contains("function websocketBaseUrl"));
+        assert!(html.contains("function resolveElevenLabsStreamingModel"));
+        assert!(html.contains(
+            "return elevenLabsWebSocketModelSupported(model) ? Boolean(window.WebSocket) : Boolean(window.ReadableStream);"
+        ));
+        assert!(html.contains("async function streamElevenLabs"));
+        assert!(html.contains("return resolveElevenLabsModel(elevenlabs);"));
+        assert!(html.contains("async function streamElevenLabsHttp"));
+        assert!(html.contains("/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream"));
+        assert!(html.contains("model_id: modelId"));
+        assert!(html.contains("/stream-input"));
+        assert!(html.contains("text: ' '"));
+        assert!(html.contains("xi_api_key: elevenlabs.apiKey"));
+        assert!(html.contains("function googleInteractionsBaseUrl"));
+        assert!(html.contains("async function readGoogleInteractionStream"));
+        assert!(html.contains("async function streamGoogle"));
+        assert!(html.contains("'Api-Revision': '2026-05-20'"));
+        assert!(html.contains("stream: true"));
+        assert!(html.contains("function tryStreamProvider"));
+        assert!(html.contains("const streamed = await tryStreamProvider"));
+        assert!(html.contains("const gained = applyPcm16Gain(pcm)"));
+        assert!(html.contains("parts.push(gained)"));
+        assert!(html.contains("playback.appendPcm(gained, sampleRate, channels)"));
+        assert!(html.contains("stopActiveStreamPlayback()"));
+        assert!(html.contains("duration.textContent = 'Live'"));
+        assert!(html.contains("activeStreamPlayback.toggle()"));
+        assert!(html.contains("result.playback.setReplayBlob(result.blob)"));
         assert!(html.contains("function synthesizeGoogle"));
         assert!(html.contains("async function fetchGoogleAudio"));
         assert!(html.contains("function wavBlobFromPcm"));
@@ -3860,9 +4670,10 @@ mod tests {
         assert!(html.contains("function settingsMatchServerDefaults"));
         assert!(html.contains("settings.model === 'default'"));
         assert!(html.contains("settings.emotionPreprocessing === true"));
-        assert!(html.contains("function shouldPreferServerGeneration"));
         assert!(html.contains("settingsMatchServerDefaults()"));
-        assert!(html.contains("function serverGenerationUnavailable"));
+        assert!(html.contains(
+            "} else if (directConfig && canGenerateDirectWithConfiguredPrep(directConfig)) {"
+        ));
         assert!(html.contains("Configured emotion prep is server-only."));
         assert!(html.contains("'/web/speech-jobs'"));
         assert!(html.contains(r#"<link rel="manifest" href="/web/manifest.webmanifest">"#));
@@ -3911,6 +4722,7 @@ mod tests {
             "inline-tags"
         );
         assert_eq!(config["speechPrep"]["tagPalette"][0], "tender");
+        assert_eq!(config["speechPrep"]["capPerformanceTags"], false);
         assert!(config["speechPrep"]["fallbackModels"]
             .as_array()
             .is_some_and(Vec::is_empty));
@@ -3921,7 +4733,52 @@ mod tests {
             config["providers"]["google"]["model"],
             "gemini-3.1-flash-tts-preview"
         );
+        assert_eq!(
+            config["providers"]["google"]["streaming"]["transport"],
+            "interactions-stream"
+        );
+        assert_eq!(
+            config["providers"]["google"]["streaming"]["supportedModels"][0],
+            "gemini-3.1-flash-tts-preview"
+        );
+        assert_eq!(
+            config["providers"]["google"]["streaming"]["outputFormat"],
+            "pcm_24000"
+        );
+        assert_eq!(
+            config["providers"]["google"]["streaming"]["sampleRate"],
+            24000
+        );
+        assert_eq!(config["providers"]["google"]["streaming"]["channels"], 1);
         assert_eq!(config["providers"]["elevenlabs"]["apiKey"], "eleven-key");
+        assert_eq!(
+            config["providers"]["elevenlabs"]["streaming"]["transport"],
+            "websocket"
+        );
+        assert_eq!(
+            config["providers"]["elevenlabs"]["streaming"]["preferredModel"],
+            "eleven_flash_v2_5"
+        );
+        assert_eq!(
+            config["providers"]["elevenlabs"]["streaming"]["outputFormat"],
+            "pcm_24000"
+        );
+        assert_eq!(
+            config["providers"]["elevenlabs"]["streaming"]["sampleRate"],
+            24000
+        );
+        assert_eq!(
+            config["providers"]["elevenlabs"]["streaming"]["channels"],
+            1
+        );
+        assert_eq!(
+            config["providers"]["elevenlabs"]["streaming"]["chunkLengthSchedule"][0],
+            120
+        );
+        assert_eq!(config["providers"]["elevenlabs"]["streamGain"], 2.0);
+        assert!(config["providers"]["elevenlabs"]
+            .get("languageCode")
+            .is_none());
         assert_eq!(
             config["personas"]["sky"]["fallbackPolicy"],
             "preserve-persona"
@@ -3992,6 +4849,86 @@ mod tests {
             .expect("request succeeds");
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    fn write_reload_test_config(path: &FsPath, env_name: &str, voice: &str) {
+        std::fs::write(
+            path,
+            format!(
+                r#"{{
+                    "messages": {{
+                        "tts": {{
+                            "provider": "google",
+                            "providers": {{
+                                "google": {{
+                                    "apiKey": {{ "source": "env", "id": "{env_name}" }},
+                                    "voice": "{voice}",
+                                    "model": "gemini-2.5-flash-preview-tts"
+                                }}
+                            }}
+                        }}
+                    }}
+                }}"#
+            ),
+        )
+        .expect("config written");
+    }
+
+    #[tokio::test]
+    async fn tts_config_reload_updates_swappable_service_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("read-aloud-defaults.json");
+        std::env::set_var("TEST_TTS_RELOAD_KEY", "test-google-key");
+        write_reload_test_config(&path, "TEST_TTS_RELOAD_KEY", "Sulafat");
+        let tts = Arc::new(RwLock::new(TtsServiceState::from_parts(None, None)));
+
+        reload_tts_config_once(&tts, &path)
+            .await
+            .expect("config reload succeeds");
+
+        let state = tts.read().expect("TTS state lock");
+        assert!(state.speech.is_some());
+        let web_config = state.web_tts_config.clone().expect("web config loaded");
+        let json = serde_json::to_value(web_config).expect("serializes");
+        assert_eq!(json["providers"]["google"]["voice"], "Sulafat");
+    }
+
+    #[tokio::test]
+    async fn tts_config_reload_keeps_previous_state_when_new_config_is_invalid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("read-aloud-defaults.json");
+        std::env::set_var("TEST_TTS_RELOAD_KEEP_KEY", "test-google-key");
+        write_reload_test_config(&path, "TEST_TTS_RELOAD_KEEP_KEY", "Sulafat");
+        let tts = Arc::new(RwLock::new(TtsServiceState::from_parts(None, None)));
+        reload_tts_config_once(&tts, &path)
+            .await
+            .expect("initial config reload succeeds");
+        let before = serde_json::to_value(
+            tts.read()
+                .expect("TTS state lock")
+                .web_tts_config
+                .clone()
+                .expect("web config loaded"),
+        )
+        .expect("serializes");
+
+        std::fs::write(&path, "{not valid json").expect("invalid config written");
+        let error = reload_tts_config_once(&tts, &path)
+            .await
+            .expect_err("invalid config should fail");
+        assert!(error
+            .to_string()
+            .contains("failed to load read-aloud config"));
+
+        let after = serde_json::to_value(
+            tts.read()
+                .expect("TTS state lock")
+                .web_tts_config
+                .clone()
+                .expect("web config remains loaded"),
+        )
+        .expect("serializes");
+        assert_eq!(after, before);
     }
 
     #[test]

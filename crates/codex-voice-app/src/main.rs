@@ -40,7 +40,14 @@ async fn main() -> Result<()> {
         Command::Run => run().await,
         Command::Server(args) => {
             let config: codex_voice_transcriber::ServeConfig = args.try_into()?;
-            let (speech, tts_config) = match tts::load_speech_client(None) {
+            let tts_config_path = match tts::default_read_aloud_config_path() {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    tracing::warn!(%error, "TTS config path not available; live reload disabled");
+                    None
+                }
+            };
+            let (speech, tts_config) = match tts::load_speech_client(tts_config_path.clone()) {
                 Ok(client) => {
                     tracing::info!("TTS client loaded successfully");
                     let config = client.config().clone();
@@ -54,7 +61,7 @@ async fn main() -> Result<()> {
                     (None, None)
                 }
             };
-            codex_voice_transcriber::serve(config, speech, tts_config).await
+            codex_voice_transcriber::serve(config, speech, tts_config, tts_config_path).await
         }
         Command::Doctor { command } => match command.unwrap_or(DoctorCommand::LinuxPortals) {
             DoctorCommand::Audio(args) => doctor::doctor_audio(args).await,

@@ -327,6 +327,7 @@ pub fn resolve_speech_prep_config(
             .map(|tag| (*tag).to_string())
             .collect();
     }
+    let cap_performance_tags = json_bool(val, "capPerformanceTags").unwrap_or(false);
     let mode_name = json_str(val, "mode").unwrap_or("performance-tags");
     let mode = SpeechPrepMode::from_name(mode_name).ok_or_else(|| {
         codex_voice_core::SpeechError::Config(format!("invalid speechPrep mode: {mode_name}"))
@@ -376,6 +377,7 @@ pub fn resolve_speech_prep_config(
         reasoning_effort,
         strategies,
         tag_palette,
+        cap_performance_tags,
         threshold,
         max_input_length,
         max_length,
@@ -412,7 +414,13 @@ pub fn resolve_elevenlabs_config(
     let model_id = json_string(val, "modelId", "eleven_multilingual_v2");
     let apply_text_normalization = json_string(val, "applyTextNormalization", "auto");
     let output_format = json_string(val, "outputFormat", "mp3_44100_128");
-    let language_code = json_string(val, "languageCode", "en");
+    let stream_gain = json_f64(val, "streamGain")
+        .filter(|value| value.is_finite())
+        .unwrap_or(2.0)
+        .clamp(0.1, 8.0);
+    let language_code = json_string_opt(val, "languageCode")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let inline_audio_tags = json_bool(val, "inlineAudioTags");
 
     Ok(Some(ElevenLabsRuntimeConfig {
@@ -421,6 +429,7 @@ pub fn resolve_elevenlabs_config(
         model_id,
         apply_text_normalization,
         output_format,
+        stream_gain,
         language_code,
         inline_audio_tags,
         max_text_length,

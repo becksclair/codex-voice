@@ -99,6 +99,7 @@ mod tests {
         assert!(speech_prep
             .tag_palette
             .contains(&"leans closer".to_string()));
+        assert!(!speech_prep.cap_performance_tags);
         assert!(speech_prep.tag_palette.len() >= 36);
         for tag in [
             "delighted",
@@ -572,6 +573,7 @@ mod tests {
                         "enabled": true,
                         "provider": "google",
                         "mode": "performance-tags",
+                        "capPerformanceTags": true,
                         "tagPalette": ["sleepy", "relieved"],
                         "strategies": {
                             "google": "off",
@@ -587,7 +589,8 @@ mod tests {
                         },
                         "elevenlabs": {
                             "apiKey": { "source": "env", "id": "TEST_ELEVEN_KEY_SPEECH_PREP_TAGS" },
-                            "modelId": "eleven_v3"
+                            "modelId": "eleven_v3",
+                            "streamGain": 1.75
                         }
                     }
                 }
@@ -605,6 +608,7 @@ mod tests {
         assert_eq!(speech_prep.mode, SpeechPrepMode::PerformanceTags);
         assert_eq!(speech_prep.model, "google/gemini-3.5-flash");
         assert_eq!(speech_prep.threshold, 120);
+        assert!(speech_prep.cap_performance_tags);
         assert_eq!(speech_prep.tag_palette, vec!["sleepy", "relieved"]);
         assert_eq!(speech_prep.strategies.google, SpeechPrepStrategy::Off);
         assert_eq!(
@@ -616,6 +620,8 @@ mod tests {
             SpeechPrepStrategy::StyleInstruction
         );
         assert_eq!(elevenlabs.inline_audio_tags, None);
+        assert_eq!(elevenlabs.stream_gain, 1.75);
+        assert_eq!(elevenlabs.language_code, None);
     }
 
     #[test]

@@ -62,7 +62,7 @@ impl ElevenLabsSpeechClient {
         let body = build_request_body(
             &sanitized,
             &model_id,
-            &self.config.language_code,
+            self.config.language_code.as_deref(),
             &self.config.apply_text_normalization,
             request.speed,
             persona_settings,
@@ -172,7 +172,7 @@ fn resolve_speed(
 fn build_request_body(
     text: &str,
     model_id: &str,
-    language_code: &str,
+    language_code: Option<&str>,
     apply_text_normalization: &str,
     request_speed: Option<f32>,
     persona_settings: Option<&ElevenLabsPersonaConfig>,
@@ -190,13 +190,19 @@ fn build_request_body(
         serde_json::json!({ "speed": speed })
     };
 
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "text": text,
         "model_id": model_id,
         "voice_settings": voice_settings,
-        "language_code": language_code,
         "apply_text_normalization": apply_text_normalization,
-    })
+    });
+    if let Some(language_code) = language_code
+        .map(str::trim)
+        .filter(|language_code| !language_code.is_empty())
+    {
+        body["language_code"] = serde_json::json!(language_code);
+    }
+    body
 }
 
 fn resolve_model_id(model_hint: &str, configured: &str) -> SpeechResult<String> {
@@ -289,7 +295,7 @@ mod tests {
         let body = build_request_body(
             "hello",
             "eleven_flash_v2_5",
-            "en",
+            Some("en"),
             "auto",
             Some(1.2_f32),
             None,
@@ -322,7 +328,7 @@ mod tests {
         let body = build_request_body(
             "hello",
             "eleven_flash_v2_5",
-            "en",
+            Some("en"),
             "auto",
             Some(1.2_f32),
             Some(&persona),
@@ -355,7 +361,7 @@ mod tests {
         let body = build_request_body(
             "hello",
             "eleven_flash_v2_5",
-            "en",
+            Some("en"),
             "auto",
             None,
             Some(&persona),
@@ -370,7 +376,7 @@ mod tests {
         let body = build_request_body(
             "hello",
             "eleven_flash_v2_5",
-            "en",
+            Some("en"),
             "auto",
             Some(f32::NAN),
             None,
@@ -379,6 +385,13 @@ mod tests {
         assert_eq!(body["voice_settings"]["speed"], 1.0);
         assert!(body.to_string().contains(r#""speed":1.0"#));
         assert!(!body.to_string().contains(r#""speed":null"#));
+    }
+
+    #[test]
+    fn request_body_omits_language_code_when_unset() {
+        let body = build_request_body("hello", "eleven_flash_v2_5", None, "auto", None, None);
+
+        assert!(body.get("language_code").is_none());
     }
 
     #[test]

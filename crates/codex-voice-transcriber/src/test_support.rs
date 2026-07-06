@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::server::{ServiceAuth, ServiceState};
+use crate::server::{ServiceAuth, ServiceState, TtsServiceState};
 
 #[derive(Default)]
 pub struct FakeBackend {
@@ -68,21 +68,36 @@ pub(crate) fn test_state_with_speech(codex_upload_limit_bytes: u64) -> ServiceSt
 }
 
 pub(crate) fn test_state_with_web_tts_config(codex_upload_limit_bytes: u64) -> ServiceState {
-    let mut state = test_state_with_speech(codex_upload_limit_bytes);
-    state.web_tts_config = Some(crate::server::BrowserTtsConfig::from_resolved(
-        &sample_tts_config(),
-    ));
-    state
+    let config = sample_tts_config();
+    test_state_with_speech_and_config(codex_upload_limit_bytes, Some(config))
+}
+
+pub(crate) fn test_state_with_speech_and_config(
+    codex_upload_limit_bytes: u64,
+    tts_config: Option<ResolvedTtsConfig>,
+) -> ServiceState {
+    let speech = Some(Arc::new(FakeSpeechBackend::default()) as Arc<dyn SpeechClient>);
+    test_state_with_speech_backend_and_config(codex_upload_limit_bytes, speech, tts_config)
 }
 
 pub(crate) fn test_state_with_speech_backend(
     codex_upload_limit_bytes: u64,
     speech: Option<Arc<dyn SpeechClient>>,
 ) -> ServiceState {
+    test_state_with_speech_backend_and_config(codex_upload_limit_bytes, speech, None)
+}
+
+pub(crate) fn test_state_with_speech_backend_and_config(
+    codex_upload_limit_bytes: u64,
+    speech: Option<Arc<dyn SpeechClient>>,
+    tts_config: Option<ResolvedTtsConfig>,
+) -> ServiceState {
     ServiceState {
         backend: Arc::new(FakeBackend::default()),
-        speech,
-        web_tts_config: None,
+        tts: Arc::new(std::sync::RwLock::new(TtsServiceState::from_parts(
+            speech,
+            tts_config.as_ref(),
+        ))),
         web_speech_jobs: Arc::new(Mutex::new(HashMap::new())),
         auth: ServiceAuth {
             token: "test-token".into(),
@@ -149,6 +164,7 @@ pub(crate) fn sample_tts_config() -> ResolvedTtsConfig {
                 "softly".to_string(),
                 "amused".to_string(),
             ],
+            cap_performance_tags: false,
             threshold: 120,
             max_input_length: 12000,
             max_length: 4000,
@@ -176,7 +192,8 @@ pub(crate) fn sample_tts_config() -> ResolvedTtsConfig {
             model_id: "eleven_v3".to_string(),
             apply_text_normalization: "auto".to_string(),
             output_format: "mp3_44100_128".to_string(),
-            language_code: "en".to_string(),
+            stream_gain: 2.0,
+            language_code: None,
             inline_audio_tags: None,
             max_text_length: 4000,
             timeout: Duration::from_secs(30),

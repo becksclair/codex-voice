@@ -44,6 +44,11 @@ pub fn load_speech_client(path: Option<PathBuf>) -> Result<ConfiguredSpeechClien
     Ok(client)
 }
 
+pub fn default_read_aloud_config_path() -> Result<PathBuf> {
+    ReadAloudConfigLoader::default_path()
+        .context("failed to resolve default read-aloud config path")
+}
+
 pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
     let client = load_speech_client(args.read_aloud_config.clone())?;
     let config = client.config();

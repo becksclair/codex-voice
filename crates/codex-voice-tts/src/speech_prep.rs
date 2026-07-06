@@ -209,7 +209,11 @@ impl SpeechPrepClient {
         let max_output_tokens = match (self.config.mode, strategy) {
             (SpeechPrepMode::Shorten, _) => (self.config.max_length / 3).clamp(64, 4096),
             (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::InlineTags) => {
-                performance_tags_max_output_tokens(input.chars().count(), self.config.max_length)
+                performance_tags_max_output_tokens(
+                    input.chars().count(),
+                    self.config.max_length,
+                    self.config.cap_performance_tags,
+                )
             }
             (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::StyleInstruction) => 128,
             (SpeechPrepMode::PerformanceTags, SpeechPrepStrategy::Off) => return Ok(None),
@@ -569,8 +573,17 @@ fn prepare_input_for_prompt(text: &str, max_input_length: usize) -> SpeechResult
     Ok(truncate_chars(&sanitized, max_input_length))
 }
 
-fn performance_tags_max_output_tokens(input_chars: usize, max_length: usize) -> usize {
-    let default_cap = (max_length / 2).clamp(128, PERFORMANCE_TAGS_DEFAULT_MAX_OUTPUT_TOKENS);
+fn performance_tags_max_output_tokens(
+    input_chars: usize,
+    max_length: usize,
+    cap_performance_tags: bool,
+) -> usize {
+    let max_default_tokens = if cap_performance_tags {
+        PERFORMANCE_TAGS_DEFAULT_MAX_OUTPUT_TOKENS
+    } else {
+        PERFORMANCE_TAGS_ABSOLUTE_MAX_OUTPUT_TOKENS
+    };
+    let default_cap = (max_length / 2).clamp(128, max_default_tokens);
     let preserve_cap = (input_chars / 3).clamp(128, PERFORMANCE_TAGS_ABSOLUTE_MAX_OUTPUT_TOKENS);
     default_cap.max(preserve_cap)
 }
@@ -1270,6 +1283,7 @@ mod tests {
             reasoning_effort: None,
             strategies: crate::config::SpeechPrepStrategies::default(),
             tag_palette: default_test_palette(),
+            cap_performance_tags: false,
             threshold: 700,
             max_input_length: 700,
             max_length: 420,
@@ -1299,6 +1313,7 @@ mod tests {
             reasoning_effort: None,
             strategies: crate::config::SpeechPrepStrategies::default(),
             tag_palette: default_test_palette(),
+            cap_performance_tags: false,
             threshold: 500,
             max_input_length: 12_000,
             max_length: 3000,
@@ -1328,6 +1343,7 @@ mod tests {
             reasoning_effort: None,
             strategies: crate::config::SpeechPrepStrategies::default(),
             tag_palette: default_test_palette(),
+            cap_performance_tags: false,
             threshold: 500,
             max_input_length: 12_000,
             max_length: 4000,
@@ -1384,8 +1400,10 @@ mod tests {
 
     #[test]
     fn performance_tag_token_budget_scales_for_long_text() {
-        assert_eq!(performance_tags_max_output_tokens(225, 6000), 384);
-        assert_eq!(performance_tags_max_output_tokens(5400, 6000), 1800);
+        assert_eq!(performance_tags_max_output_tokens(225, 6000, true), 384);
+        assert_eq!(performance_tags_max_output_tokens(225, 6000, false), 3000);
+        assert_eq!(performance_tags_max_output_tokens(5400, 6000, true), 1800);
+        assert_eq!(performance_tags_max_output_tokens(5400, 6000, false), 3000);
     }
 
     #[test]
@@ -1412,6 +1430,7 @@ mod tests {
             reasoning_effort: None,
             strategies: crate::config::SpeechPrepStrategies::default(),
             tag_palette: default_test_palette(),
+            cap_performance_tags: false,
             threshold: 120,
             max_input_length: 12_000,
             max_length: 3000,
@@ -1476,6 +1495,7 @@ mod tests {
             reasoning_effort: None,
             strategies: crate::config::SpeechPrepStrategies::default(),
             tag_palette: default_test_palette(),
+            cap_performance_tags: false,
             threshold: 120,
             max_input_length: 12_000,
             max_length: 6000,
@@ -1508,6 +1528,7 @@ mod tests {
             reasoning_effort: None,
             strategies: crate::config::SpeechPrepStrategies::default(),
             tag_palette: default_test_palette(),
+            cap_performance_tags: false,
             threshold: 120,
             max_input_length: 12_000,
             max_length: 6000,
