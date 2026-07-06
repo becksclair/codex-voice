@@ -1,4 +1,6 @@
-use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
+use ashpd::desktop::global_shortcuts::{
+    BindShortcutsOptions, GlobalShortcuts, ListShortcutsOptions, NewShortcut,
+};
 use async_trait::async_trait;
 use codex_voice_core::{
     HotkeyEvent, HotkeyService, InsertMethod, InsertReport, PermissionKind, PermissionService,
@@ -28,6 +30,7 @@ const SPEAK_SELECTION_DESCRIPTION: &str = "Speak selected text with Codex Voice"
 const HOTKEY_START_TIMEOUT: Duration = Duration::from_secs(15);
 const HOTKEY_RELEASE_SETTLE: Duration = Duration::from_millis(80);
 const COPY_SETTLE: Duration = Duration::from_millis(120);
+const EXPECTED_SHORTCUT_IDS: [&str; 3] = [HOTKEY_ID, MEDIA_HOTKEY_ID, SPEAK_SELECTION_HOTKEY_ID];
 
 #[derive(Debug, Default, Clone)]
 pub struct LinuxPermissionService;
@@ -182,7 +185,7 @@ impl HotkeyService for LinuxHotkeyService {
     /// to run the GlobalShortcuts portal listener.  Callers that are already
     /// inside a Tokio runtime should expect this side effect.
     fn start(&self, events: mpsc::Sender<HotkeyEvent>) -> PlatformResult<()> {
-        if env::var("XDG_SESSION_TYPE").unwrap_or_default() != "wayland" {
+        if !has_wayland_hotkey_session() {
             return Err(PlatformError::Unavailable(
                 "Linux hotkey service currently targets KDE/Wayland only".into(),
             ));
@@ -288,6 +291,28 @@ async fn run_global_shortcut_listener(
         NewShortcut::new(SPEAK_SELECTION_HOTKEY_ID, SPEAK_SELECTION_DESCRIPTION)
             .preferred_trigger(Some(SPEAK_SELECTION_TRIGGER)),
     ];
+    match expected_shortcuts_are_bound(&portal, &session).await {
+        Ok(true) => {
+            tracing::info!(
+                app_id = PORTAL_APP_ID,
+                "GlobalShortcuts bindings already configured; attaching current session"
+            );
+        }
+        Ok(false) => {
+            tracing::info!(
+                app_id = PORTAL_APP_ID,
+                "GlobalShortcuts bindings missing; requesting binding"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                message = %error,
+                app_id = PORTAL_APP_ID,
+                "failed to preflight GlobalShortcuts bindings; requesting binding"
+            );
+        }
+    }
+
     portal
         .bind_shortcuts(&session, &shortcuts, None, BindShortcutsOptions::default())
         .await
@@ -358,4 +383,165 @@ async fn run_global_shortcut_listener(
 
 fn is_dictation_shortcut(shortcut_id: &str) -> bool {
     matches!(shortcut_id, HOTKEY_ID | MEDIA_HOTKEY_ID)
+}
+
+async fn expected_shortcuts_are_bound(
+    portal: &GlobalShortcuts,
+    session: &ashpd::desktop::Session<GlobalShortcuts>,
+) -> PlatformResult<bool> {
+    let response = portal
+        .list_shortcuts(session, ListShortcutsOptions::default())
+        .await
+        .map_err(|error| {
+            PlatformError::Unavailable(format!("failed to request GlobalShortcuts list: {error}"))
+        })?
+        .response()
+        .map_err(|error| {
+            PlatformError::Unavailable(format!("failed to list GlobalShortcuts bindings: {error}"))
+        })?;
+    let shortcuts = response.shortcuts();
+    Ok(EXPECTED_SHORTCUT_IDS
+        .iter()
+        .all(|expected| shortcuts.iter().any(|shortcut| shortcut.id() == *expected)))
+}
+
+fn has_wayland_hotkey_session() -> bool {
+    let has_wayland_session_type = env::var("XDG_SESSION_TYPE")
+        .map(|session_type| session_type.eq_ignore_ascii_case("wayland"))
+        .unwrap_or(false);
+    let has_wayland_display = env::var("WAYLAND_DISPLAY")
+        .map(|display| !display.trim().is_empty())
+        .unwrap_or(false);
+
+    kde_desktop_hint() && (has_wayland_session_type || has_wayland_display)
+}
+
+fn kde_desktop_hint() -> bool {
+    [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+    ]
+    .iter()
+    .filter_map(|key| env::var(key).ok())
+    .any(|value| {
+        let lower = value.to_ascii_lowercase();
+        lower.contains("kde") || lower.contains("plasma")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_wayland_hotkey_session, kde_desktop_hint};
+    use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn with_hotkey_env(vars: &[(&str, &str)], test: impl FnOnce()) {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock");
+        let keys = [
+            "XDG_SESSION_TYPE",
+            "WAYLAND_DISPLAY",
+            "XDG_CURRENT_DESKTOP",
+            "XDG_SESSION_DESKTOP",
+            "DESKTOP_SESSION",
+        ];
+        let previous: Vec<_> = keys.iter().map(|key| (*key, env::var(key).ok())).collect();
+        for key in keys {
+            env::remove_var(key);
+        }
+        for (key, value) in vars {
+            env::set_var(key, value);
+        }
+
+        test();
+
+        for key in keys {
+            env::remove_var(key);
+        }
+        for (key, value) in previous {
+            if let Some(value) = value {
+                env::set_var(key, value);
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_direct_wayland_session_type() {
+        with_hotkey_env(
+            &[
+                ("XDG_SESSION_TYPE", "wayland"),
+                ("XDG_CURRENT_DESKTOP", "KDE"),
+            ],
+            || {
+                assert!(has_wayland_hotkey_session());
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_direct_wayland_session_type_without_kde_hint() {
+        with_hotkey_env(
+            &[
+                ("XDG_SESSION_TYPE", "wayland"),
+                ("XDG_CURRENT_DESKTOP", "sway"),
+            ],
+            || {
+                assert!(!has_wayland_hotkey_session());
+            },
+        );
+    }
+
+    #[test]
+    fn accepts_kde_wayland_display_without_session_type() {
+        with_hotkey_env(
+            &[
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("XDG_CURRENT_DESKTOP", "KDE"),
+            ],
+            || {
+                assert!(has_wayland_hotkey_session());
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_kde_hint_without_wayland() {
+        with_hotkey_env(&[("XDG_CURRENT_DESKTOP", "KDE")], || {
+            assert!(!has_wayland_hotkey_session());
+        });
+    }
+
+    #[test]
+    fn accepts_stale_tty_type_when_kde_wayland_vars_are_present() {
+        with_hotkey_env(
+            &[
+                ("XDG_SESSION_TYPE", "tty"),
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("XDG_CURRENT_DESKTOP", "KDE"),
+            ],
+            || {
+                assert!(has_wayland_hotkey_session());
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_stale_tty_type_without_kde_hint() {
+        with_hotkey_env(
+            &[
+                ("XDG_SESSION_TYPE", "tty"),
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("XDG_CURRENT_DESKTOP", "sway"),
+            ],
+            || {
+                assert!(!has_wayland_hotkey_session());
+                assert!(!kde_desktop_hint());
+            },
+        );
+    }
 }
