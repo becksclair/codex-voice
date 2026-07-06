@@ -1,2 +1,4 @@
 /target/
 .ultra-review-state.json
+__pycache__/
+*.py[cod]
