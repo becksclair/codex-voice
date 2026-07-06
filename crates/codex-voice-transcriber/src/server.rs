@@ -225,18 +225,20 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         0 4px 14px rgba(0, 0, 0, 0.12);
       --glass-button-color: rgba(255, 250, 253, 0.98);
       --glass-button-bg:
-        radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 0.92), transparent 34%),
-        linear-gradient(145deg, rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0.32) 52%, rgba(255, 255, 255, 0.18));
-      --glass-button-border: rgba(255, 255, 255, 0.66);
+        linear-gradient(180deg, rgba(255, 238, 249, 0.19), rgba(255, 238, 249, 0.14));
+      --glass-button-sheen:
+        linear-gradient(110deg, rgba(255, 255, 255, 0.08), transparent 42%, rgba(255, 255, 255, 0.045) 72%, transparent);
+      --glass-button-edge: linear-gradient(rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
+      --glass-button-border: rgba(255, 255, 255, 0.24);
       --glass-button-shadow:
-        inset 0 1px 1px rgba(255, 255, 255, 0.86),
-        inset 0 -14px 18px rgba(255, 255, 255, 0.11),
-        0 14px 30px rgba(238, 94, 165, 0.18),
-        0 8px 24px rgba(0, 0, 0, 0.18);
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        inset 0 -1px 0 rgba(255, 255, 255, 0.035),
+        0 3px 8px rgba(0, 0, 0, 0.14);
+      --glass-button-filter: blur(14px) saturate(1.08);
+      --glass-icon-filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.16));
       --glass-button-hover-bg:
-        radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 0.98), transparent 36%),
-        linear-gradient(145deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.38) 52%, rgba(255, 255, 255, 0.22));
-      --glass-button-hover-border: rgba(255, 255, 255, 0.76);
+        linear-gradient(180deg, rgba(255, 238, 249, 0.24), rgba(255, 238, 249, 0.17));
+      --glass-button-hover-border: rgba(255, 255, 255, 0.3);
       --button-text: #fff7fb;
       --button-shadow: 0 10px 24px rgba(238, 94, 165, 0.22);
       --secondary-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 20px rgba(0, 0, 0, 0.16);
@@ -244,6 +246,26 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       --spinner-top: #fff7fb;
       --progress-track: rgba(74, 29, 81, 0.36);
       --progress-fill: var(--panel-strong);
+      --seekbar-bg:
+        linear-gradient(145deg, rgba(41, 20, 53, 0.72), rgba(24, 10, 34, 0.74) 56%, rgba(36, 15, 45, 0.64));
+      --seekbar-sheen:
+        radial-gradient(ellipse at 50% 2%, rgba(255, 255, 255, 0.115), transparent 42%),
+        radial-gradient(ellipse at 86% 52%, rgba(255, 255, 255, 0.08), transparent 33%),
+        radial-gradient(ellipse at 18% 28%, rgba(255, 255, 255, 0.05), transparent 30%),
+        linear-gradient(90deg, transparent 10%, rgba(255, 255, 255, 0.032) 48%, rgba(255, 255, 255, 0.055) 78%, transparent 96%);
+      --seekbar-border: rgba(255, 255, 255, 0.1);
+      --seekbar-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.075),
+        inset 0 -14px 24px rgba(255, 255, 255, 0.018),
+        0 12px 28px rgba(0, 0, 0, 0.22),
+        0 8px 18px rgba(238, 94, 165, 0.035);
+      --seekbar-filter: blur(20px) saturate(1.05);
+      --waveform-played: #f06aa9;
+      --waveform-future: rgba(240, 106, 169, 0.26);
+      --waveform-empty: rgba(240, 106, 169, 0.2);
+      --seekbar-thumb: rgba(255, 247, 251, 0.9);
+      --seekbar-thumb-border: #f06aa9;
+      --seekbar-marker: #f06aa9;
       --settings-bg: rgba(36, 18, 47, 0.72);
       --settings-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
     }
@@ -290,16 +312,22 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         0 4px 14px rgba(103, 50, 89, 0.12);
       --glass-button-color: rgba(58, 23, 53, 0.84);
       --glass-button-bg:
-        radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 0.98), transparent 36%),
         linear-gradient(145deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.7) 52%, rgba(255, 255, 255, 0.48));
+      --glass-button-sheen:
+        radial-gradient(ellipse at 50% 4%, rgba(255, 255, 255, 0.9), transparent 45%),
+        radial-gradient(ellipse at 82% 56%, rgba(255, 255, 255, 0.38), transparent 34%),
+        radial-gradient(ellipse at 22% 28%, rgba(255, 255, 255, 0.52), transparent 32%),
+        linear-gradient(135deg, transparent 8%, rgba(255, 255, 255, 0.28) 48%, rgba(255, 255, 255, 0.34) 82%, transparent 100%);
+      --glass-button-edge: linear-gradient(rgba(255, 255, 255, 0.64), rgba(255, 255, 255, 0));
       --glass-button-border: rgba(255, 255, 255, 0.9);
       --glass-button-shadow:
         inset 0 1px 1px rgba(255, 255, 255, 0.98),
         inset 0 -14px 18px rgba(238, 214, 230, 0.22),
         0 12px 24px rgba(229, 55, 134, 0.16),
         0 8px 22px rgba(103, 50, 89, 0.14);
+      --glass-button-filter: blur(18px) saturate(1.65);
+      --glass-icon-filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.2));
       --glass-button-hover-bg:
-        radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 1), transparent 38%),
         linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.78) 52%, rgba(255, 255, 255, 0.56));
       --glass-button-hover-border: rgba(255, 255, 255, 0.98);
       --button-text: #fff7fb;
@@ -309,6 +337,25 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       --spinner-top: #fff7fb;
       --progress-track: rgba(240, 185, 215, 0.62);
       --progress-fill: #8d397f;
+      --seekbar-bg:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.64), rgba(255, 255, 255, 0.34));
+      --seekbar-sheen:
+        radial-gradient(ellipse at 50% 2%, rgba(255, 255, 255, 0.82), transparent 44%),
+        radial-gradient(ellipse at 86% 52%, rgba(255, 255, 255, 0.34), transparent 34%),
+        radial-gradient(ellipse at 20% 26%, rgba(255, 255, 255, 0.46), transparent 32%),
+        linear-gradient(90deg, transparent 8%, rgba(255, 255, 255, 0.2) 48%, rgba(255, 255, 255, 0.28) 78%, transparent 96%);
+      --seekbar-border: rgba(255, 255, 255, 0.62);
+      --seekbar-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.86),
+        0 14px 28px rgba(103, 50, 89, 0.12),
+        0 10px 24px rgba(229, 55, 134, 0.12);
+      --seekbar-filter: blur(18px) saturate(1.35);
+      --waveform-played: #e53786;
+      --waveform-future: rgba(229, 55, 134, 0.22);
+      --waveform-empty: rgba(229, 55, 134, 0.16);
+      --seekbar-thumb: #fff8fd;
+      --seekbar-thumb-border: #e53786;
+      --seekbar-marker: #e53786;
       --settings-bg: rgba(251, 246, 251, 0.78);
       --settings-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78), 0 8px 24px rgba(103, 50, 89, 0.08);
     }
@@ -502,26 +549,35 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     .buttons .icon-button {
       position: relative;
       overflow: hidden;
+      border-radius: 13px;
       color: var(--glass-button-color);
       background: var(--glass-button-bg);
       border-color: var(--glass-button-border);
       box-shadow: var(--glass-button-shadow);
-      backdrop-filter: blur(18px) saturate(1.65);
-      -webkit-backdrop-filter: blur(18px) saturate(1.65);
+      backdrop-filter: var(--glass-button-filter);
+      -webkit-backdrop-filter: var(--glass-button-filter);
+    }
+    .buttons .icon-button::before {
+      content: "";
+      position: absolute;
+      inset: 1px;
+      border-radius: inherit;
+      background: var(--glass-button-sheen);
+      pointer-events: none;
     }
     .buttons .icon-button::after {
       content: "";
       position: absolute;
       inset: 1px 1px auto 1px;
-      height: 45%;
+      height: 28%;
       border-radius: inherit;
-      background: linear-gradient(rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0));
+      background: var(--glass-button-edge);
       pointer-events: none;
     }
     .buttons .icon-button svg {
       position: relative;
-      z-index: 1;
-      filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.2));
+      z-index: 2;
+      filter: var(--glass-icon-filter);
     }
     .buttons .icon-button:hover {
       background: var(--glass-button-hover-bg);
@@ -574,19 +630,100 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       cursor: not-allowed;
       opacity: 0.55;
     }
-    input[type="range"] {
-      width: 100%;
-      accent-color: var(--accent);
+    .buttons .icon-button:disabled {
+      opacity: 0.72;
     }
     .scrubber {
+      position: relative;
+      overflow: hidden;
       display: grid;
       grid-template-columns: auto minmax(0, 1fr) auto;
       align-items: center;
-      gap: 10px;
-      padding: 10px 0;
+      gap: 12px;
+      min-height: 44px;
+      padding: 5px 14px;
+      border: 1px solid var(--seekbar-border);
+      border-radius: 999px;
+      background: var(--seekbar-bg);
+      box-shadow: var(--seekbar-shadow);
+      backdrop-filter: var(--seekbar-filter);
+      -webkit-backdrop-filter: var(--seekbar-filter);
       color: var(--muted);
       font-variant-numeric: tabular-nums;
       font-size: 0.95rem;
+    }
+    .scrubber::before {
+      content: "";
+      position: absolute;
+      inset: 1px;
+      border-radius: inherit;
+      background: var(--seekbar-sheen);
+      pointer-events: none;
+    }
+    .scrubber > * {
+      position: relative;
+      z-index: 1;
+    }
+    .scrubber time {
+      min-width: 3.6ch;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .waveform-slider {
+      position: relative;
+      height: 34px;
+      min-width: 0;
+      cursor: pointer;
+      touch-action: none;
+      outline: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .waveform-slider[aria-disabled="true"] {
+      cursor: default;
+    }
+    .waveform-slider:focus-visible {
+      border-radius: 18px;
+      box-shadow: 0 0 0 4px var(--focus-ring);
+    }
+    #waveform {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .waveform-marker {
+      position: absolute;
+      top: -7px;
+      bottom: -7px;
+      left: calc(var(--seek-progress, 0) * 100%);
+      width: 2px;
+      transform: translateX(-1px);
+      border-radius: 999px;
+      background: var(--seekbar-marker);
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+      pointer-events: none;
+    }
+    .waveform-thumb {
+      position: absolute;
+      left: calc(var(--seek-progress, 0) * 100%);
+      bottom: 2px;
+      width: 22px;
+      height: 22px;
+      transform: translateX(-50%);
+      border: 2px solid var(--seekbar-thumb-border);
+      border-radius: 999px;
+      background: var(--seekbar-thumb);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.84),
+        0 6px 14px rgba(103, 50, 89, 0.18);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 120ms ease;
+    }
+    .waveform-slider.scrubbing .waveform-thumb {
+      opacity: 1;
     }
     .settings {
       border: 1px solid var(--line);
@@ -671,9 +808,13 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     </div>
     <section class="controls">
       <div class="scrubber">
-        <span id="elapsed">0:00</span>
-        <input id="seek" type="range" min="0" max="1000" value="0" disabled aria-label="Audio position">
-        <span id="duration">0:00</span>
+        <time id="elapsed">0:00</time>
+        <div id="waveform-slider" class="waveform-slider" role="slider" tabindex="0" aria-label="Audio position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00 of 0:00" aria-disabled="true">
+          <canvas id="waveform" aria-hidden="true"></canvas>
+          <span class="waveform-marker" aria-hidden="true"></span>
+          <span class="waveform-thumb" aria-hidden="true"></span>
+        </div>
+        <time id="duration">0:00</time>
       </div>
       <div class="buttons">
         <button id="generate" type="button">
@@ -743,7 +884,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     const themeSelect = document.getElementById('theme');
     const emotion = document.getElementById('emotion');
     const summarize = document.getElementById('summarize');
-    const seek = document.getElementById('seek');
+    const seekSlider = document.getElementById('waveform-slider');
+    const waveformCanvas = document.getElementById('waveform');
     const elapsed = document.getElementById('elapsed');
     const duration = document.getElementById('duration');
     const errorBanner = document.getElementById('error-banner');
@@ -756,6 +898,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     const generatedAudioStore = 'generated';
     const lastGeneratedAudioKey = 'last';
     const maxPendingGenerationAgeMs = 6 * 60 * 60 * 1000;
+    const serverJobMaxPollMs = 10 * 60 * 1000;
     const defaultSpeechPrepAttemptTimeoutMs = 4000;
     const performanceTagsMaxOutputTokens = 384;
     const performanceTagsAbsoluteMaxOutputTokens = 4096;
@@ -768,11 +911,16 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     let objectUrl = null;
     let currentAudioBlob = null;
     let seeking = false;
+    let waveform = null;
+    let waveformDecodeId = 0;
     let directConfig = loadCachedConfig();
     let settings = loadSettings();
     let serviceWorkerRefreshing = false;
     let pendingWorkerReload = false;
     let generationActive = false;
+    let generationRunId = 0;
+    let generationCancelled = false;
+    let activeGenerationController = null;
     let lifecycleInterruptedGeneration = false;
     let activeStreamPlayback = null;
     applyThemeSetting(settings.theme);
@@ -793,6 +941,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     text.value = localStorage.getItem(textStorageKey) || '';
     updateVisualViewportLayout();
     updateCount();
+    resetWaveform();
     applySettingsToForm();
     populateSettings();
     refreshConfig();
@@ -806,6 +955,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       document.documentElement.style.setProperty('--visual-viewport-height', `${height}px`);
       document.documentElement.style.setProperty('--visual-viewport-offset-top', `${offsetTop}px`);
       document.documentElement.classList.toggle('keyboard-open', keyboardInset > 80);
+      scheduleWaveformDraw();
     }
 
     if (window.visualViewport) {
@@ -1019,10 +1169,332 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       clear.hidden = chars === 0;
     }
 
+    function newWaveformState(mode = 'empty') {
+      return {
+        mode,
+        peaks: [],
+        duration: 0,
+        bufferedDuration: 0,
+        currentTime: 0,
+        sampleRate: 24000,
+        channels: 1,
+        finished: false,
+        drawing: false,
+        decodeId: 0
+      };
+    }
+
+    function resetWaveform() {
+      waveformDecodeId += 1;
+      waveform = newWaveformState('empty');
+      setWaveformSeekable(false);
+      setWaveformProgress(0);
+      scheduleWaveformDraw();
+    }
+
+    function resetStreamingWaveform(sampleRate = 24000, channels = 1) {
+      waveformDecodeId += 1;
+      waveform = newWaveformState('streaming');
+      waveform.sampleRate = sampleRate;
+      waveform.channels = channels;
+      setWaveformSeekable(false);
+      setWaveformProgress(0);
+      scheduleWaveformDraw();
+    }
+
+    function setWaveformSeekable(enabled) {
+      seekSlider.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+      seekSlider.tabIndex = enabled ? 0 : -1;
+    }
+
+    function setWaveformProgress(progress) {
+      seekSlider.style.setProperty('--seek-progress', String(clamp(progress, 0, 1)));
+    }
+
+    function waveformBufferedRatio() {
+      if (!waveform || waveform.mode !== 'streaming') return 1;
+      if (waveform.finished) return 1;
+      if (waveform.bufferedDuration <= 0) return 0;
+      return clamp(waveform.bufferedDuration / (waveform.bufferedDuration + 8), 0.12, 0.72);
+    }
+
+    function waveformPositionRatio() {
+      if (!waveform) return 0;
+      if (waveform.mode === 'complete') {
+        return waveform.duration > 0 ? clamp(waveform.currentTime / waveform.duration, 0, 1) : 0;
+      }
+      if (waveform.mode === 'streaming') {
+        const loaded = waveformBufferedRatio();
+        return waveform.bufferedDuration > 0
+          ? clamp((waveform.currentTime / waveform.bufferedDuration) * loaded, 0, loaded)
+          : 0;
+      }
+      return 0;
+    }
+
+    function updateWaveformAria() {
+      const max = waveform?.mode === 'complete'
+        ? waveform.duration
+        : waveform?.mode === 'streaming'
+          ? waveform.bufferedDuration
+          : 0;
+      const now = Math.min(max || 0, Math.max(0, waveform?.currentTime || 0));
+      seekSlider.setAttribute('aria-valuemax', String(Math.round(max || 0)));
+      seekSlider.setAttribute('aria-valuenow', String(Math.round(now)));
+      seekSlider.setAttribute('aria-valuetext', `${formatTime(now)} of ${max > 0 ? formatTime(max) : '0:00'}`);
+      setWaveformSeekable((waveform?.mode === 'complete' && max > 0) || (waveform?.mode === 'streaming' && max > 0));
+    }
+
+    function setWaveformCurrent(seconds) {
+      if (!waveform) return;
+      const max = waveform.mode === 'complete' ? waveform.duration : waveform.bufferedDuration;
+      waveform.currentTime = clamp(Number(seconds) || 0, 0, max || 0);
+      setWaveformProgress(waveformPositionRatio());
+      updateWaveformAria();
+      scheduleWaveformDraw();
+    }
+
+    function cssColor(name) {
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
+    function scheduleWaveformDraw() {
+      if (!waveform || waveform.drawing) return;
+      waveform.drawing = true;
+      requestAnimationFrame(() => {
+        if (!waveform) return;
+        waveform.drawing = false;
+        drawWaveform();
+      });
+    }
+
+    function resizeWaveformCanvas(rect) {
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const width = Math.max(1, Math.round(rect.width * dpr));
+      const height = Math.max(1, Math.round(rect.height * dpr));
+      if (waveformCanvas.width !== width || waveformCanvas.height !== height) {
+        waveformCanvas.width = width;
+        waveformCanvas.height = height;
+      }
+      const ctx = waveformCanvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return ctx;
+    }
+
+    function drawRoundedBar(ctx, x, centerY, width, height, color) {
+      const top = centerY - height / 2;
+      const radius = Math.min(width / 2, height / 2);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.roundRect(x, top, width, height, radius);
+      ctx.fill();
+    }
+
+    function samplePeaks(peaks, count) {
+      if (!peaks?.length || count <= 0) return [];
+      const sampled = [];
+      for (let i = 0; i < count; i += 1) {
+        const start = Math.floor((i / count) * peaks.length);
+        const end = Math.max(start + 1, Math.ceil(((i + 1) / count) * peaks.length));
+        let max = 0;
+        let sum = 0;
+        let sumSquares = 0;
+        let samples = 0;
+        for (let j = start; j < end && j < peaks.length; j += 1) {
+          const peak = clamp(peaks[j] || 0, 0, 1);
+          max = Math.max(max, peak);
+          sum += peak;
+          sumSquares += peak * peak;
+          samples += 1;
+        }
+        const mean = samples > 0 ? sum / samples : 0;
+        const rms = samples > 0 ? Math.sqrt(sumSquares / samples) : 0;
+        sampled.push(clamp((mean * 0.62) + (rms * 0.28) + (max * 0.1), 0, 1));
+      }
+      return sampled;
+    }
+
+    function peakContrastRange(peaks) {
+      if (!peaks?.length) return { floor: 0, ceiling: 1 };
+      const sorted = peaks.filter((peak) => Number.isFinite(peak)).map((peak) => clamp(peak, 0, 1)).sort((a, b) => a - b);
+      if (!sorted.length) return { floor: 0, ceiling: 1 };
+      const low = sorted[Math.floor((sorted.length - 1) * 0.12)];
+      const high = sorted[Math.floor((sorted.length - 1) * 0.9)];
+      return {
+        floor: Math.max(0, low - 0.025),
+        ceiling: Math.min(1, Math.max(high, low + 0.18))
+      };
+    }
+
+    function drawEmptyWaveform(ctx, width, height, startX = 0) {
+      const centerY = height / 2;
+      const color = cssColor('--waveform-empty');
+      for (let x = startX; x < width; x += 5) {
+        drawRoundedBar(ctx, x, centerY, 2, 2 + ((Math.floor(x / 20) % 3) * 1.5), color);
+      }
+    }
+
+    function drawPeakWaveform(ctx, width, height, loadedWidth, playedX) {
+      const gap = 2;
+      const barWidth = 2;
+      const step = barWidth + gap;
+      const centerY = height / 2;
+      const maxBar = Math.max(12, height * 0.86);
+      const count = Math.max(1, Math.floor(width / step));
+      const loadedCount = Math.max(1, Math.floor(loadedWidth / step));
+      const peaks = samplePeaks(waveform.peaks, loadedCount);
+      const contrast = peakContrastRange(peaks);
+      const contrastRange = Math.max(0.08, contrast.ceiling - contrast.floor);
+      for (let i = 0; i < loadedCount; i += 1) {
+        const x = i * step;
+        const peak = peaks[i] || 0;
+        const relativePeak = clamp((peak - contrast.floor) / contrastRange, 0, 1);
+        const visualPeak = clamp((Math.pow(relativePeak, 0.86) * 0.94) + (peak * 0.08), 0, 1);
+        const barHeight = Math.max(3, Math.min(maxBar, 3 + visualPeak * (maxBar - 3)));
+        const color = x <= playedX ? cssColor('--waveform-played') : cssColor('--waveform-future');
+        drawRoundedBar(ctx, x, centerY, barWidth, barHeight, color);
+      }
+      if (loadedWidth < width - step) drawEmptyWaveform(ctx, width, height, loadedWidth + step);
+    }
+
+    function drawWaveform() {
+      const rect = waveformCanvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const ctx = resizeWaveformCanvas(rect);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      const playedX = waveformPositionRatio() * rect.width;
+      if (!waveform || waveform.mode === 'empty' || !waveform.peaks.length) {
+        drawEmptyWaveform(ctx, rect.width, rect.height);
+      } else {
+        const loadedWidth = waveform.mode === 'streaming' ? waveformBufferedRatio() * rect.width : rect.width;
+        drawPeakWaveform(ctx, rect.width, rect.height, loadedWidth, playedX);
+      }
+      setWaveformProgress(waveformPositionRatio());
+      updateWaveformAria();
+    }
+
+    function peaksFromAudioBuffer(buffer, targetCount = 640) {
+      const length = buffer.length;
+      const count = Math.max(1, Math.min(targetCount, length));
+      const bucketSize = Math.max(1, Math.floor(length / count));
+      const peaks = [];
+      for (let bucket = 0; bucket < count; bucket += 1) {
+        const start = bucket * bucketSize;
+        const end = bucket === count - 1 ? length : Math.min(length, start + bucketSize);
+        let peak = 0;
+        for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+          const data = buffer.getChannelData(channel);
+          for (let index = start; index < end; index += 1) {
+            peak = Math.max(peak, Math.abs(data[index] || 0));
+          }
+        }
+        peaks.push(peak);
+      }
+      return peaks;
+    }
+
+    async function decodeWaveformBlob(blob) {
+      const Ctor = audioContextCtor();
+      if (!Ctor || !blob) {
+        resetWaveform();
+        return;
+      }
+      const decodeId = waveformDecodeId + 1;
+      waveformDecodeId = decodeId;
+      waveform = { ...newWaveformState('complete'), decodeId };
+      scheduleWaveformDraw();
+      let context = null;
+      try {
+        const bytes = await blob.arrayBuffer();
+        context = new Ctor();
+        const buffer = await context.decodeAudioData(bytes.slice(0));
+        if (!waveform || waveform.decodeId !== decodeId) return;
+        waveform.mode = 'complete';
+        waveform.peaks = peaksFromAudioBuffer(buffer);
+        waveform.duration = buffer.duration;
+        waveform.bufferedDuration = buffer.duration;
+        waveform.currentTime = audio.currentTime || 0;
+        setWaveformSeekable(buffer.duration > 0);
+        scheduleWaveformDraw();
+      } catch (error) {
+        console.warn(error);
+        if (waveform?.decodeId === decodeId) resetWaveform();
+      } finally {
+        context?.close?.().catch(() => {});
+      }
+    }
+
+    function appendStreamingWaveformPcm(bytes, sampleRate, channels = 1) {
+      if (!waveform || waveform.mode !== 'streaming') resetStreamingWaveform(sampleRate, channels);
+      waveform.sampleRate = sampleRate;
+      waveform.channels = channels;
+      const frameCount = Math.floor(bytes.length / (2 * channels));
+      const bucketFrames = Math.max(128, Math.floor(sampleRate / 45));
+      for (let frame = 0; frame < frameCount; frame += bucketFrames) {
+        const end = Math.min(frameCount, frame + bucketFrames);
+        let peak = 0;
+        for (let i = frame; i < end; i += 1) {
+          for (let channel = 0; channel < channels; channel += 1) {
+            const offset = ((i * channels) + channel) * 2;
+            const value = bytes[offset] | (bytes[offset + 1] << 8);
+            const signed = value >= 0x8000 ? value - 0x10000 : value;
+            peak = Math.max(peak, Math.abs(signed / 32768));
+          }
+        }
+        waveform.peaks.push(peak);
+      }
+      waveform.bufferedDuration += frameCount / sampleRate;
+      waveform.duration = waveform.bufferedDuration;
+      setWaveformSeekable(waveform.bufferedDuration > 0);
+      scheduleWaveformDraw();
+    }
+
+    function seekTimeFromClientX(clientX) {
+      if (!waveform) return 0;
+      const rect = seekSlider.getBoundingClientRect();
+      const ratio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+      if (waveform.mode === 'streaming') {
+        const loaded = waveformBufferedRatio();
+        return loaded > 0 ? clamp(ratio / loaded, 0, 1) * waveform.bufferedDuration : 0;
+      }
+      return ratio * (waveform.duration || 0);
+    }
+
+    function seekToWaveformTime(seconds) {
+      const target = Math.max(0, Number(seconds) || 0);
+      if (activeStreamPlayback) {
+        activeStreamPlayback.seekTo(target).catch((error) => showError(error.message || 'Seek failed.'));
+        return;
+      }
+      const total = audio.duration || 0;
+      if (total > 0) {
+        audio.currentTime = clamp(target, 0, total);
+        updatePosition();
+      }
+    }
+
+    function handleWaveformPointer(event) {
+      if (seekSlider.getAttribute('aria-disabled') === 'true') return;
+      seeking = true;
+      seekSlider.classList.add('scrubbing');
+      seekToWaveformTime(seekTimeFromClientX(event.clientX));
+      event.preventDefault();
+    }
+
+    let keyboardScrubTimer = null;
+    function showKeyboardScrubFeedback() {
+      seekSlider.classList.add('scrubbing');
+      if (keyboardScrubTimer) clearTimeout(keyboardScrubTimer);
+      keyboardScrubTimer = setTimeout(() => {
+        keyboardScrubTimer = null;
+        if (!seeking) seekSlider.classList.remove('scrubbing');
+      }, 420);
+    }
+
     function updatePosition() {
       const total = audio.duration || 0;
       if (!seeking && total > 0) {
-        seek.value = Math.round((audio.currentTime / total) * 1000);
+        setWaveformCurrent(audio.currentTime);
       }
       elapsed.textContent = formatTime(audio.currentTime);
       duration.textContent = formatTime(total);
@@ -1083,10 +1555,9 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       play.disabled = true;
       download.disabled = true;
       playSvg(true);
-      seek.disabled = true;
-      seek.value = 0;
       elapsed.textContent = '0:00';
       duration.textContent = '0:00';
+      resetWaveform();
     }
 
     function loadAudioBlob(blob) {
@@ -1097,7 +1568,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       audio.load();
       play.disabled = false;
       download.disabled = false;
-      seek.disabled = false;
+      decodeWaveformBlob(blob);
     }
 
     function ttsStreamPcmGain() {
@@ -1163,9 +1634,11 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       constructor() {
         const Ctor = audioContextCtor();
         if (!Ctor) throw new Error('Streaming playback is not supported by this browser.');
-        this.context = new Ctor();
+        this.Ctor = Ctor;
+        this.context = null;
         this.nextStartTime = 0;
         this.startedAt = 0;
+        this.seekOffset = 0;
         this.pendingSources = 0;
         this.finished = false;
         this.stopped = false;
@@ -1174,52 +1647,104 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         this.estimatedDuration = 0;
         this.timer = null;
         this.playing = true;
+        this.buffers = [];
+        this.seekSerial = 0;
       }
 
       async start() {
         stopActiveStreamPlayback();
         resetAudio();
         activeStreamPlayback = this;
+        this.context = new this.Ctor();
         this.startedAt = this.context.currentTime;
         this.nextStartTime = this.context.currentTime + 0.08;
         play.disabled = false;
-        seek.disabled = true;
-        seek.value = 0;
         duration.textContent = 'Live';
+        resetStreamingWaveform();
         playSvg(false);
         await this.context.resume();
         this.timer = setInterval(() => this.updatePosition(), 250);
         this.updatePosition();
       }
 
-      appendPcm(bytes, sampleRate, channels = 1) {
+      appendPcm(bytes, sampleRate, channels = 1, waveformBytes = bytes) {
         if (this.stopped || !bytes?.length) return;
+        const duration = Math.floor(bytes.length / (2 * channels)) / sampleRate;
+        this.buffers.push({ bytes, sampleRate, channels, duration });
+        appendStreamingWaveformPcm(waveformBytes, sampleRate, channels);
         const buffer = pcm16ToAudioBuffer(this.context, bytes, sampleRate, channels);
+        this.scheduleBuffer(buffer, 0);
+        this.estimatedDuration += buffer.duration;
+        this.updatePosition();
+      }
+
+      scheduleBuffer(buffer, offset = 0) {
+        const sourceContext = this.context;
+        const sourceSeekSerial = this.seekSerial;
         const source = this.context.createBufferSource();
         source.buffer = buffer;
         source.connect(this.context.destination);
         this.pendingSources += 1;
         source.onended = () => {
+          if (this.stopped || this.context !== sourceContext || this.seekSerial !== sourceSeekSerial) return;
           this.pendingSources = Math.max(0, this.pendingSources - 1);
           this.checkDrain();
         };
         const startAt = Math.max(this.nextStartTime, this.context.currentTime + 0.03);
-        source.start(startAt);
-        this.nextStartTime = startAt + buffer.duration;
-        this.estimatedDuration += buffer.duration;
-        this.updatePosition();
+        source.start(startAt, offset);
+        this.nextStartTime = startAt + Math.max(0, buffer.duration - offset);
       }
 
       async toggle() {
         if (this.context.state === 'suspended') {
-          await this.context.resume();
           this.playing = true;
           playSvg(false);
+          await this.context.resume();
         } else {
-          await this.context.suspend();
           this.playing = false;
           playSvg(true);
+          await this.context.suspend();
         }
+        this.updatePosition();
+      }
+
+      async seekTo(seconds) {
+        if (this.stopped || !this.context) return;
+        const target = clamp(seconds, 0, this.estimatedDuration);
+        const wasPlaying = this.playing;
+        const seekSerial = this.seekSerial + 1;
+        this.seekSerial = seekSerial;
+        const previousContext = this.context;
+        const nextContext = new this.Ctor();
+        this.context = nextContext;
+        this.pendingSources = 0;
+        this.nextStartTime = this.context.currentTime + 0.05;
+        this.startedAt = this.context.currentTime;
+        this.seekOffset = target;
+        previousContext?.close?.().catch(() => {});
+        let cursor = 0;
+        for (const chunk of this.buffers) {
+          const chunkStart = cursor;
+          const chunkEnd = chunkStart + chunk.duration;
+          cursor = chunkEnd;
+          if (chunkEnd <= target) continue;
+          const offset = Math.max(0, target - chunkStart);
+          const buffer = pcm16ToAudioBuffer(this.context, chunk.bytes, chunk.sampleRate, chunk.channels);
+          this.scheduleBuffer(buffer, offset);
+        }
+        try {
+          if (wasPlaying) {
+            await nextContext.resume();
+          } else {
+            await nextContext.suspend();
+          }
+        } catch (_) {
+          if (this.seekSerial !== seekSerial || this.context !== nextContext || this.stopped) return;
+          throw _;
+        }
+        if (this.seekSerial !== seekSerial || this.context !== nextContext || this.stopped) return;
+        this.playing = wasPlaying;
+        playSvg(!wasPlaying);
         this.updatePosition();
       }
 
@@ -1230,15 +1755,34 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
 
       markFinished() {
         this.finished = true;
+        if (waveform?.mode === 'streaming') {
+          waveform.finished = true;
+          scheduleWaveformDraw();
+        }
         this.checkDrain();
+      }
+
+      elapsedSeconds() {
+        if (!this.context) return this.seekOffset;
+        return clamp(this.seekOffset + Math.max(0, this.context.currentTime - this.startedAt), 0, this.estimatedDuration);
       }
 
       updatePosition() {
         if (activeStreamPlayback !== this || this.stopped) return;
-        elapsed.textContent = formatTime(Math.max(0, this.context.currentTime - this.startedAt));
+        const current = this.elapsedSeconds();
+        elapsed.textContent = formatTime(current);
         duration.textContent = this.finished ? formatTime(this.estimatedDuration) : 'Live';
-        seek.disabled = true;
-        seek.value = 0;
+        setWaveformCurrent(current);
+        if (
+          this.finished
+          && this.replayBlob
+          && !this.replayLoaded
+          && this.context
+          && this.context.currentTime >= this.nextStartTime + 0.08
+        ) {
+          this.pendingSources = 0;
+          this.checkDrain();
+        }
       }
 
       checkDrain() {
@@ -1246,7 +1790,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         if (!this.finished || this.pendingSources > 0 || !this.replayBlob || this.replayLoaded) return;
         this.replayLoaded = true;
         if (activeStreamPlayback === this) activeStreamPlayback = null;
-        this.stop({ keepButton: true });
+        this.stop();
         loadAudioBlob(this.replayBlob);
         reloadForWorkerUpdateWhenIdle();
       }
@@ -1255,7 +1799,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         this.stopped = true;
         if (this.timer) clearInterval(this.timer);
         this.timer = null;
-        this.context.close().catch(() => {});
+        this.context?.close?.().catch(() => {});
         if (!options.keepButton) playSvg(true);
       }
     }
@@ -1322,6 +1866,10 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       try {
         const pending = JSON.parse(localStorage.getItem(generationStateStorageKey) || 'null');
         if (!pending?.input || !pending?.startedAt) return null;
+        if (!pending.jobId) {
+          localStorage.removeItem(generationStateStorageKey);
+          return null;
+        }
         if (Date.now() - pending.startedAt > maxPendingGenerationAgeMs) {
           localStorage.removeItem(generationStateStorageKey);
           return null;
@@ -1337,7 +1885,29 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       localStorage.removeItem(generationStateStorageKey);
     }
 
+    function generationAbortError(message = 'Generation was cancelled.') {
+      const error = new Error(message);
+      error.name = 'AbortError';
+      return error;
+    }
+
+    function throwIfGenerationCancelled(signal, runId = generationRunId) {
+      if (signal?.aborted || generationCancelled || runId !== generationRunId) {
+        throw generationAbortError();
+      }
+    }
+
+    function cancelActiveGeneration() {
+      generationCancelled = true;
+      generationRunId += 1;
+      clearPendingGeneration();
+      activeGenerationController?.abort();
+      activeGenerationController = null;
+      stopActiveStreamPlayback();
+    }
+
     function shouldKeepPendingGeneration(error) {
+      if (generationCancelled) return false;
       if (error?.status) return false;
       return error?.name === 'AbortError' || (lifecycleInterruptedGeneration && error?.name === 'TypeError');
     }
@@ -2504,7 +3074,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
           sampleRate = Number(meta.sampleRate) || sampleRate;
           channels = Number(meta.channels) || channels;
           parts.push(gained);
-          playback.appendPcm(gained, sampleRate, channels);
+          playback.appendPcm(gained, sampleRate, channels, pcm);
           setGenerateProgress(0.72, 'Streaming');
         },
         finish() {
@@ -2555,7 +3125,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return false;
     }
 
-    async function streamElevenLabs(config, input, persona) {
+    async function streamElevenLabs(config, input, persona, signal = null, runId = generationRunId) {
+      throwIfGenerationCancelled(signal, runId);
       const elevenlabs = config.providers?.elevenlabs;
       if (!canStreamElevenLabs(config, persona)) throw new Error('ElevenLabs streaming is not available.');
       const streamConfig = elevenlabs.streaming || {};
@@ -2564,7 +3135,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       const channels = Number(streamConfig.channels) || 1;
       const modelId = resolveElevenLabsStreamingModel(elevenlabs);
       if (!elevenLabsWebSocketModelSupported(modelId)) {
-        return streamElevenLabsHttp(config, input, persona, { outputFormat, sampleRate, channels, modelId });
+        return streamElevenLabsHttp(config, input, persona, { outputFormat, sampleRate, channels, modelId }, signal, runId);
       }
       const voiceId = persona.elevenlabs.voiceId;
       const url = new URL(`${websocketBaseUrl(elevenlabs.baseUrl)}/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream-input`);
@@ -2584,8 +3155,18 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         let opened = false;
         let receivedAudio = false;
         const socket = new WebSocket(url.toString());
+        const abort = () => {
+          try { socket.close(); } catch (_) {}
+          fail(generationAbortError());
+        };
+        if (signal?.aborted) {
+          abort();
+          return;
+        }
+        signal?.addEventListener('abort', abort, { once: true });
         const finish = () => {
           if (settled) return;
+          signal?.removeEventListener('abort', abort);
           try {
             const blob = sink.finish();
             settled = true;
@@ -2596,6 +3177,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         };
         const fail = (error) => {
           if (settled) return;
+          signal?.removeEventListener('abort', abort);
           settled = true;
           sink.fail();
           reject(error instanceof Error ? error : new Error(String(error || 'ElevenLabs stream failed.')));
@@ -2640,7 +3222,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       });
     }
 
-    async function streamElevenLabsHttp(config, input, persona, streamMeta) {
+    async function streamElevenLabsHttp(config, input, persona, streamMeta, signal = null, runId = generationRunId) {
+      throwIfGenerationCancelled(signal, runId);
       const elevenlabs = config.providers?.elevenlabs;
       const voiceId = persona.elevenlabs.voiceId;
       const outputFormat = streamMeta.outputFormat || 'pcm_24000';
@@ -2668,7 +3251,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
           'Content-Type': 'application/json',
           'xi-api-key': elevenlabs.apiKey
         },
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal
       });
       if (!response.ok) {
         sink.fail();
@@ -2681,6 +3265,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       try {
         const reader = response.body.getReader();
         for (;;) {
+          throwIfGenerationCancelled(signal, runId);
           const { value, done } = await reader.read();
           if (done) break;
           sink.onAudioChunk(value, { sampleRate, channels });
@@ -2697,7 +3282,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return String(baseUrl || 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '').replace(/\/models$/, '');
     }
 
-    async function readGoogleInteractionStream(response, sink, sampleRate, channels) {
+    async function readGoogleInteractionStream(response, sink, sampleRate, channels, signal = null, runId = generationRunId) {
       if (!response.body?.getReader) throw new Error('Google streaming response is not readable.');
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -2718,6 +3303,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         }
       };
       for (;;) {
+        throwIfGenerationCancelled(signal, runId);
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -2732,7 +3318,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       if (buffer.trim()) handleEvent(buffer);
     }
 
-    async function streamGoogle(config, input, persona, instructions) {
+    async function streamGoogle(config, input, persona, instructions, signal = null, runId = generationRunId) {
+      throwIfGenerationCancelled(signal, runId);
       const google = config.providers?.google;
       if (!canStreamGoogle(config)) throw new Error('Google streaming is not available for this model.');
       const streamConfig = google.streaming || {};
@@ -2758,14 +3345,15 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
             speech_config: [{ voice: voiceName }]
           },
           stream: true
-        })
+        }),
+        signal
       });
       if (!response.ok) {
         sink.fail();
         throw await providerError(response, 'Google streaming TTS failed');
       }
       try {
-        await readGoogleInteractionStream(response, sink, sampleRate, channels);
+        await readGoogleInteractionStream(response, sink, sampleRate, channels, signal, runId);
         const blob = sink.finish();
         return { blob, playback: sink.playback, streamingModel: model };
       } catch (error) {
@@ -2774,17 +3362,18 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       }
     }
 
-    async function tryStreamProvider(config, provider, input, persona, instructions) {
+    async function tryStreamProvider(config, provider, input, persona, instructions, signal = null, runId = generationRunId) {
       if (provider === 'elevenlabs' && canStreamElevenLabs(config, persona)) {
-        return streamElevenLabs(config, input, persona);
+        return streamElevenLabs(config, input, persona, signal, runId);
       }
       if (provider === 'google' && canStreamGoogle(config)) {
-        return streamGoogle(config, input, persona, instructions);
+        return streamGoogle(config, input, persona, instructions, signal, runId);
       }
       return null;
     }
 
-    async function fetchGoogleAudio(config, input, persona, instructions) {
+    async function fetchGoogleAudio(config, input, persona, instructions, signal = null, runId = generationRunId) {
+      throwIfGenerationCancelled(signal, runId);
       const google = config.providers?.google;
       if (!google) throw new Error('Google TTS is not configured.');
       const model = resolveGoogleModel(google);
@@ -2805,7 +3394,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
               }
             }
           }
-        })
+        }),
+        signal
       });
       if (!response.ok) throw await providerError(response, 'Google TTS failed');
       const json = await response.json();
@@ -2817,13 +3407,14 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return { bytes, mimeType };
     }
 
-    async function synthesizeGoogle(config, input, persona, instructions) {
+    async function synthesizeGoogle(config, input, persona, instructions, signal = null, runId = generationRunId) {
       if (Array.from(input).length >= ttsChunkMinChars) {
         const chunks = splitTtsText(input);
         if (chunks.length > 1) {
           const audios = [];
           for (const chunk of chunks) {
-            audios.push(await fetchGoogleAudio(config, chunk, persona, instructions));
+            throwIfGenerationCancelled(signal, runId);
+            audios.push(await fetchGoogleAudio(config, chunk, persona, instructions, signal, runId));
           }
           const mimeType = audios[0].mimeType || 'audio/L16;codec=pcm;rate=24000';
           const sampleRate = parseSampleRate(mimeType);
@@ -2836,7 +3427,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
           return new Blob(audios.map((audio) => audio.bytes), { type: mimeType });
         }
       }
-      const { bytes, mimeType } = await fetchGoogleAudio(config, input, persona, instructions);
+      const { bytes, mimeType } = await fetchGoogleAudio(config, input, persona, instructions, signal, runId);
       if (mimeType.toLowerCase().startsWith('audio/l16') || mimeType.toLowerCase().startsWith('audio/pcm')) {
         return wavBlobFromPcm(bytes, parseSampleRate(mimeType));
       }
@@ -2860,7 +3451,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return match ? Number(match[1]) : 24000;
     }
 
-    async function synthesizeElevenLabsSingle(config, input, persona, outputFormatOverride = null, rawPcm = false) {
+    async function synthesizeElevenLabsSingle(config, input, persona, outputFormatOverride = null, rawPcm = false, signal = null, runId = generationRunId) {
+      throwIfGenerationCancelled(signal, runId);
       const elevenlabs = config.providers?.elevenlabs;
       if (!elevenlabs) throw new Error('ElevenLabs TTS is not configured.');
       const voiceId = persona?.elevenlabs?.voiceId;
@@ -2883,7 +3475,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
           'Content-Type': 'application/json',
           'xi-api-key': elevenlabs.apiKey
         },
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal
       });
       if (!response.ok) throw await providerError(response, 'ElevenLabs TTS failed');
       const bytes = await response.arrayBuffer();
@@ -2895,21 +3488,22 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       });
     }
 
-    async function synthesizeElevenLabs(config, input, persona) {
+    async function synthesizeElevenLabs(config, input, persona, signal = null, runId = generationRunId) {
       if (Array.from(input).length >= ttsChunkMinChars) {
         const chunks = splitTtsText(input);
         if (chunks.length > 1) {
           const outputFormat = 'pcm_24000';
           const parts = [];
           for (const chunk of chunks) {
-            const blob = await synthesizeElevenLabsSingle(config, chunk, persona, outputFormat, true);
+            throwIfGenerationCancelled(signal, runId);
+            const blob = await synthesizeElevenLabsSingle(config, chunk, persona, outputFormat, true, signal, runId);
             parts.push(new Uint8Array(await blob.arrayBuffer()));
           }
           const sampleRate = elevenLabsSampleRate(outputFormat);
           return wavBlobFromPcm(concatPcmChunksWithBoundarySilence(parts, sampleRate), sampleRate);
         }
       }
-      return synthesizeElevenLabsSingle(config, input, persona);
+      return synthesizeElevenLabsSingle(config, input, persona, null, false, signal, runId);
     }
 
     function isRetryable(error) {
@@ -2918,7 +3512,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return error.status === 401 || error.status === 403 || error.status === 429 || error.status >= 500;
     }
 
-    async function synthesizeProvider(config, provider, input, persona, prepCache) {
+    async function synthesizeProvider(config, provider, input, persona, prepCache, signal = null, runId = generationRunId) {
       setGenerateProgress(0.32, 'Preparing');
       const forcePerformanceTags = canStreamProvider(config, provider, persona);
       let prep = await prepareForProvider(config, provider, input, persona, prepCache, { forcePerformanceTags, requireBrowserPrep: true });
@@ -2934,8 +3528,9 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       }
       const ttsStartedAt = performance.now();
       setGenerateProgress(0.44, 'Connecting');
+      throwIfGenerationCancelled(signal, runId);
       try {
-        const streamed = await tryStreamProvider(config, provider, prep.input, persona, prep.instructions);
+        const streamed = await tryStreamProvider(config, provider, prep.input, persona, prep.instructions, signal, runId);
         if (streamed) {
           return {
             blob: streamed.blob,
@@ -2956,8 +3551,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       }
       setGenerateProgress(0.64, 'Synthesizing');
       const blob = provider === 'google'
-        ? await synthesizeGoogle(config, prep.input, persona, prep.instructions)
-        : await synthesizeElevenLabs(config, prep.input, persona);
+        ? await synthesizeGoogle(config, prep.input, persona, prep.instructions, signal, runId)
+        : await synthesizeElevenLabs(config, prep.input, persona, signal, runId);
       return {
         blob,
         input: prep.input,
@@ -2968,19 +3563,19 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       };
     }
 
-    async function generateDirect(input) {
+    async function generateDirect(input, signal = null, runId = generationRunId) {
       const config = directConfig;
       const prepCache = new Map();
       const selectedProvider = settings.provider !== 'auto' ? settings.provider : null;
       const primary = selectedProvider || resolveProvider(config, resolvePersona(config, null));
       const persona = resolvePersona(config, primary);
       try {
-        return await synthesizeProvider(config, primary, input, persona, prepCache);
+        return await synthesizeProvider(config, primary, input, persona, prepCache, signal, runId);
       } catch (error) {
         if (!isRetryable(error) || persona?.fallbackPolicy !== 'preserve-persona') throw error;
         const fallback = fallbackProvider(primary);
         if (!config.providers?.[fallback]) throw error;
-        return await synthesizeProvider(config, fallback, input, persona, prepCache);
+        return await synthesizeProvider(config, fallback, input, persona, prepCache, signal, runId);
       }
     }
 
@@ -3002,10 +3597,11 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
-    async function createWebSpeechJob(input) {
+    async function createWebSpeechJob(input, signal = null) {
       const response = await fetch('/web/speech-jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal,
         body: JSON.stringify({ input })
       });
       if (!response.ok) {
@@ -3021,8 +3617,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return job.id;
     }
 
-    async function fetchWebSpeechJob(jobId) {
-      const response = await fetch(`/web/speech-jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' });
+    async function fetchWebSpeechJob(jobId, signal = null) {
+      const response = await fetch(`/web/speech-jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store', signal });
       if (!response.ok) {
         let message = `TTS job status failed (${response.status})`;
         try {
@@ -3034,10 +3630,17 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       return response.json();
     }
 
-    async function waitForWebSpeechJob(jobId) {
+    async function waitForWebSpeechJob(jobId, signal = null, runId = generationRunId) {
+      const startedAt = Date.now();
       setGenerateProgress(0.82, 'Loading');
       for (;;) {
-        const job = await fetchWebSpeechJob(jobId);
+        throwIfGenerationCancelled(signal, runId);
+        if (Date.now() - startedAt > serverJobMaxPollMs) {
+          const error = new Error('TTS job stayed pending for too long. It was cleared so you can generate again.');
+          error.status = 408;
+          throw error;
+        }
+        const job = await fetchWebSpeechJob(jobId, signal);
         if (job.status === 'complete' && job.result) return job.result;
         if (job.status === 'failed') throw new Error(job.error?.message || 'TTS job failed.');
         setGenerateProgress(0.64, 'Synthesizing');
@@ -3045,11 +3648,12 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       }
     }
 
-    async function generateViaServer(input, jobId = null) {
+    async function generateViaServer(input, jobId = null, signal = null, runId = generationRunId) {
       setGenerateProgress(0.35, jobId ? 'Resuming' : 'Preparing');
-      const activeJobId = jobId || await createWebSpeechJob(input);
+      throwIfGenerationCancelled(signal, runId);
+      const activeJobId = jobId || await createWebSpeechJob(input, signal);
       savePendingGeneration(input, activeJobId);
-      const result = await waitForWebSpeechJob(activeJobId);
+      const result = await waitForWebSpeechJob(activeJobId, signal, runId);
       return {
         blob: audioBlobFromBase64(result.audio_base64, result.mime_type),
         input: result.input,
@@ -3060,32 +3664,38 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     }
 
     async function runGeneration(input, resumeJobId = null) {
+      const runId = generationRunId + 1;
+      generationRunId = runId;
+      generationCancelled = false;
+      const controller = new AbortController();
+      activeGenerationController = controller;
       generate.disabled = true;
-      clear.disabled = true;
+      clear.disabled = false;
       play.disabled = true;
       generationActive = true;
       lifecycleInterruptedGeneration = false;
-      savePendingGeneration(input, resumeJobId);
+      if (resumeJobId) savePendingGeneration(input, resumeJobId);
       clearError();
       setGenerating(true, 'Starting', 0.08);
       let resumeAfterLifecycleInterruption = false;
       try {
         let result;
         if (resumeJobId) {
-          result = await generateViaServer(input, resumeJobId);
+          result = await generateViaServer(input, resumeJobId, controller.signal, runId);
         } else if (directConfig && canGenerateDirectWithConfiguredPrep(directConfig)) {
           setGenerateProgress(0.25, 'Direct');
           try {
-            result = await generateDirect(input);
+            result = await generateDirect(input, controller.signal, runId);
           } catch (error) {
             if (!settingsMatchServerDefaults()) throw error;
             setGenerateProgress(0.25, 'Server');
-            result = await generateViaServer(input);
+            result = await generateViaServer(input, null, controller.signal, runId);
           }
         } else {
           setGenerateProgress(0.25, 'Server');
-          result = await generateViaServer(input);
+          result = await generateViaServer(input, null, controller.signal, runId);
         }
+        throwIfGenerationCancelled(controller.signal, runId);
         if (
           typeof result.input === 'string'
           && result.input !== text.value
@@ -3102,7 +3712,6 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
           download.disabled = false;
           result.playback.setReplayBlob(result.blob);
           play.disabled = false;
-          seek.disabled = true;
         } else {
           loadAudioBlob(result.blob);
         }
@@ -3110,21 +3719,25 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         clearError();
         setGenerateProgress(1, 'Done');
       } catch (error) {
-        resumeAfterLifecycleInterruption = shouldKeepPendingGeneration(error);
+        const cancelled = generationCancelled || controller.signal.aborted || runId !== generationRunId;
+        resumeAfterLifecycleInterruption = !cancelled && shouldKeepPendingGeneration(error);
         if (!resumeAfterLifecycleInterruption) clearPendingGeneration();
         play.disabled = !audio.src;
-        seek.disabled = !audio.src;
-        if (!resumeAfterLifecycleInterruption) {
+        if (!audio.src && !activeStreamPlayback) resetWaveform();
+        if (!cancelled && !resumeAfterLifecycleInterruption) {
           showError(error.message || 'TTS failed.');
         }
       } finally {
-        generationActive = false;
-        generate.disabled = false;
-        clear.disabled = false;
-        setTimeout(() => {
-          if (!generationActive) setGenerating(false, 'Generate', 0);
-        }, 350);
-        reloadForWorkerUpdateWhenIdle();
+        if (activeGenerationController === controller) activeGenerationController = null;
+        if (runId === generationRunId) {
+          generationActive = false;
+          generate.disabled = false;
+          clear.disabled = false;
+          setTimeout(() => {
+            if (!generationActive) setGenerating(false, 'Generate', 0);
+          }, 350);
+          reloadForWorkerUpdateWhenIdle();
+        }
         if (
           resumeAfterLifecycleInterruption
           && document.visibilityState === 'visible'
@@ -3204,6 +3817,13 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     });
 
     clear.addEventListener('click', async () => {
+      if (generationActive) {
+        cancelActiveGeneration();
+        generationActive = false;
+        generate.disabled = false;
+        clear.disabled = false;
+        setGenerating(false, 'Generate', 0);
+      }
       text.value = '';
       localStorage.removeItem(textStorageKey);
       clearPendingGeneration();
@@ -3246,14 +3866,39 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
 
     download.addEventListener('click', downloadCurrentAudio);
 
-    seek.addEventListener('input', () => {
-      seeking = true;
-      const total = audio.duration || 0;
-      if (total > 0) {
-        audio.currentTime = (Number(seek.value) / 1000) * total;
-        updatePosition();
-      }
+    seekSlider.addEventListener('pointerdown', (event) => {
+      if (seekSlider.getAttribute('aria-disabled') === 'true') return;
+      seekSlider.setPointerCapture?.(event.pointerId);
+      handleWaveformPointer(event);
+    });
+    seekSlider.addEventListener('pointermove', (event) => {
+      if (!seeking) return;
+      handleWaveformPointer(event);
+    });
+    seekSlider.addEventListener('pointerup', (event) => {
+      if (!seeking) return;
+      handleWaveformPointer(event);
       seeking = false;
+      seekSlider.classList.remove('scrubbing');
+    });
+    seekSlider.addEventListener('pointercancel', () => {
+      seeking = false;
+      seekSlider.classList.remove('scrubbing');
+    });
+    seekSlider.addEventListener('keydown', (event) => {
+      if (seekSlider.getAttribute('aria-disabled') === 'true') return;
+      const max = waveform?.mode === 'complete' ? waveform.duration : waveform?.bufferedDuration || 0;
+      const step = event.shiftKey ? 10 : 5;
+      let target = null;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') target = (waveform?.currentTime || 0) - step;
+      if (event.key === 'ArrowRight' || event.key === 'ArrowUp') target = (waveform?.currentTime || 0) + step;
+      if (event.key === 'Home') target = 0;
+      if (event.key === 'End') target = max;
+      if (target !== null) {
+        event.preventDefault();
+        showKeyboardScrubFeedback();
+        seekToWaveformTime(clamp(target, 0, max));
+      }
     });
 
     audio.addEventListener('loadedmetadata', updatePosition);
@@ -4729,7 +5374,17 @@ mod tests {
         assert!(html.contains("id=\"download\""));
         assert!(html.contains("id=\"settings-toggle\""));
         assert!(html.contains("id=\"error-banner\""));
-        assert!(html.contains("id=\"seek\""));
+        assert!(html.contains("id=\"waveform-slider\""));
+        assert!(html.contains("role=\"slider\""));
+        assert!(html.contains("aria-valuetext=\"0:00 of 0:00\""));
+        assert!(html.contains("<canvas id=\"waveform\""));
+        assert!(html.contains("class=\"waveform-marker\""));
+        assert!(html.contains("class=\"waveform-thumb\""));
+        assert!(html.contains(".waveform-slider.scrubbing .waveform-thumb"));
+        assert!(html.contains("min-height: 44px;"));
+        assert!(html.contains("height: 34px;"));
+        assert!(html.contains("opacity: 0;"));
+        assert!(!html.contains("type=\"range\""));
         assert!(!html.contains("id=\"status\""));
         assert!(html.contains("codex-voice.web.config.v1"));
         assert!(html.contains("codex-voice.web.settings.v1"));
@@ -4796,6 +5451,16 @@ mod tests {
         assert!(html.contains("reloadForWorkerUpdateWhenIdle();"));
         assert!(html.contains("lifecycleInterruptedGeneration"));
         assert!(html.contains("function shouldKeepPendingGeneration"));
+        assert!(html.contains("const serverJobMaxPollMs = 10 * 60 * 1000;"));
+        assert!(html.contains("function cancelActiveGeneration"));
+        assert!(html.contains("activeGenerationController?.abort();"));
+        assert!(html.contains("throwIfGenerationCancelled(controller.signal, runId)"));
+        assert!(html.contains("if (!pending.jobId)"));
+        assert!(html.contains("if (resumeJobId) savePendingGeneration(input, resumeJobId);"));
+        assert!(html.contains("generateDirect(input, controller.signal, runId)"));
+        assert!(html.contains("async function synthesizeProvider(config, provider, input, persona, prepCache, signal = null"));
+        assert!(html.contains("clear.disabled = false;"));
+        assert!(html.contains("TTS job stayed pending for too long"));
         assert!(html.contains("if (error?.status) return false;"));
         assert!(html.contains("showError(error.message || 'TTS failed.')"));
         assert!(html.contains("settings.provider !== 'auto'"));
@@ -4847,6 +5512,39 @@ mod tests {
         assert!(html.contains("function setGenerateProgress"));
         assert!(html.contains("function setGenerating"));
         assert!(html.contains("function playSvg"));
+        assert!(html.contains("function resetWaveform"));
+        assert!(html.contains("let waveformDecodeId = 0;"));
+        assert!(html.contains("waveformDecodeId += 1;"));
+        assert!(html.contains("function resetStreamingWaveform"));
+        assert!(html.contains("function decodeWaveformBlob"));
+        assert!(html.contains("function appendStreamingWaveformPcm"));
+        assert!(html.contains("function samplePeaks"));
+        assert!(html.contains("sumSquares += peak * peak"));
+        assert!(
+            html.contains("sampled.push(clamp((mean * 0.62) + (rms * 0.28) + (max * 0.1), 0, 1))")
+        );
+        assert!(html.contains("function peakContrastRange"));
+        assert!(html.contains("* 0.12"));
+        assert!(html.contains("* 0.9"));
+        assert!(html.contains("function drawEmptyWaveform"));
+        assert!(html.contains("function drawPeakWaveform"));
+        assert!(html.contains("const maxBar = Math.max(12, height * 0.86);"));
+        assert!(html.contains("const contrast = peakContrastRange(peaks);"));
+        assert!(html.contains(
+            "const relativePeak = clamp((peak - contrast.floor) / contrastRange, 0, 1);"
+        ));
+        assert!(
+            html.contains("const visualPeak = clamp((Math.pow(relativePeak, 0.86) * 0.94) + (peak * 0.08), 0, 1);")
+        );
+        assert!(html.contains("function seekTimeFromClientX"));
+        assert!(html.contains("function handleWaveformPointer"));
+        assert!(html.contains("function showKeyboardScrubFeedback"));
+        assert!(html.contains("seekSlider.classList.add('scrubbing')"));
+        assert!(html.contains("seekSlider.classList.remove('scrubbing')"));
+        assert!(html.contains("seekSlider.addEventListener('pointerdown'"));
+        assert!(html.contains("seekSlider.addEventListener('keydown'"));
+        assert!(html.contains("activeStreamPlayback.seekTo(target)"));
+        assert!(html.contains("decodeWaveformBlob(blob)"));
         assert!(html.contains("function audioDownloadExtension"));
         assert!(html.contains("function downloadCurrentAudio"));
         assert!(html.contains("download.addEventListener('click', downloadCurrentAudio)"));
@@ -4905,6 +5603,17 @@ mod tests {
         assert!(html.contains("const model = resolveElevenLabsModel(elevenlabs).toLowerCase();"));
         assert!(html.contains("class StreamingPlayback"));
         assert!(html.contains("if (this.stopped || activeStreamPlayback !== this) return;"));
+        assert!(html.contains("this.seekSerial = 0;"));
+        assert!(html.contains("const sourceContext = this.context;"));
+        assert!(html.contains("const sourceSeekSerial = this.seekSerial;"));
+        assert!(
+            html.contains("this.context !== sourceContext || this.seekSerial !== sourceSeekSerial")
+        );
+        assert!(html.contains("const wasPlaying = this.playing;"));
+        assert!(html.contains("const seekSerial = this.seekSerial + 1;"));
+        assert!(html.contains("previousContext?.close?.().catch(() => {});"));
+        assert!(html.contains("this.context.currentTime >= this.nextStartTime + 0.08"));
+        assert!(html.contains("this.pendingSources = 0;"));
         assert!(html.contains("function createPcmStreamSink"));
         assert!(html.contains("function websocketBaseUrl"));
         assert!(html.contains("function resolveElevenLabsStreamingModel"));
@@ -4928,7 +5637,9 @@ mod tests {
         assert!(html.contains("const streamed = await tryStreamProvider"));
         assert!(html.contains("const gained = applyPcm16Gain(pcm)"));
         assert!(html.contains("parts.push(gained)"));
-        assert!(html.contains("playback.appendPcm(gained, sampleRate, channels)"));
+        assert!(html.contains("appendPcm(bytes, sampleRate, channels = 1, waveformBytes = bytes)"));
+        assert!(html.contains("appendStreamingWaveformPcm(waveformBytes, sampleRate, channels)"));
+        assert!(html.contains("playback.appendPcm(gained, sampleRate, channels, pcm)"));
         assert!(html.contains("stopActiveStreamPlayback()"));
         assert!(html.contains("duration.textContent = 'Live'"));
         assert!(html.contains("activeStreamPlayback.toggle()"));
@@ -4944,9 +5655,9 @@ mod tests {
         assert!(html.contains("rawPcm = false"));
         assert!(html.contains("startsWith('pcm') && !rawPcm"));
         assert!(html.contains("const outputFormat = 'pcm_24000'"));
-        assert!(
-            html.contains("synthesizeElevenLabsSingle(config, chunk, persona, outputFormat, true)")
-        );
+        assert!(html.contains(
+            "synthesizeElevenLabsSingle(config, chunk, persona, outputFormat, true, signal, runId)"
+        ));
         assert!(html.contains(
             "wavBlobFromPcm(concatPcmChunksWithBoundarySilence(parts, sampleRate), sampleRate)"
         ));
@@ -4994,7 +5705,10 @@ mod tests {
         assert!(html.contains(
             "scroll-padding: var(--text-edge-pad) 16px calc(var(--text-button-clearance) + var(--text-edge-pad));"
         ));
-        assert!(html.contains("backdrop-filter: blur(18px) saturate(1.65);"));
+        assert!(html.contains("--glass-button-sheen:"));
+        assert!(html.contains("radial-gradient(ellipse at 82% 56%"));
+        assert!(html.contains("backdrop-filter: var(--glass-button-filter);"));
+        assert!(html.contains(".buttons .icon-button::before"));
     }
 
     #[tokio::test]
