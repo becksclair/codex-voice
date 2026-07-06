@@ -74,6 +74,7 @@ find crates -name '*test*' -o -name '*.rs'
 
 - Relevant crate-level checks pass, then root `cargo fmt --check`, `cargo check --workspace`, and `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings` after non-trivial Rust changes.
+- After modifying any installed/runtime service behavior, rebuild and restart the affected user services before marking the task complete, then verify the restarted service is healthy.
 - For Linux runtime changes, run `doctor linux-portals` and the 1-second `doctor audio` smoke when relevant.
 - For TTS changes, run `doctor tts` with a short test phrase.
 - Update README/ExecPlan for changed CLI, runtime, auth, platform, or TTS behavior.
