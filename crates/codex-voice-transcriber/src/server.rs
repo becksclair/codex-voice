@@ -372,6 +372,14 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       letter-spacing: 0;
     }
+    button,
+    input,
+    label,
+    select,
+    textarea,
+    .waveform-slider {
+      -webkit-tap-highlight-color: transparent;
+    }
     main {
       height: var(--visual-viewport-height, 100dvh);
       min-height: 0;
@@ -5418,6 +5426,7 @@ mod tests {
         assert!(html.contains("class=\"waveform-marker\""));
         assert!(html.contains("class=\"waveform-thumb\""));
         assert!(html.contains(".waveform-slider.scrubbing .waveform-thumb"));
+        assert!(html.contains("-webkit-tap-highlight-color: transparent;"));
         assert!(html.contains("min-height: 44px;"));
         assert!(html.contains("height: 34px;"));
         assert!(html.contains("opacity: 0;"));
