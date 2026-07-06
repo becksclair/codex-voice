@@ -862,6 +862,10 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
               <input id="summarize" type="checkbox">
               Summarize
             </label>
+            <label class="toggle">
+              <input id="generate-on-paste" type="checkbox">
+              Generate on paste
+            </label>
           </div>
         </div>
       </div>
@@ -884,6 +888,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     const themeSelect = document.getElementById('theme');
     const emotion = document.getElementById('emotion');
     const summarize = document.getElementById('summarize');
+    const generateOnPaste = document.getElementById('generate-on-paste');
     const seekSlider = document.getElementById('waveform-slider');
     const waveformCanvas = document.getElementById('waveform');
     const elapsed = document.getElementById('elapsed');
@@ -1020,7 +1025,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         model: 'default',
         theme: 'auto',
         emotionPreprocessing: true,
-        summarization: false
+        summarization: false,
+        generateOnPaste: true
       };
       try {
         return { ...defaults, ...(JSON.parse(localStorage.getItem(settingsStorageKey) || '{}')) };
@@ -1036,7 +1042,8 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         model: modelSelect.value || 'default',
         theme: themeSelect.value || 'auto',
         emotionPreprocessing: emotion.checked,
-        summarization: summarize.checked
+        summarization: summarize.checked,
+        generateOnPaste: generateOnPaste.checked
       };
       localStorage.setItem(settingsStorageKey, JSON.stringify(settings));
       applyThemeSetting(settings.theme);
@@ -1056,6 +1063,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       themeSelect.value = settings.theme || 'auto';
       emotion.checked = settings.emotionPreprocessing;
       summarize.checked = settings.summarization;
+      generateOnPaste.checked = settings.generateOnPaste !== false;
     }
 
     function resolvedTheme(preference = settings.theme || 'auto') {
@@ -3748,10 +3756,40 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
       }
     }
 
+    async function generateCurrentText() {
+      const input = text.value.trim();
+      if (!input) {
+        showError('Enter some text first.');
+        return false;
+      }
+      if (generationActive) {
+        cancelActiveGeneration();
+        generationActive = false;
+        generate.disabled = false;
+        clear.disabled = false;
+      }
+      await runGeneration(input);
+      return true;
+    }
+
+    function generateAfterPaste(event) {
+      if (settings.generateOnPaste === false) return;
+      const pastedText = event?.clipboardData?.getData('text') || '';
+      if (!pastedText.trim()) return;
+      const valueBeforePaste = text.value;
+      setTimeout(() => {
+        if (text.value === valueBeforePaste) return;
+        const input = text.value.trim();
+        if (!input) return;
+        generateCurrentText().catch((error) => showError(error.message || 'TTS failed.'));
+      }, 0);
+    }
+
     text.addEventListener('input', () => {
       localStorage.setItem(textStorageKey, text.value);
       updateCount();
     });
+    text.addEventListener('paste', generateAfterPaste);
 
     window.addEventListener('pagehide', () => {
       if (generationActive) lifecycleInterruptedGeneration = true;
@@ -3781,6 +3819,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     themeSelect.addEventListener('change', saveSettings);
     emotion.addEventListener('change', saveSettings);
     summarize.addEventListener('change', saveSettings);
+    generateOnPaste.addEventListener('change', saveSettings);
     function handleThemeMediaChange() {
       if ((settings.theme || 'auto') === 'auto') applyThemeSetting('auto');
     }
@@ -3811,6 +3850,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
         updateCount();
         clearError();
         text.focus();
+        if (settings.generateOnPaste !== false) await generateCurrentText();
       } catch (error) {
         showError(error.message || 'Clipboard paste failed.');
       }
@@ -3835,12 +3875,7 @@ const WEB_APP_HTML: &str = r##"<!doctype html>
     });
 
     generate.addEventListener('click', async () => {
-      const input = text.value.trim();
-      if (!input) {
-        showError('Enter some text first.');
-        return;
-      }
-      await runGeneration(input);
+      await generateCurrentText();
     });
 
     play.addEventListener('click', async () => {
@@ -5367,6 +5402,8 @@ mod tests {
         assert!(html.contains("<option value=\"light\">Light</option>"));
         assert!(html.contains("id=\"emotion\""));
         assert!(html.contains("id=\"summarize\""));
+        assert!(html.contains("id=\"generate-on-paste\""));
+        assert!(html.contains("Generate on paste"));
         assert!(html.contains("id=\"generate\""));
         assert!(html.contains("id=\"generate-label\""));
         assert!(html.contains("id=\"clear\""));
@@ -5388,6 +5425,8 @@ mod tests {
         assert!(!html.contains("id=\"status\""));
         assert!(html.contains("codex-voice.web.config.v1"));
         assert!(html.contains("codex-voice.web.settings.v1"));
+        assert!(html.contains("generateOnPaste: true"));
+        assert!(html.contains("generateOnPaste.checked = settings.generateOnPaste !== false"));
         assert!(html
             .contains("const themeMedia = window.matchMedia?.('(prefers-color-scheme: light)')"));
         assert!(html.contains("function applyThemeSetting"));
@@ -5550,6 +5589,16 @@ mod tests {
         assert!(html.contains("download.addEventListener('click', downloadCurrentAudio)"));
         assert!(html.contains("settingsToggle.addEventListener('click'"));
         assert!(html.contains("paste.addEventListener('click'"));
+        assert!(html.contains("text.addEventListener('paste', generateAfterPaste)"));
+        assert!(html.contains("generateOnPaste.addEventListener('change', saveSettings)"));
+        assert!(html.contains("function generateCurrentText"));
+        assert!(html.contains("function generateAfterPaste"));
+        assert!(html.contains("event?.clipboardData?.getData('text')"));
+        assert!(html.contains("const valueBeforePaste = text.value;"));
+        assert!(html.contains("if (text.value === valueBeforePaste) return;"));
+        assert!(
+            html.contains("if (settings.generateOnPaste !== false) await generateCurrentText();")
+        );
         assert!(html.contains("navigator.clipboard.readText()"));
         assert!(html.contains("text.value = '';"));
         assert!(html.contains("setGenerateProgress(0.64, 'Synthesizing')"));
