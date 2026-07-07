@@ -6,11 +6,17 @@
 # `cargo deny check advisories` fails on any active vulnerability or unmaintained
 # advisory unless explicitly ignored below.
 ignore = [
-    # The Linux tray (tray-icon -> libappindicator) transitively requires the
-    # gtk-rs GTK3 bindings, which are unmaintained upstream. This is accepted,
-    # documented debt (see plans/README.md, deferred findings): no local action
-    # is possible until tray-icon moves off GTK3. Unmaintained-only — these are
-    # not vulnerabilities. Revisit when upstream migrates.
+    # --- Phantom GTK3 stack (never compiled) ---------------------------------
+    # The Linux tray migrated to ksni + iced, so GTK3 is no longer compiled on
+    # ANY target: `cargo tree -e normal | grep gtk` is empty on Linux, Windows,
+    # and macOS. However `tray-icon` (retained for the macOS/Windows trays)
+    # declares `libappindicator` -> gtk-rs as a hard `cfg(target_os = "linux")`
+    # dependency of its own, so those crates remain in Cargo.lock. cargo-deny
+    # filters the graph per-edge rather than per-path, so it still reports them
+    # even though the path `tray-icon (macOS/Windows only)` -> `libappindicator
+    # (Linux only)` never resolves for any single target. Unmaintained-only —
+    # not vulnerabilities. These disappear only if tray-icon also leaves the
+    # workspace (i.e. the macOS/Windows trays move off it too).
     "RUSTSEC-2024-0412", # gdk
     "RUSTSEC-2024-0413", # atk
     "RUSTSEC-2024-0415", # gtk
@@ -18,9 +24,21 @@ ignore = [
     "RUSTSEC-2024-0418", # gdkx11
     "RUSTSEC-2024-0419", # gdkx11-sys
     "RUSTSEC-2024-0420", # gtk3-macros
-    # proc-macro-error is unmaintained; pulled transitively by the same GTK3
-    # tray stack (gtk3-macros). Same upstream cause, same rationale.
-    "RUSTSEC-2024-0370",
+    "RUSTSEC-2024-0370", # proc-macro-error (via gtk3-macros)
+
+    # --- Introduced by the iced GUI stack ------------------------------------
+    # ttf-parser is unmaintained with no safe upgrade available. It reaches us
+    # through iced's text engine (cosmic-text -> fontdb) and only parses the
+    # bundled, trusted Fira Sans font. Unmaintained-only, not a vulnerability.
+    "RUSTSEC-2026-0192", # ttf-parser
+    # quick-xml 0.39 DoS advisories (quadratic attribute scan; unbounded
+    # namespace allocation). Reached only through `wayland-scanner`, a
+    # build-time proc-macro that parses the trusted Wayland protocol XML files
+    # bundled with the crate — never runtime, never attacker-controlled input.
+    # wayland-scanner pins `quick-xml = "0.39"`, and the fixes landed in a later
+    # minor, so no in-range upgrade exists without patching upstream.
+    "RUSTSEC-2026-0194", # quick-xml quadratic attribute-name check
+    "RUSTSEC-2026-0195", # quick-xml unbounded namespace allocation
 ]
 
 [licenses]
@@ -41,12 +59,16 @@ allow = [
     # webpki-roots ships the Mozilla CA certificate set under the permissive
     # Community Data License Agreement.
     "CDLA-Permissive-2.0",
+    # ksni (the Linux tray) is published under The Unlicense, a permissive
+    # public-domain-equivalent dedication.
+    "Unlicense",
 ]
 confidence-threshold = 0.8
 
 [bans]
-# GTK3 and symphonia pull in known transitive duplicate versions of several
-# crates. These duplicates are accepted rather than failing the build.
+# symphonia (audio decoding, via rodio) still pulls in known transitive
+# duplicate versions of several crates. These duplicates are accepted rather
+# than failing the build.
 multiple-versions = "allow"
 wildcards = "allow"
 
