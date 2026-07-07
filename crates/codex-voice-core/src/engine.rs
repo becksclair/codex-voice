@@ -161,7 +161,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        AudioError, AudioResult, InsertMethod, PlatformResult, RecordedAudio, TranscriptionResult,
+        AudioError, AudioResult, InsertMethod, PlatformError, PlatformResult, RecordedAudio,
+        TranscriptionError, TranscriptionResult,
     };
     use async_trait::async_trait;
     use std::{
@@ -173,6 +174,33 @@ mod tests {
     struct FakeAudio {
         recording: Mutex<Option<RecordedAudio>>,
         start_error: bool,
+        stop_error: bool,
+    }
+
+    impl FakeAudio {
+        fn ok(recording: Option<RecordedAudio>) -> Self {
+            Self {
+                recording: Mutex::new(recording),
+                start_error: false,
+                stop_error: false,
+            }
+        }
+
+        fn start_failure() -> Self {
+            Self {
+                recording: Mutex::new(None),
+                start_error: true,
+                stop_error: false,
+            }
+        }
+
+        fn stop_failure(recording: Option<RecordedAudio>) -> Self {
+            Self {
+                recording: Mutex::new(recording),
+                start_error: false,
+                stop_error: true,
+            }
+        }
     }
 
     #[async_trait]
@@ -186,6 +214,9 @@ mod tests {
         }
 
         async fn stop(&self) -> AudioResult<Option<RecordedAudio>> {
+            if self.stop_error {
+                return Err(AudioError::Message("stop boom".into()));
+            }
             Ok(self
                 .recording
                 .lock()
@@ -198,20 +229,69 @@ mod tests {
         }
     }
 
-    struct FakeTranscription(String);
+    struct FakeTranscription {
+        text: String,
+        error: Option<String>,
+    }
+
+    impl FakeTranscription {
+        fn ok(text: impl Into<String>) -> Self {
+            Self {
+                text: text.into(),
+                error: None,
+            }
+        }
+
+        fn err(message: impl Into<String>) -> Self {
+            Self {
+                text: String::new(),
+                error: Some(message.into()),
+            }
+        }
+    }
 
     #[async_trait]
     impl TranscriptionClient for FakeTranscription {
         async fn transcribe(&self, _recording: &RecordedAudio) -> TranscriptionResult<String> {
-            Ok(self.0.clone())
+            if let Some(message) = &self.error {
+                return Err(TranscriptionError::Message(message.clone()));
+            }
+            Ok(self.text.clone())
         }
     }
 
-    struct FakeInjector;
+    struct FakeInjector {
+        insert_error: bool,
+        calls: Mutex<usize>,
+    }
+
+    impl FakeInjector {
+        fn ok() -> Self {
+            Self {
+                insert_error: false,
+                calls: Mutex::new(0),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                insert_error: true,
+                calls: Mutex::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            *self.calls.lock().unwrap()
+        }
+    }
 
     #[async_trait]
     impl TextInjector for FakeInjector {
         async fn insert_text(&self, _text: &str) -> PlatformResult<InsertReport> {
+            *self.calls.lock().unwrap() += 1;
+            if self.insert_error {
+                return Err(PlatformError::Message("insert boom".into()));
+            }
             Ok(InsertReport {
                 method: InsertMethod::ClipboardPaste,
                 restored_clipboard: true,
@@ -219,85 +299,233 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn discards_short_recordings() {
+    fn recording_with_duration(duration: Duration) -> (RecordedAudio, NamedTempFile) {
         let file = NamedTempFile::new().unwrap();
         let recording = RecordedAudio {
             path: file.path().to_path_buf(),
             content_type: "audio/wav".into(),
-            filename: "short.wav".into(),
-            duration: Duration::from_millis(20),
+            filename: "recording.wav".into(),
+            duration,
         };
-        let audio = Arc::new(FakeAudio {
-            recording: Mutex::new(Some(recording)),
-            start_error: false,
-        });
+        (recording, file)
+    }
+
+    fn drain_events(rx: &mut mpsc::Receiver<AppEvent>) -> Vec<AppEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn discards_short_recordings() {
+        let (recording, _file) = recording_with_duration(Duration::from_millis(20));
+        let audio = Arc::new(FakeAudio::ok(Some(recording)));
         let (tx, mut rx) = mpsc::channel(8);
         let mut engine = DictationEngine::new(
             audio,
-            Arc::new(FakeTranscription("ignored".into())),
-            Arc::new(FakeInjector),
+            Arc::new(FakeTranscription::ok("ignored")),
+            Arc::new(FakeInjector::ok()),
             tx,
         );
 
         engine.handle_hotkey(HotkeyEvent::Pressed).await;
         engine.handle_hotkey(HotkeyEvent::Released).await;
 
-        let mut discarded = false;
-        while let Ok(event) = rx.try_recv() {
-            discarded |= matches!(event, AppEvent::RecordingDiscarded { .. });
-        }
-        assert!(discarded);
+        let events = drain_events(&mut rx);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AppEvent::RecordingDiscarded { .. })));
         assert_eq!(engine.state(), &DictationState::Idle);
     }
 
     #[tokio::test]
     async fn returns_to_idle_after_error() {
-        let audio = Arc::new(FakeAudio {
-            recording: Mutex::new(None),
-            start_error: true,
-        });
+        let audio = Arc::new(FakeAudio::start_failure());
         let (tx, mut rx) = mpsc::channel(8);
         let mut engine = DictationEngine::new(
             audio,
-            Arc::new(FakeTranscription("ignored".into())),
-            Arc::new(FakeInjector),
+            Arc::new(FakeTranscription::ok("ignored")),
+            Arc::new(FakeInjector::ok()),
             tx,
         );
 
         engine.handle_hotkey(HotkeyEvent::Pressed).await;
 
-        let mut saw_error = false;
-        while let Ok(event) = rx.try_recv() {
-            saw_error |= matches!(
-                event,
-                AppEvent::Error {
-                    stage: ErrorStage::AudioStart,
-                    ..
-                }
-            );
-        }
-        assert!(saw_error);
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Error {
+                stage: ErrorStage::AudioStart,
+                ..
+            }
+        )));
         assert_eq!(engine.state(), &DictationState::Idle);
     }
 
     #[tokio::test]
     async fn speak_selection_hotkey_does_not_change_dictation_state() {
-        let audio = Arc::new(FakeAudio {
-            recording: Mutex::new(None),
-            start_error: false,
-        });
+        let audio = Arc::new(FakeAudio::ok(None));
         let (tx, mut rx) = mpsc::channel(8);
         let mut engine = DictationEngine::new(
             audio,
-            Arc::new(FakeTranscription("ignored".into())),
-            Arc::new(FakeInjector),
+            Arc::new(FakeTranscription::ok("ignored")),
+            Arc::new(FakeInjector::ok()),
             tx,
         );
 
         engine.handle_hotkey(HotkeyEvent::SpeakSelection).await;
 
         assert!(rx.try_recv().is_err());
+        assert_eq!(engine.state(), &DictationState::Idle);
+    }
+
+    #[tokio::test]
+    async fn audio_start_failure_returns_to_idle_with_audio_start_stage() {
+        let audio = Arc::new(FakeAudio::start_failure());
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut engine = DictationEngine::new(
+            audio,
+            Arc::new(FakeTranscription::ok("ignored")),
+            Arc::new(FakeInjector::ok()),
+            tx,
+        );
+
+        engine.handle_hotkey(HotkeyEvent::Pressed).await;
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Error {
+                stage: ErrorStage::AudioStart,
+                ..
+            }
+        )));
+        assert_eq!(engine.state(), &DictationState::Idle);
+
+        // A second press proves the engine isn't wedged outside `Idle`: it attempts
+        // `start()` again (and fails again) instead of silently ignoring the hotkey.
+        engine.handle_hotkey(HotkeyEvent::Pressed).await;
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Error {
+                stage: ErrorStage::AudioStart,
+                ..
+            }
+        )));
+        assert_eq!(engine.state(), &DictationState::Idle);
+    }
+
+    #[tokio::test]
+    async fn audio_stop_failure_returns_to_idle_with_audio_stop_stage() {
+        let audio = Arc::new(FakeAudio::stop_failure(None));
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut engine = DictationEngine::new(
+            audio,
+            Arc::new(FakeTranscription::ok("ignored")),
+            Arc::new(FakeInjector::ok()),
+            tx,
+        );
+
+        engine.handle_hotkey(HotkeyEvent::Pressed).await;
+        assert_eq!(engine.state(), &DictationState::Recording);
+
+        engine.handle_hotkey(HotkeyEvent::Released).await;
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Error {
+                stage: ErrorStage::AudioStop,
+                ..
+            }
+        )));
+        assert_eq!(engine.state(), &DictationState::Idle);
+    }
+
+    #[tokio::test]
+    async fn transcription_failure_deletes_recording_and_returns_to_idle() {
+        let (recording, _file) = recording_with_duration(Duration::from_millis(500));
+        let recording_path = recording.path.clone();
+        let audio = Arc::new(FakeAudio::ok(Some(recording)));
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut engine = DictationEngine::new(
+            audio,
+            Arc::new(FakeTranscription::err("transcription boom")),
+            Arc::new(FakeInjector::ok()),
+            tx,
+        );
+
+        engine.handle_hotkey(HotkeyEvent::Pressed).await;
+        engine.handle_hotkey(HotkeyEvent::Released).await;
+
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(
+            |event| matches!(event, AppEvent::RecordingDeleted { path } if path == &recording_path)
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Error {
+                stage: ErrorStage::Transcription,
+                ..
+            }
+        )));
+        assert_eq!(engine.state(), &DictationState::Idle);
+    }
+
+    #[tokio::test]
+    async fn insertion_failure_returns_to_idle_with_insertion_stage() {
+        let (recording, _file) = recording_with_duration(Duration::from_millis(500));
+        let audio = Arc::new(FakeAudio::ok(Some(recording)));
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut engine = DictationEngine::new(
+            audio,
+            Arc::new(FakeTranscription::ok("hello world")),
+            Arc::new(FakeInjector::failing()),
+            tx,
+        );
+
+        engine.handle_hotkey(HotkeyEvent::Pressed).await;
+        engine.handle_hotkey(HotkeyEvent::Released).await;
+
+        let events = drain_events(&mut rx);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AppEvent::TranscriptReady { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Error {
+                stage: ErrorStage::Insertion,
+                ..
+            }
+        )));
+        assert_eq!(engine.state(), &DictationState::Idle);
+    }
+
+    #[tokio::test]
+    async fn empty_transcript_returns_to_idle_without_insertion() {
+        let (recording, _file) = recording_with_duration(Duration::from_millis(500));
+        let audio = Arc::new(FakeAudio::ok(Some(recording)));
+        let injector = Arc::new(FakeInjector::ok());
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut engine = DictationEngine::new(
+            audio,
+            Arc::new(FakeTranscription::ok("   \n\t  ")),
+            injector.clone(),
+            tx,
+        );
+
+        engine.handle_hotkey(HotkeyEvent::Pressed).await;
+        engine.handle_hotkey(HotkeyEvent::Released).await;
+
+        let events = drain_events(&mut rx);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AppEvent::TranscriptReady { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AppEvent::Inserted(..))));
+        assert_eq!(injector.call_count(), 0);
         assert_eq!(engine.state(), &DictationState::Idle);
     }
 }
