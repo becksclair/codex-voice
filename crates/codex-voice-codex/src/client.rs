@@ -13,6 +13,7 @@ const TRANSCRIBE_URL: &str = "https://chatgpt.com/backend-api/transcribe";
 pub struct CodexTranscriptionClient {
     auth: CodexAuthService,
     http: reqwest::Client,
+    transcribe_url: String,
 }
 
 impl CodexTranscriptionClient {
@@ -27,7 +28,24 @@ impl CodexTranscriptionClient {
             .map_err(|error| {
                 TranscriptionError::Request(format!("failed to build HTTP client: {error}"))
             })?;
-        Ok(Self { auth, http })
+        Ok(Self {
+            auth,
+            http,
+            transcribe_url: TRANSCRIBE_URL.to_string(),
+        })
+    }
+
+    /// Test-only hook so the HTTP contract can be exercised against a loopback
+    /// mock server instead of the real Codex backend. Not part of the public API.
+    #[cfg(test)]
+    fn with_base_url_for_tests(
+        auth: CodexAuthService,
+        timeout: Duration,
+        url: String,
+    ) -> TranscriptionResult<Self> {
+        let mut client = Self::with_timeout(auth, timeout)?;
+        client.transcribe_url = url;
+        Ok(client)
     }
 }
 
@@ -59,7 +77,7 @@ impl TranscriptionClient for CodexTranscriptionClient {
 
         let mut request = self
             .http
-            .post(TRANSCRIBE_URL)
+            .post(&self.transcribe_url)
             .bearer_auth(&auth.access_token)
             .header("originator", "Codex Desktop")
             .header("User-Agent", "Codex Voice/0.1.0")
@@ -132,6 +150,15 @@ pub fn parse_transcript(body: &str) -> TranscriptionResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::Bytes,
+        extract::Multipart,
+        http::{header, HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
+        Json, Router,
+    };
+    use tempfile::NamedTempFile;
 
     #[test]
     fn parses_json_transcript_text() {
@@ -144,5 +171,153 @@ mod tests {
     #[test]
     fn rejects_json_without_transcript_text() {
         assert!(parse_transcript(r#"{"status":"ok"}"#).is_err());
+    }
+
+    const TEST_TOKEN: &str = "test-access-token";
+
+    fn wav_recording() -> (RecordedAudio, NamedTempFile) {
+        let file = NamedTempFile::new().unwrap();
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(file.path(), spec).unwrap();
+        for _ in 0..1_600 {
+            writer.write_sample(0_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let recording = RecordedAudio {
+            path: file.path().to_path_buf(),
+            content_type: "audio/wav".into(),
+            filename: "clip.wav".into(),
+            duration: Duration::from_millis(100),
+        };
+        (recording, file)
+    }
+
+    fn auth_service_with_fixture(dir: &tempfile::TempDir) -> CodexAuthService {
+        let auth_path = dir.path().join("auth.json");
+        std::fs::write(
+            &auth_path,
+            format!(r#"{{"tokens":{{"access_token":"{TEST_TOKEN}","account_id":"acct-1"}}}}"#),
+        )
+        .unwrap();
+        CodexAuthService::with_auth_path(auth_path)
+    }
+
+    async fn handle_transcribe_ok(
+        headers: HeaderMap,
+        mut multipart: Multipart,
+    ) -> impl IntoResponse {
+        let bearer_ok = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            == Some(&format!("Bearer {TEST_TOKEN}"));
+        let content_type_is_multipart = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.starts_with("multipart/form-data"))
+            .unwrap_or(false);
+
+        let mut saw_file_field = false;
+        while let Ok(Some(field)) = multipart.next_field().await {
+            if field.name() == Some("file") {
+                saw_file_field = true;
+            }
+        }
+
+        if bearer_ok && content_type_is_multipart && saw_file_field {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "text": "hello from mock" })),
+            )
+        } else {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "bearer_ok={bearer_ok} content_type_is_multipart={content_type_is_multipart} saw_file_field={saw_file_field}"
+                    )
+                })),
+            )
+        }
+    }
+
+    // Take the whole request body as `Bytes` so the handler buffers the entire
+    // multipart upload before responding. Without this, the server can respond
+    // 500 and close while the client is still streaming the WAV, and reqwest
+    // surfaces a send error instead of the 500 — a timing race that made this
+    // test flaky.
+    async fn handle_transcribe_service_error(_body: Bytes) -> impl IntoResponse {
+        (StatusCode::INTERNAL_SERVER_ERROR, "mock service failure")
+    }
+
+    #[tokio::test]
+    async fn transcribe_sends_bearer_and_multipart_and_parses_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server local addr");
+        let app = Router::new().route("/transcribe", post(handle_transcribe_ok));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve transcribe endpoint");
+        });
+
+        let auth_dir = tempfile::tempdir().unwrap();
+        let auth = auth_service_with_fixture(&auth_dir);
+        let client = CodexTranscriptionClient::with_base_url_for_tests(
+            auth,
+            Duration::from_secs(5),
+            format!("http://{addr}/transcribe"),
+        )
+        .expect("client builds");
+
+        let (recording, _file) = wav_recording();
+        let transcript = client.transcribe(&recording).await;
+
+        server.abort();
+        assert_eq!(
+            transcript.expect("transcription succeeds"),
+            "hello from mock"
+        );
+    }
+
+    #[tokio::test]
+    async fn transcribe_maps_non_2xx_to_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server local addr");
+        let app = Router::new().route("/transcribe", post(handle_transcribe_service_error));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve transcribe endpoint");
+        });
+
+        let auth_dir = tempfile::tempdir().unwrap();
+        let auth = auth_service_with_fixture(&auth_dir);
+        let client = CodexTranscriptionClient::with_base_url_for_tests(
+            auth,
+            Duration::from_secs(5),
+            format!("http://{addr}/transcribe"),
+        )
+        .expect("client builds");
+
+        let (recording, _file) = wav_recording();
+        let result = client.transcribe(&recording).await;
+
+        server.abort();
+        match result {
+            Err(TranscriptionError::Request(message)) => {
+                assert!(message.contains("500"), "message was: {message}");
+            }
+            other => panic!("expected TranscriptionError::Request, got {other:?}"),
+        }
     }
 }

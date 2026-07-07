@@ -527,11 +527,14 @@ name = "codex-voice-codex"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "codex-voice-core",
  "dirs",
+ "hound",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

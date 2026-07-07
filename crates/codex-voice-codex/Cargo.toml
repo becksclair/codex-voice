@@ -11,3 +11,8 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+hound.workspace = true
+tempfile.workspace = true
