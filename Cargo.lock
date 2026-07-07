@@ -602,6 +602,7 @@ dependencies = [
  "bytes",
  "codex-voice-core",
  "dirs",
+ "futures-util",
  "hound",
  "rand 0.9.4",
  "reqwest",

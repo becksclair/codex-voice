@@ -16,6 +16,9 @@ use crate::speech_prep::{SpeechPrepClient, SpeechPrepContext, SpeechPrepOutput, 
 const CHUNKED_TTS_MIN_CHARS: usize = 1_600;
 const CHUNKED_TTS_MAX_CHARS: usize = 900;
 
+/// Provider synthesis requests in flight per chunked TTS request.
+const CHUNKED_TTS_CONCURRENCY: usize = 3;
+
 /// Orchestrates TTS synthesis across configured providers with persona-aware fallback.
 pub struct ConfiguredSpeechClient {
     config: ResolvedTtsConfig,
@@ -404,24 +407,28 @@ impl ConfiguredSpeechClient {
             ProviderKind::ElevenLabs => SpeechFormat::Pcm,
             ProviderKind::Google => request.format,
         };
-        let mut synthesized_chunks = Vec::with_capacity(chunks.len());
-        for (index, chunk) in chunks.into_iter().enumerate() {
-            tracing::debug!(
-                provider = ?provider,
-                chunk_index = index,
-                chunk_chars = chunk.chars().count(),
-                "synthesizing TTS chunk"
-            );
-            let chunk_request = SpeechRequest {
-                input: chunk,
-                format: chunk_format,
-                ..request.clone()
-            };
-            synthesized_chunks.push(
-                self.synthesize_single_with(provider, &chunk_request, persona, native_voice)
-                    .await?,
-            );
-        }
+        let synthesized_chunks = synthesize_ordered(
+            chunks.into_iter().enumerate(),
+            CHUNKED_TTS_CONCURRENCY,
+            |(index, chunk)| {
+                let chunk_request = SpeechRequest {
+                    input: chunk,
+                    format: chunk_format,
+                    ..request.clone()
+                };
+                async move {
+                    tracing::debug!(
+                        provider = ?provider,
+                        chunk_index = index,
+                        chunk_chars = chunk_request.input.chars().count(),
+                        "synthesizing TTS chunk"
+                    );
+                    self.synthesize_single_with(provider, &chunk_request, persona, native_voice)
+                        .await
+                }
+            },
+        )
+        .await?;
 
         match chunk_format {
             SpeechFormat::Wav => concatenate_wav_chunks(synthesized_chunks).await,
@@ -436,6 +443,28 @@ impl ConfiguredSpeechClient {
             _ => unreachable!("chunked TTS only requests WAV, PCM, or MP3 chunks"),
         }
     }
+}
+
+/// Runs `f` over `items` with at most `concurrency` invocations in flight at once,
+/// preserving the input order in the returned `Vec`. Fails fast on the first error,
+/// mirroring the behavior of a serial `for` loop that awaits each item in turn.
+async fn synthesize_ordered<I, F, Fut, T, E>(
+    items: I,
+    concurrency: usize,
+    f: F,
+) -> Result<Vec<T>, E>
+where
+    I: IntoIterator,
+    F: FnMut(I::Item) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    use futures_util::stream::{self, StreamExt, TryStreamExt};
+
+    stream::iter(items)
+        .map(f)
+        .buffered(concurrency)
+        .try_collect()
+        .await
 }
 
 fn synthesized_chunk_mime_type(format: SpeechFormat) -> &'static str {
@@ -589,7 +618,75 @@ impl SpeechClient for ConfiguredSpeechClient {
 
 #[cfg(test)]
 mod tests {
-    use super::split_tts_text;
+    use super::{split_tts_text, synthesize_ordered};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn synthesize_ordered_preserves_order_with_reversed_latencies() {
+        // The first item is the slowest, so a naive unordered-completion collector
+        // would return results out of order; `synthesize_ordered` must not.
+        let items = vec![(0usize, 30u64), (1, 20), (2, 10), (3, 0)];
+
+        let result: Result<Vec<usize>, ()> =
+            synthesize_ordered(items, 4, |(index, delay_ms)| async move {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                Ok(index)
+            })
+            .await;
+
+        assert_eq!(result.unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn synthesize_ordered_runs_with_bounded_concurrency() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let high_water = Arc::new(AtomicUsize::new(0));
+        let items: Vec<usize> = (0..8).collect();
+
+        let result: Result<Vec<usize>, ()> = synthesize_ordered(items, 3, |index| {
+            let active = Arc::clone(&active);
+            let high_water = Arc::clone(&high_water);
+            async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                high_water.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok(index)
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), (0..8).collect::<Vec<_>>());
+        assert!(
+            high_water.load(Ordering::SeqCst) >= 2,
+            "expected concurrent execution, high water mark was {}",
+            high_water.load(Ordering::SeqCst)
+        );
+        assert!(
+            high_water.load(Ordering::SeqCst) <= 3,
+            "concurrency exceeded configured bound, high water mark was {}",
+            high_water.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn synthesize_ordered_fails_fast_on_first_error() {
+        let items: Vec<usize> = (0..4).collect();
+
+        let result: Result<Vec<usize>, &'static str> =
+            synthesize_ordered(items, 2, |index| async move {
+                if index == 1 {
+                    Err("boom")
+                } else {
+                    Ok(index)
+                }
+            })
+            .await;
+
+        assert_eq!(result, Err("boom"));
+    }
 
     #[test]
     fn split_tts_text_prefers_sentence_boundaries() {
