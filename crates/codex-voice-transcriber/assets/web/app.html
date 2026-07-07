@@ -3719,7 +3719,6 @@
         localStorage.setItem(textStorageKey, text.value);
         updateCount();
         clearError();
-        text.focus();
         if (settings.generateOnPaste !== false) await generateCurrentText();
       } catch (error) {
         showError(error.message || 'Clipboard paste failed.');
