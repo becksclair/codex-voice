@@ -30,13 +30,35 @@ use tokio::sync::mpsc;
 use app::{run_app, PlatformParts, TrayHandle};
 use cli::{Cli, Command, DoctorCommand, TranscriberCommand, TtsCommand};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     logging::init_tracing()?;
 
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Command::Run) {
+    let command = cli.command.unwrap_or(Command::Run);
+
+    // The Linux `run` path must keep the main thread free of any ambient tokio
+    // runtime: iced's tokio-backed executor calls block_on during window
+    // creation, which panics ("Cannot start a runtime from within a runtime")
+    // if the main thread already sits inside #[tokio::main]. Linux run() is
+    // synchronous — it spawns its own background runtime and blocks the main
+    // thread in the iced daemon — so dispatch it before building a runtime.
+    #[cfg(target_os = "linux")]
+    if matches!(command, Command::Run) {
+        return run();
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(dispatch(command))
+}
+
+async fn dispatch(command: Command) -> Result<()> {
+    match command {
+        #[cfg(not(target_os = "linux"))]
         Command::Run => run().await,
+        #[cfg(target_os = "linux")]
+        Command::Run => unreachable!("Linux `run` is dispatched before the runtime is built"),
         Command::Server(args) => {
             let config: codex_voice_transcriber::ServeConfig = args.try_into()?;
             let tts_config_path = match tts::default_read_aloud_config_path() {
@@ -189,7 +211,7 @@ impl TrayStart<MacOSUiConfig> for StatusTray {
 ///
 /// The `server` subcommand and every non-Linux `run` path are unaffected.
 #[cfg(target_os = "linux")]
-async fn run() -> Result<()> {
+fn run() -> Result<()> {
     let log_path = logging::log_file_path();
 
     // WindowEvent channel: tray/app -> iced daemon (open/focus windows, status).
