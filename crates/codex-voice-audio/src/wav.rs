@@ -63,6 +63,66 @@ mod tests {
     }
 
     #[test]
+    fn writer_thread_finalizes_only_after_senders_drop() {
+        use crate::recorder::run_writer;
+
+        let path = tempfile::Builder::new()
+            .suffix(".wav")
+            .tempfile()
+            .unwrap()
+            .into_temp_path()
+            .keep()
+            .unwrap();
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let (data_tx, data_rx) = crossbeam_channel::bounded::<Vec<i16>>(8);
+        let (pool_tx, _pool_rx) = crossbeam_channel::bounded::<Vec<i16>>(8);
+        let writer_path = path.clone();
+        let handle = std::thread::spawn(move || run_writer(writer_path, spec, data_rx, pool_tx));
+
+        data_tx.send(vec![1_i16, 2, 3, 4]).unwrap();
+        // Dropping the last sender is what lets the writer exit its recv loop
+        // and finalize the file.
+        drop(data_tx);
+
+        let count = handle.join().unwrap().unwrap();
+        assert_eq!(count, 4);
+
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.duration(), 4);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn no_orphan_file_when_writer_never_spawned() {
+        use crate::state::TempWavGuard;
+
+        let path = tempfile::Builder::new()
+            .prefix("codex-voice-")
+            .suffix(".wav")
+            .tempfile()
+            .unwrap()
+            .into_temp_path()
+            .keep()
+            .unwrap();
+        assert!(path.exists());
+
+        let guard = TempWavGuard::new(path.clone());
+        // Mirrors a start() early-return before the writer thread is spawned:
+        // the guard is the sole owner of the temp file and must delete it.
+        drop(guard);
+
+        assert!(
+            !path.exists(),
+            "temp file must be deleted when no writer runs"
+        );
+    }
+
+    #[test]
     fn invalid_wav_returns_error() {
         let path = tempfile::Builder::new()
             .suffix(".wav")

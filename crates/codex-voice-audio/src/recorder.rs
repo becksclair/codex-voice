@@ -6,6 +6,7 @@ use cpal::{
 };
 use hound::{SampleFormat as WavSampleFormat, WavSpec, WavWriter};
 use std::{
+    path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -66,23 +67,6 @@ impl AudioRecorder for CpalWavRecorder {
             let _ = pool_tx.try_send(Vec::with_capacity(1024));
         }
 
-        let writer_thread = std::thread::spawn(move || {
-            let mut writer = WavWriter::create(&writer_path, spec)
-                .map_err(|error| AudioError::Message(format!("failed to create wav: {error}")))?;
-            let mut count = 0u64;
-            while let Ok(mut chunk) = data_rx.recv() {
-                for sample in chunk.drain(..) {
-                    let _ = writer.write_sample(sample);
-                    count += 1;
-                }
-                let _ = pool_tx.try_send(chunk);
-            }
-            writer
-                .finalize()
-                .map_err(|error| AudioError::Message(format!("failed to finalize wav: {error}")))?;
-            Ok(count)
-        });
-
         let data_tx_f32 = data_tx.clone();
         let pool_rx_f32 = pool_rx.clone();
         let data_tx_i16 = data_tx.clone();
@@ -126,6 +110,13 @@ impl AudioRecorder for CpalWavRecorder {
         stream.play().map_err(|error| {
             AudioError::Message(format!("failed to start input stream: {error}"))
         })?;
+
+        // Spawn the writer thread only after the stream is playing. Any early
+        // return above leaves no thread running, so the TempWavGuard's Drop is
+        // the sole owner of the temp file and deletes it cleanly. The bounded
+        // data channel buffers the few chunks cpal may push before this starts.
+        let writer_thread =
+            std::thread::spawn(move || run_writer(writer_path, spec, data_rx, pool_tx));
 
         let _ = guard.keep();
         *state = Some(CaptureState {
@@ -180,6 +171,30 @@ impl AudioRecorder for CpalWavRecorder {
         }
         Ok(())
     }
+}
+
+/// Drain filled audio chunks into a WAV file until every sender is dropped,
+/// then finalize the file. Returns the total number of samples written.
+pub(crate) fn run_writer(
+    path: PathBuf,
+    spec: WavSpec,
+    data_rx: crossbeam_channel::Receiver<Vec<i16>>,
+    pool_tx: crossbeam_channel::Sender<Vec<i16>>,
+) -> AudioResult<u64> {
+    let mut writer = WavWriter::create(&path, spec)
+        .map_err(|error| AudioError::Message(format!("failed to create wav: {error}")))?;
+    let mut count = 0u64;
+    while let Ok(mut chunk) = data_rx.recv() {
+        for sample in chunk.drain(..) {
+            let _ = writer.write_sample(sample);
+            count += 1;
+        }
+        let _ = pool_tx.try_send(chunk);
+    }
+    writer
+        .finalize()
+        .map_err(|error| AudioError::Message(format!("failed to finalize wav: {error}")))?;
+    Ok(count)
 }
 
 fn close_capture(
