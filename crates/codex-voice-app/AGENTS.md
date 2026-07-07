@@ -32,7 +32,7 @@ cargo check -p codex-voice-app
 - ✅ DO: Redact auth in diagnostics like `doctor_codex_auth()`; print token presence, never token values.
 - ✅ DO: Print transcript length and a short preview only, following `doctor_transcribe()`.
 - ✅ DO: For transcriber service/probe paths, print only sizes, status, transcript length, and redacted errors.
-- ❌ DON'T: Change the CLI shape without updating `README.md` and `docs/execplan-rust-native-cross-platform.md`; both document concrete `cargo run ... --bin codex-voice -- ...` commands.
+- ❌ DON'T: Change the CLI shape without updating `README.md` and `ROADMAP.md`; both document concrete `cargo run ... --bin codex-voice -- ...` commands.
 - ❌ DON'T: Put platform-specific implementation details here; platform behavior belongs in `crates/codex-voice-platform/src/`.
 - Use `anyhow::Result` in this crate only; lower crates should expose typed result aliases.
 

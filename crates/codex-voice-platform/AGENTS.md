@@ -39,7 +39,7 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor hotkey
 - Wayland clipboard handling: `src/linux_clipboard.rs`
 - Platform trait definitions: `crates/codex-voice-core/src/platform.rs`
 - App diagnostics: `crates/codex-voice-app/src/main.rs`
-- Portal requirements: `docs/execplan-rust-native-cross-platform.md`
+- Portal requirements: `ROADMAP.md`
 
 ## JIT Index Hints
 

@@ -74,11 +74,41 @@ service returns `413 Payload Too Large` with a clear error.
 source file or generated chunks and prints only sizes, status, transcript
 lengths, and redacted errors.
 
+## Web App
+
+`server` also serves an installable TTS web app (PWA) from the same
+listener, so any device reachable at the bind address — `localhost` for local
+use, or the Tailscale/homelab address from `mise run setup` and the
+Homelab Reverse-Proxy Setup above — can generate and play speech without a
+native client.
+
+Routes: `GET /web` (app shell), `GET /web/config` (browser-facing TTS
+config), `GET /web/manifest.webmanifest` and
+`GET /web/manifest-light.webmanifest` (dark/light install manifests),
+`GET /web-sw.js` (service worker), `GET /web/icon-192.png`,
+`GET /web/icon-512.png`, `GET /web/icon-maskable-512.png`, and
+`GET /web/apple-touch-icon.png` (install icons), `POST /web/speech`
+(synchronous synthesis), `POST /web/speech-jobs` and
+`GET /web/speech-jobs/{id}` (async speech jobs for longer input).
+
+The app lets you paste or type text and generate speech (including
+generate-on-paste), scrub playback on a touch-friendly waveform, and install
+itself to a phone or desktop homescreen via the web manifest and service
+worker.
+
+`/web/config` and the `/web/speech*` routes are deliberately unauthenticated
+so the PWA can call them without a bearer token; the trust boundary is
+private-network/Tailscale-only deployment, per the "Deployment Context"
+section of the root `AGENTS.md`.
+
 ## Text-to-Speech (TTS)
 
 `server` includes TTS when `~/.codex/read-aloud-defaults.json` is present and
 valid. If TTS config is absent, transcription still works and the speech endpoint
-returns `503`.
+returns `503`. See `docs/read-aloud-defaults.example.json` for an example
+config with a persona, both provider backends, and a `speechPrep` block
+(placeholder API keys only — replace them with real values or env-sourced
+secrets before use).
 
 The TTS endpoint accepts standard OpenAI TTS JSON requests:
 

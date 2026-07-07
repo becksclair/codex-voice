@@ -33,7 +33,7 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file /tmp/
 - Transcription client: `src/lib.rs`
 - Transcription trait: `crates/codex-voice-core/src/transcription.rs`
 - CLI diagnostics: `crates/codex-voice-app/src/main.rs`
-- Auth/transcription plan notes: `docs/execplan-rust-native-cross-platform.md`
+- Auth/transcription plan notes: `ROADMAP.md`
 
 ## JIT Index Hints
 

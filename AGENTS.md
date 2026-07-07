@@ -30,7 +30,7 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"
 - Prefer typed errors in library crates and `anyhow::Result` only at app/CLI boundaries.
 - Keep generated/runtime artifacts out of git; `target/` is ignored.
 - For PWA/web assets, never reference immutable assets through bare stable URLs. If an asset route uses long-lived or `immutable` caching, every HTML, manifest, and service-worker precache reference must include the current build revision or another cache-busting content version.
-- Update `README.md` and `docs/execplan-rust-native-cross-platform.md` when command contracts change.
+- Update `README.md` and `ROADMAP.md` when command contracts change.
 - Preserve Linux-first scope until portal hotkey/paste proof is complete.
 
 ## Security & Secrets
@@ -56,8 +56,8 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"
 - TTS (Google Gemini + ElevenLabs): `crates/codex-voice-tts/` -> [see AGENTS.md](crates/codex-voice-tts/AGENTS.md)
 - Transcriber service/client/discovery: `crates/codex-voice-transcriber/` -> [see AGENTS.md](crates/codex-voice-transcriber/AGENTS.md)
 - Platform adapters: `crates/codex-voice-platform/` -> [see AGENTS.md](crates/codex-voice-platform/AGENTS.md)
-- UI placeholder: `crates/codex-voice-ui/` -> [see AGENTS.md](crates/codex-voice-ui/AGENTS.md)
-- Architecture plan: `docs/execplan-rust-native-cross-platform.md`
+- Native tray/HUD/settings surfaces for Linux, macOS, and Windows: `crates/codex-voice-ui/` -> [see AGENTS.md](crates/codex-voice-ui/AGENTS.md)
+- Architecture plan: `ROADMAP.md` (see `docs/execplan-rust-native-cross-platform.md.ARCHIVED` for original detailed research)
 
 ### Quick Find Commands
 
@@ -78,4 +78,4 @@ find crates -name '*test*' -o -name '*.rs'
 - After modifying any installed/runtime service behavior, rebuild and restart the affected user services before marking the task complete, then verify the restarted service is healthy.
 - For Linux runtime changes, run `doctor linux-portals` and the 1-second `doctor audio` smoke when relevant.
 - For TTS changes, run `doctor tts` with a short test phrase.
-- Update README/ExecPlan for changed CLI, runtime, auth, platform, or TTS behavior.
+- Update README/ROADMAP for changed CLI, runtime, auth, platform, or TTS behavior.

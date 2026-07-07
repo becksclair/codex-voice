@@ -2,7 +2,7 @@
 
 ## Package Identity
 
-`codex-voice-ui` owns presentation-facing status mapping plus the Linux tray, notification HUD, and settings/status window. Future cross-platform UI work should grow from here instead of leaking UI state into core or app wiring.
+`codex-voice-ui` owns presentation-facing status mapping plus the native tray, notification HUD, and settings/status window for Linux, macOS, and Windows (`src/linux_tray.rs`, `src/macos_tray.rs`, `src/windows_tray.rs`). Keep UI state here instead of leaking it into core or app wiring.
 
 ## Setup & Run
 
@@ -19,7 +19,6 @@ cargo clippy -p codex-voice-ui --all-targets -- -D warnings
 - ✅ DO: Map core `AppEvent` values to display labels in `src/lib.rs` instead of formatting them in app wiring.
 - ✅ DO: Keep Linux tray code behind `cfg(target_os = "linux")`, as `StatusTray` does in `src/lib.rs`.
 - ✅ DO: Keep menu commands as `UiCommand` values and handle runtime effects in `crates/codex-voice-app/src/main.rs`.
-- ✅ DO: Add future Slint-facing wrappers here when they are presentation-specific.
 - ✅ DO: Keep settings/HUD labels and display-specific formatting out of `codex-voice-core`.
 - ❌ DON'T: Add platform permission or hotkey code here; use `crates/codex-voice-platform`.
 - ❌ DON'T: Add transcription/auth logic here; use `crates/codex-voice-codex`.
@@ -27,20 +26,22 @@ cargo clippy -p codex-voice-ui --all-targets -- -D warnings
 ## Touch Points / Key Files
 
 - UI status mapping, Linux tray, notification HUD, and settings/status window: `src/lib.rs`
+- macOS tray: `src/macos_tray.rs`
+- Windows tray: `src/windows_tray.rs`
 - Core state source: `crates/codex-voice-core/src/engine.rs`
-- Future UI milestone: `docs/execplan-rust-native-cross-platform.md`
+- Cross-platform UI decision (per-platform native UI kept; Slint evaluated and not adopted): `ROADMAP.md` (Phase 6)
 
 ## JIT Index Hints
 
 ```bash
 rg -n "UiStatus|StatusTray|UiCommand|HudWindow|SettingsWindow|DictationState" src ../codex-voice-core/src
-rg -n "Slint|HUD|tray|settings" ../../docs/execplan-rust-native-cross-platform.md ../../README.md
+rg -n "Slint|HUD|tray|settings" ../../ROADMAP.md ../../README.md
 rg -n "AppEvent|StateChanged" ../codex-voice-core/src/engine.rs ../codex-voice-app/src/main.rs
 ```
 
 ## Common Gotchas
 
-- This crate intentionally has no Slint dependency yet; the current Linux surface uses GTK plus `tray-icon`, and `notify-send` for focus-safe HUD notifications.
+- This crate has no Slint dependency: per `ROADMAP.md` Phase 6, Slint was evaluated and not adopted; the Linux surface uses GTK plus `tray-icon` and `notify-send` for focus-safe HUD notifications, and macOS/Windows use `tray-icon` with platform-native dialogs and notifications.
 - Keep GTK/AppIndicator dependencies target-scoped to Linux.
 - Do not put runtime side effects behind GTK callbacks; send `UiCommand` to the app crate.
 

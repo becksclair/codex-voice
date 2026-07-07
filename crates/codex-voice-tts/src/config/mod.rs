@@ -654,4 +654,12 @@ mod tests {
 
         assert_eq!(google.inline_audio_tags, Some(true));
     }
+
+    #[test]
+    fn example_config_in_docs_parses() {
+        let text = include_str!("../../../../docs/read-aloud-defaults.example.json");
+        let file: serde::ReadAloudDefaultsFile =
+            serde_json::from_str(text).expect("example config should be valid JSON");
+        file.resolve().expect("example config should resolve");
+    }
 }
