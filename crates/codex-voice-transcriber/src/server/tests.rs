@@ -135,6 +135,44 @@ async fn web_app_returns_phone_tts_shell() {
 }
 
 #[tokio::test]
+async fn web_paste_handler_does_not_refocus_textarea() {
+    // Regression guard for the paste-focus fix: the paste-button click handler
+    // must not call `text.focus()` after a paste, which previously stole focus
+    // from the user. The reset (clear) handler's `text.focus()` elsewhere is
+    // intentional and deliberately outside the slice checked here.
+    let app = service_router(test_state_with_speech(1024));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    let html = std::str::from_utf8(&bytes).expect("html is utf-8");
+
+    let start = html
+        .find("navigator.clipboard.readText")
+        .expect("paste-button handler start marker present");
+    let end = html[start..]
+        .find("Clipboard paste failed.")
+        .map(|offset| start + offset)
+        .expect("paste-button handler end marker present");
+    let paste_handler = &html[start..end];
+
+    assert!(
+        !paste_handler.contains("text.focus()"),
+        "paste handler must not re-focus the textarea after paste"
+    );
+}
+
+#[tokio::test]
 async fn web_config_is_public_and_exports_browser_tts_config() {
     let app = service_router(test_state_with_web_tts_config(1024));
     let response = app
