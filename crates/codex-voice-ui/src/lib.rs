@@ -84,7 +84,13 @@ pub use tray_common::{UiCommand, UiError};
 mod linux_tray;
 
 #[cfg(target_os = "linux")]
-pub use linux_tray::{LinuxUiConfig, StatusTray};
+mod linux_windows;
+
+#[cfg(target_os = "linux")]
+pub use linux_tray::{LinuxUiConfig, StatusTray, WindowEvent};
+
+#[cfg(target_os = "linux")]
+pub use linux_windows::{run_window_daemon, SettingsInfo};
 
 #[cfg(target_os = "windows")]
 mod windows_tray;

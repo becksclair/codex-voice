@@ -17,12 +17,12 @@ use codex_voice_platform::MacOSTextInjector;
 #[cfg(target_os = "windows")]
 use codex_voice_platform::WindowsTextInjector;
 use codex_voice_transcriber::RuntimeTranscriptionClient;
-#[cfg(target_os = "linux")]
-use codex_voice_ui::LinuxUiConfig;
 #[cfg(target_os = "macos")]
 use codex_voice_ui::MacOSUiConfig;
 #[cfg(target_os = "windows")]
 use codex_voice_ui::WindowsUiConfig;
+#[cfg(target_os = "linux")]
+use codex_voice_ui::{run_window_daemon, LinuxUiConfig, SettingsInfo, UiCommand, WindowEvent};
 use codex_voice_ui::{StatusTray, UiStatus};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -182,25 +182,77 @@ impl TrayStart<MacOSUiConfig> for StatusTray {
     }
 }
 
+/// Linux `run` inverts the usual thread ownership: the iced window daemon must
+/// own the process main thread (winit 0.30 refuses off-main-thread event loops
+/// on Linux), so the tokio engine + run-loop move to a background thread with
+/// their own runtime, and this function blocks the main thread in the daemon.
+///
+/// The `server` subcommand and every non-Linux `run` path are unaffected.
 #[cfg(target_os = "linux")]
 async fn run() -> Result<()> {
     let log_path = logging::log_file_path();
-    let tray = start_tray(LinuxUiConfig { log_path });
-    let injector = Arc::new(LinuxTextInjector::new());
-    let (app_rx, hotkey_rx, engine_tx) = spawn_engine(
-        injector.clone(),
-        codex_voice_platform::LinuxHotkeyService::new(),
-    )
-    .await?;
-    run_app(PlatformParts {
-        hotkey_rx,
-        app_rx,
-        engine_tx,
-        tray,
-        reader: injector,
-        banner: "Codex Voice is running. Hold Control-M or the keyboard dictation key to dictate. Press Super-F6 to speak selected text.".into(),
-    })
-    .await
+
+    // WindowEvent channel: tray/app -> iced daemon (open/focus windows, status).
+    let (window_tx, window_rx) = mpsc::unbounded_channel::<WindowEvent>();
+    let config_window_tx = window_tx.clone();
+    let exit_window_tx = window_tx;
+
+    // UiCommand channel: ksni menu closures and the iced Speak Text window both
+    // send here; the run-loop drains it via `try_recv_command`.
+    let (command_tx, command_rx) = std::sync::mpsc::channel::<UiCommand>();
+    let daemon_command_tx = command_tx.clone();
+
+    let settings_info = SettingsInfo::new(log_path.clone());
+
+    // Background thread: owns a multi-threaded tokio runtime that runs the
+    // engine and the shared select loop, exactly as the other platforms do on
+    // their main thread.
+    let background = std::thread::Builder::new()
+        .name("codex-voice-run".to_string())
+        .spawn(move || -> Result<()> {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let outcome = runtime.block_on(async move {
+                let tray = start_tray(LinuxUiConfig {
+                    log_path,
+                    window_tx: config_window_tx,
+                    command_tx,
+                    command_rx,
+                });
+                let injector = Arc::new(LinuxTextInjector::new());
+                let (app_rx, hotkey_rx, engine_tx) = spawn_engine(
+                    injector.clone(),
+                    codex_voice_platform::LinuxHotkeyService::new(),
+                )
+                .await?;
+                run_app(PlatformParts {
+                    hotkey_rx,
+                    app_rx,
+                    engine_tx,
+                    tray,
+                    reader: injector,
+                    banner: "Codex Voice is running. Hold Control-M or the keyboard dictation key to dictate. Press Super-F6 to speak selected text.".into(),
+                })
+                .await
+            });
+            // However the run-loop finished (Quit, closed channels, or error),
+            // release the daemon so the main thread can join and exit.
+            let _ = exit_window_tx.send(WindowEvent::Exit);
+            outcome
+        })?;
+
+    // Main thread: block in the iced daemon. If it cannot start (e.g. no
+    // display), degrade to tray-only/headless by simply joining the background
+    // thread, matching the optional-tray philosophy.
+    if let Err(error) = run_window_daemon(window_rx, daemon_command_tx, settings_info) {
+        tracing::warn!(%error, "window daemon unavailable; running without on-demand windows");
+    }
+
+    match background.join() {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("background application thread panicked"),
+    }
 }
 
 #[cfg(target_os = "windows")]

@@ -7,10 +7,21 @@ license.workspace = true
 [dependencies]
 codex-voice-core = { path = "../codex-voice-core" }
 thiserror.workspace = true
-tray-icon.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
+ksni = "0.3"
+iced = { version = "0.14", default-features = false, features = [
+    "tokio",
+    "tiny-skia",
+    "x11",
+    "wayland",
+    "linux-theme-detection",
+    "fira-sans",
+] }
+tokio = { workspace = true }
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tray-icon.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys.workspace = true

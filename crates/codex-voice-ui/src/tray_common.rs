@@ -6,15 +6,28 @@
 //! copied three times.
 
 use codex_voice_core::DictationState;
+#[cfg(not(target_os = "linux"))]
 use std::collections::HashMap;
+#[cfg(not(target_os = "linux"))]
 use tray_icon::Icon;
 
+// The menu-item id constants identify tray-menu activations on platforms whose
+// tray backend is id-based (`tray-icon` on macOS/Windows). The Linux backend
+// (ksni) is closure-based and never references them, so they are gated off the
+// Linux build to avoid dead-code warnings there.
+#[cfg(not(target_os = "linux"))]
 pub const MENU_STATUS: &str = "status";
+#[cfg(not(target_os = "linux"))]
 pub const MENU_TEST_RECORDING: &str = "test-recording";
+#[cfg(not(target_os = "linux"))]
 pub const MENU_SPEAK_TEXT: &str = "speak-text";
+#[cfg(not(target_os = "linux"))]
 pub const MENU_SETTINGS: &str = "settings";
+#[cfg(not(target_os = "linux"))]
 pub const MENU_LOGS: &str = "logs";
+#[cfg(not(target_os = "linux"))]
 pub const MENU_DIAGNOSTICS: &str = "diagnostics";
+#[cfg(not(target_os = "linux"))]
 pub const MENU_QUIT: &str = "quit";
 pub const ICON_SIZE: u32 = 32;
 
@@ -47,35 +60,13 @@ pub enum UiError {
     EventLoop(String),
 }
 
-pub fn build_icon_cache() -> Result<HashMap<DictationState, Icon>, UiError> {
-    use codex_voice_core::DictationState::*;
-    let mut cache = HashMap::new();
-    for state in [
-        Idle,
-        Recording,
-        Transcribing,
-        Inserting,
-        Error(String::new()),
-    ] {
-        let icon = build_icon_for_state(&state)?;
-        cache.insert(state, icon);
-    }
-    Ok(cache)
-}
-
-pub fn icon_for_state(cache: &HashMap<DictationState, Icon>, state: &DictationState) -> Icon {
-    let lookup = match state {
-        DictationState::Error(_) => DictationState::Error(String::new()),
-        _ => state.clone(),
-    };
-    cache
-        .get(&lookup)
-        .cloned()
-        .or_else(|| cache.get(&DictationState::Error(String::new())).cloned())
-        .expect("icon cache contains all states")
-}
-
-pub fn build_icon_for_state(state: &DictationState) -> Result<Icon, UiError> {
+/// Renders the status icon for `state` as a 32x32 RGBA buffer.
+///
+/// This is the platform-neutral pixel source: a filled circle in the
+/// per-state color over a transparent background. Every platform tray converts
+/// it into its own icon type (`tray_icon::Icon` on macOS/Windows, `ksni::Icon`
+/// on Linux). Keeping the drawing here means the visual is defined once.
+pub fn icon_rgba_for_state(state: &DictationState) -> Vec<u8> {
     let color = match state {
         DictationState::Idle => [0x5c, 0x66, 0x70, 0xff],
         DictationState::Recording => [0xdb, 0x36, 0x36, 0xff],
@@ -101,7 +92,42 @@ pub fn build_icon_for_state(state: &DictationState) -> Result<Icon, UiError> {
         }
     }
 
-    Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE)
+    rgba
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn build_icon_cache() -> Result<HashMap<DictationState, Icon>, UiError> {
+    use codex_voice_core::DictationState::*;
+    let mut cache = HashMap::new();
+    for state in [
+        Idle,
+        Recording,
+        Transcribing,
+        Inserting,
+        Error(String::new()),
+    ] {
+        let icon = build_icon_for_state(&state)?;
+        cache.insert(state, icon);
+    }
+    Ok(cache)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn icon_for_state(cache: &HashMap<DictationState, Icon>, state: &DictationState) -> Icon {
+    let lookup = match state {
+        DictationState::Error(_) => DictationState::Error(String::new()),
+        _ => state.clone(),
+    };
+    cache
+        .get(&lookup)
+        .cloned()
+        .or_else(|| cache.get(&DictationState::Error(String::new())).cloned())
+        .expect("icon cache contains all states")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn build_icon_for_state(state: &DictationState) -> Result<Icon, UiError> {
+    Icon::from_rgba(icon_rgba_for_state(state), ICON_SIZE, ICON_SIZE)
         .map_err(|error| UiError::Icon(format!("failed to build tray icon: {error}")))
 }
 
@@ -125,6 +151,44 @@ mod tests {
             crate::StatusTray::try_recv_command;
         let _status_sender: fn(&crate::StatusTray) -> std::sync::mpsc::Sender<crate::UiStatus> =
             crate::StatusTray::status_sender;
+    }
+
+    fn pixel_at(rgba: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let idx = ((y * ICON_SIZE + x) * 4) as usize;
+        [rgba[idx], rgba[idx + 1], rgba[idx + 2], rgba[idx + 3]]
+    }
+
+    #[test]
+    fn icon_rgba_for_state_paints_center_and_leaves_corner_transparent() {
+        let cases = [
+            (DictationState::Idle, [0x5c, 0x66, 0x70]),
+            (DictationState::Recording, [0xdb, 0x36, 0x36]),
+            (DictationState::Transcribing, [0x2b, 0x7f, 0xd3]),
+            (DictationState::Inserting, [0xf2, 0xb8, 0x4b]),
+            (DictationState::Error(String::new()), [0xcc, 0x24, 0x1d]),
+        ];
+
+        for (state, rgb) in cases {
+            let rgba = icon_rgba_for_state(&state);
+            assert_eq!(rgba.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
+
+            // The center pixel is inside the circle: opaque, in the state color.
+            let center = pixel_at(&rgba, ICON_SIZE / 2, ICON_SIZE / 2);
+            assert_eq!(
+                center,
+                [rgb[0], rgb[1], rgb[2], 0xff],
+                "center for {state:?}"
+            );
+
+            // The corner pixel is outside the circle: fully transparent. The RGB
+            // channels still carry the state color; only alpha distinguishes it.
+            let corner = pixel_at(&rgba, 0, 0);
+            assert_eq!(
+                corner,
+                [rgb[0], rgb[1], rgb[2], 0x00],
+                "corner for {state:?}"
+            );
+        }
     }
 
     #[test]

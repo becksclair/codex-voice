@@ -1,25 +1,59 @@
+//! Linux status tray backed by ksni (StatusNotifierItem over D-Bus).
+//!
+//! KDE Plasma — the primary target desktop — speaks the StatusNotifierItem
+//! protocol natively, so the tray is a pure-Rust D-Bus service with no GTK
+//! anywhere. The two on-demand windows (Settings, Speak Text) are rendered by
+//! the iced daemon in [`crate::linux_windows`], which must own the process main
+//! thread; this module only signals it through a [`WindowEvent`] channel.
+//!
+//! ## Threading
+//!
+//! [`StatusTray::start`] keeps its synchronous, blocking-until-ready contract by
+//! spawning a dedicated thread that owns a small multi-threaded tokio runtime.
+//! ksni spawns its service loop with `tokio::spawn`, so the runtime must keep
+//! driving that task independently of status updates — a `current_thread`
+//! runtime would only poll the service while a `block_on` was active and the
+//! menu would freeze between updates. One worker thread is enough.
+
 use codex_voice_core::DictationState;
 use std::{
+    collections::HashMap,
     path::PathBuf,
     process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::Duration,
 };
-use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    TrayIconBuilder,
-};
+use tokio::sync::mpsc::UnboundedSender;
 
-use crate::tray_common::{
-    build_icon_cache, icon_for_state, UiCommand, UiError, MENU_DIAGNOSTICS, MENU_LOGS, MENU_QUIT,
-    MENU_SETTINGS, MENU_SPEAK_TEXT, MENU_STATUS, MENU_TEST_RECORDING,
-};
+use crate::tray_common::{icon_rgba_for_state, UiCommand, UiError, ICON_SIZE};
 use crate::UiStatus;
 
+/// Signals from the tray/app to the iced window daemon running on the main
+/// thread. The daemon opens or focuses windows, mirrors live status into an
+/// open Settings window, and exits when the app shuts down.
 #[derive(Debug, Clone)]
+pub enum WindowEvent {
+    /// Open (or focus, if already open) the Settings window.
+    OpenSettings,
+    /// Open (or focus, if already open) the Speak Text window.
+    OpenSpeakText,
+    /// Refresh the live status shown by an open Settings window.
+    Status(UiStatus),
+    /// Shut the daemon down; the process is exiting.
+    Exit,
+}
+
+/// Per-platform tray configuration. Not part of the frozen `StatusTray` method
+/// surface, so it carries the Linux-specific channel wiring the tray and the
+/// iced window daemon share.
 pub struct LinuxUiConfig {
     pub log_path: PathBuf,
+    /// Signals to the iced window daemon (open/focus windows, live status).
+    pub window_tx: UnboundedSender<WindowEvent>,
+    /// Sender the ksni menu closures use to enqueue [`UiCommand`]s.
+    pub command_tx: Sender<UiCommand>,
+    /// Receiver drained by the app run-loop via [`StatusTray::try_recv_command`].
+    pub command_rx: Receiver<UiCommand>,
 }
 
 pub struct StatusTray {
@@ -31,12 +65,21 @@ pub struct StatusTray {
 impl StatusTray {
     pub fn start(initial: UiStatus, config: LinuxUiConfig) -> Result<Self, UiError> {
         let (status_tx, status_rx) = mpsc::channel();
-        let (command_tx, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
 
-        let thread = thread::spawn(move || {
-            run_tray(initial, config, status_rx, command_tx, ready_tx);
-        });
+        let LinuxUiConfig {
+            log_path: _,
+            window_tx,
+            command_tx,
+            command_rx,
+        } = config;
+
+        let thread = thread::Builder::new()
+            .name("codex-voice-tray".to_string())
+            .spawn(move || {
+                run_tray(initial, status_rx, command_tx, window_tx, ready_tx);
+            })
+            .map_err(|error| UiError::TrayInit(format!("failed to spawn tray thread: {error}")))?;
 
         ready_rx
             .recv()
@@ -58,119 +101,256 @@ impl StatusTray {
     }
 
     /// Returns a cloneable sender for updating the tray status.
-    pub fn status_sender(&self) -> std::sync::mpsc::Sender<UiStatus> {
+    pub fn status_sender(&self) -> Sender<UiStatus> {
         self.status_tx.clone()
+    }
+}
+
+/// The tray struct ksni renders. Its fields are the entire tray state; `menu()`
+/// and the icon/title/tooltip getters are pure functions of them. Menu closures
+/// enqueue work onto the app (via `command_tx`) or the window daemon (via
+/// `window_tx`) rather than mutating the tray directly.
+struct KsniTray {
+    status: UiStatus,
+    command_tx: Sender<UiCommand>,
+    window_tx: UnboundedSender<WindowEvent>,
+    icons: HashMap<DictationState, ksni::Icon>,
+}
+
+impl KsniTray {
+    fn current_icon(&self) -> ksni::Icon {
+        icon_for_state(&self.icons, &self.status.state)
+    }
+}
+
+impl ksni::Tray for KsniTray {
+    // Preserve appindicator-style behavior: a left click opens the menu rather
+    // than firing a separate activate action.
+    const MENU_ON_ACTIVATE: bool = true;
+
+    fn id(&self) -> String {
+        "codex-voice".to_string()
+    }
+
+    fn title(&self) -> String {
+        self.status.title().to_string()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        vec![self.current_icon()]
+    }
+
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: "Codex Voice".to_string(),
+            description: self.status.message.clone(),
+            ..Default::default()
+        }
+    }
+
+    // Survive a plasmashell / StatusNotifierWatcher restart: returning `true`
+    // keeps the service alive so it re-registers when the watcher returns.
+    fn watcher_offline(&self, _reason: ksni::OfflineReason) -> bool {
+        true
+    }
+
+    fn menu(&self) -> Vec<ksni::menu::MenuItem<Self>> {
+        use ksni::menu::{MenuItem, StandardItem};
+
+        // Each closure owns its own sender clones; `menu()` may be re-rendered
+        // any time ksni needs the layout.
+        let command_test = self.command_tx.clone();
+        let command_logs = self.command_tx.clone();
+        let command_diagnostics = self.command_tx.clone();
+        let command_quit = self.command_tx.clone();
+        let window_settings = self.window_tx.clone();
+        let window_speak = self.window_tx.clone();
+
+        vec![
+            StandardItem {
+                label: self.status.tray_label(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Start Test Recording".to_string(),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = command_test.send(UiCommand::StartTestRecording);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Speak text...".to_string(),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = window_speak.send(WindowEvent::OpenSpeakText);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Open Settings".to_string(),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = window_settings.send(WindowEvent::OpenSettings);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Open Logs".to_string(),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = command_logs.send(UiCommand::OpenLogs);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Run Diagnostics".to_string(),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = command_diagnostics.send(UiCommand::RunDiagnostics);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Quit".to_string(),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = command_quit.send(UiCommand::Quit);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        ]
     }
 }
 
 fn run_tray(
     initial: UiStatus,
-    config: LinuxUiConfig,
     status_rx: Receiver<UiStatus>,
     command_tx: Sender<UiCommand>,
+    window_tx: UnboundedSender<WindowEvent>,
     ready_tx: Sender<Result<(), UiError>>,
 ) {
-    let result = initialize_tray(initial, config, status_rx, command_tx, ready_tx.clone());
-    if let Err(error) = result {
-        let _ = ready_tx.send(Err(error.clone()));
-        // If startup has already been reported, the app can only learn about
-        // later tray-loop failures through logs in a future UI milestone.
-        eprintln!("codex-voice tray stopped: {error}");
-    }
-}
-
-fn initialize_tray(
-    initial: UiStatus,
-    config: LinuxUiConfig,
-    status_rx: Receiver<UiStatus>,
-    command_tx: Sender<UiCommand>,
-    ready_tx: Sender<Result<(), UiError>>,
-) -> Result<(), UiError> {
-    gtk::init().map_err(|error| UiError::TrayInit(format!("failed to initialize GTK: {error}")))?;
-
-    let menu = Menu::new();
-    let status_item = MenuItem::with_id(MENU_STATUS, initial.tray_label(), false, None);
-    let test_recording_item =
-        MenuItem::with_id(MENU_TEST_RECORDING, "Start Test Recording", true, None);
-    let speak_text_item = MenuItem::with_id(MENU_SPEAK_TEXT, "Speak text...", true, None);
-    let settings_item = MenuItem::with_id(MENU_SETTINGS, "Open Settings", true, None);
-    let logs_item = MenuItem::with_id(MENU_LOGS, "Open Logs", true, None);
-    let diagnostics_item = MenuItem::with_id(MENU_DIAGNOSTICS, "Run Diagnostics", true, None);
-    let quit_item = MenuItem::with_id(MENU_QUIT, "Quit", true, None);
-    let separator = PredefinedMenuItem::separator();
-    let utility_separator = PredefinedMenuItem::separator();
-    menu.append_items(&[
-        &status_item,
-        &separator,
-        &test_recording_item,
-        &speak_text_item,
-        &settings_item,
-        &logs_item,
-        &diagnostics_item,
-        &utility_separator,
-        &quit_item,
-    ])
-    .map_err(|error| UiError::TrayInit(format!("failed to build tray menu: {error}")))?;
-
-    let icons = build_icon_cache()
-        .map_err(|e| UiError::Icon(format!("failed to build icon cache: {e}")))?;
-
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_icon(icon_for_state(&icons, &initial.state))
-        .with_title(initial.title())
-        .with_tooltip("Codex Voice")
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
         .build()
-        .map_err(|error| UiError::TrayInit(format!("failed to create tray icon: {error}")))?;
-    let mut hud = HudWindow::new();
-    let settings = SettingsWindow::new(&initial, &config);
-    let speak_dialog = SpeakTextDialog::new(command_tx.clone());
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = ready_tx.send(Err(UiError::TrayInit(format!(
+                "failed to build tray runtime: {error}"
+            ))));
+            return;
+        }
+    };
+
+    let icons = build_ksni_icon_cache();
+    let tray = KsniTray {
+        status: initial,
+        command_tx,
+        window_tx: window_tx.clone(),
+        icons,
+    };
+
+    let handle = match runtime.block_on(async { ksni::TrayMethods::spawn(tray).await }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = ready_tx.send(Err(map_spawn_error(error)));
+            return;
+        }
+    };
 
     let _ = ready_tx.send(Ok(()));
 
-    loop {
-        while gtk::events_pending() {
-            gtk::main_iteration_do(false);
-        }
+    let mut hud = HudWindow::new();
+    // Blocking recv on the tray thread; the ksni service keeps running on the
+    // runtime's worker thread regardless. Each status update refreshes the tray
+    // via the D-Bus-triggering handle update, drives the notify-send HUD, and
+    // mirrors live status into an open Settings window.
+    while let Ok(status) = status_rx.recv() {
+        hud.update(&status);
+        let _ = window_tx.send(WindowEvent::Status(status.clone()));
+        runtime.block_on(handle.update(|tray: &mut KsniTray| {
+            tray.status = status.clone();
+        }));
+    }
 
-        while let Ok(status) = status_rx.try_recv() {
-            status_item.set_text(status.tray_label());
-            tray.set_title(Some(status.title()));
-            tray.set_icon(Some(icon_for_state(&icons, &status.state)))
-                .map_err(|error| UiError::Icon(format!("failed to update tray icon: {error}")))?;
-            hud.update(&status);
-            settings.update(&status);
-        }
+    // The app dropped the status sender: it is shutting down. Tear the service
+    // down cleanly so the icon disappears promptly.
+    runtime.block_on(handle.shutdown());
+}
 
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            match event.id().as_ref() {
-                MENU_TEST_RECORDING => {
-                    let _ = command_tx.send(UiCommand::StartTestRecording);
-                }
-                MENU_SETTINGS => {
-                    settings.show();
-                }
-                MENU_SPEAK_TEXT => {
-                    speak_dialog.show();
-                }
-                MENU_LOGS => {
-                    let _ = command_tx.send(UiCommand::OpenLogs);
-                }
-                MENU_DIAGNOSTICS => {
-                    let _ = command_tx.send(UiCommand::RunDiagnostics);
-                }
-                MENU_QUIT => {
-                    let _ = command_tx.send(UiCommand::Quit);
-                    return Ok(());
-                }
-                _ => {}
-            }
+/// Maps a ksni spawn failure onto the friendly [`UiError::TrayInit`]. The ksni
+/// `Error` enum is `#[non_exhaustive]`, so the wildcard is required.
+fn map_spawn_error(error: ksni::Error) -> UiError {
+    let detail = match error {
+        ksni::Error::Watcher(_) => {
+            "no StatusNotifierWatcher is available (is a system tray running?)".to_string()
         }
+        ksni::Error::WontShow => {
+            "the tray registered but no StatusNotifierHost will display it".to_string()
+        }
+        ksni::Error::Dbus(err) => format!("D-Bus error: {err}"),
+        other => format!("{other:?}"),
+    };
+    UiError::TrayInit(format!("failed to start status tray: {detail}"))
+}
 
-        thread::sleep(Duration::from_millis(50));
+/// Builds the per-state ksni icon cache from the shared RGBA pixel source.
+fn build_ksni_icon_cache() -> HashMap<DictationState, ksni::Icon> {
+    use codex_voice_core::DictationState::*;
+    let mut cache = HashMap::new();
+    for state in [
+        Idle,
+        Recording,
+        Transcribing,
+        Inserting,
+        Error(String::new()),
+    ] {
+        let icon = ksni_icon_for_state(&state);
+        cache.insert(state, icon);
+    }
+    cache
+}
+
+fn icon_for_state(
+    cache: &HashMap<DictationState, ksni::Icon>,
+    state: &DictationState,
+) -> ksni::Icon {
+    let lookup = match state {
+        DictationState::Error(_) => DictationState::Error(String::new()),
+        _ => state.clone(),
+    };
+    cache
+        .get(&lookup)
+        .cloned()
+        .or_else(|| cache.get(&DictationState::Error(String::new())).cloned())
+        .expect("icon cache contains all states")
+}
+
+/// Converts the shared 32x32 RGBA circle into a ksni [`ksni::Icon`].
+///
+/// ksni icons are ARGB32 in network byte order, whereas the shared source is
+/// RGBA. Rotating each 4-byte pixel right by one turns `[r, g, b, a]` into
+/// `[a, r, g, b]`.
+fn ksni_icon_for_state(state: &DictationState) -> ksni::Icon {
+    let mut data = icon_rgba_for_state(state);
+    for pixel in data.chunks_exact_mut(4) {
+        pixel.rotate_right(1);
+    }
+    ksni::Icon {
+        width: ICON_SIZE as i32,
+        height: ICON_SIZE as i32,
+        data,
     }
 }
 
+/// Transient desktop notifications via `notify-send` (no GTK dependency). This
+/// is unchanged from the previous tray implementation.
 struct HudWindow {
     replace_id: Option<String>,
     last_message: Option<String>,
@@ -236,143 +416,32 @@ impl HudWindow {
     }
 }
 
-struct SettingsWindow {
-    window: gtk::Window,
-    status_label: gtk::Label,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl SettingsWindow {
-    fn new(initial: &UiStatus, config: &LinuxUiConfig) -> Self {
-        use gtk::prelude::*;
+    #[test]
+    fn ksni_icon_reorders_rgba_to_argb() {
+        // The center pixel of the Idle icon is opaque idle-gray. In RGBA that is
+        // [0x5c, 0x66, 0x70, 0xff]; ksni wants ARGB32 network byte order, i.e.
+        // [0xff, 0x5c, 0x66, 0x70].
+        let icon = ksni_icon_for_state(&DictationState::Idle);
+        assert_eq!(icon.width, ICON_SIZE as i32);
+        assert_eq!(icon.height, ICON_SIZE as i32);
+        assert_eq!(icon.data.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
 
-        let window = gtk::Window::new(gtk::WindowType::Toplevel);
-        window.set_title("Codex Voice Settings");
-        window.set_default_size(460, 280);
+        let center = (((ICON_SIZE / 2) * ICON_SIZE + (ICON_SIZE / 2)) * 4) as usize;
+        assert_eq!(
+            &icon.data[center..center + 4],
+            &[0xff, 0x5c, 0x66, 0x70],
+            "center pixel should be ARGB idle-gray"
+        );
 
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        root.set_margin_top(18);
-        root.set_margin_bottom(18);
-        root.set_margin_start(18);
-        root.set_margin_end(18);
-
-        let heading = gtk::Label::new(Some("Codex Voice"));
-        heading.set_xalign(0.0);
-        heading.set_markup("<b>Codex Voice</b>");
-        root.pack_start(&heading, false, false, 0);
-
-        let status_label = gtk::Label::new(None);
-        status_label.set_xalign(0.0);
-        status_label.set_selectable(true);
-        root.pack_start(&status_label, false, false, 0);
-
-        for row in [
-            "Hotkeys: Control-M or keyboard dictation key (KDE GlobalShortcuts portal)",
-            "Insertion: Wayland RemoteDesktop portal paste",
-            "Transcription: Codex auth from ~/.codex/auth.json",
-            "Timeout: default runtime timeout",
-            "Debug logs: set RUST_LOG before launching",
-        ] {
-            let label = gtk::Label::new(Some(row));
-            label.set_xalign(0.0);
-            label.set_selectable(true);
-            root.pack_start(&label, false, false, 0);
-        }
-
-        let log_label = gtk::Label::new(Some(&format!("Log file: {}", config.log_path.display())));
-        log_label.set_xalign(0.0);
-        log_label.set_selectable(true);
-        root.pack_start(&log_label, false, false, 0);
-
-        window.add(&root);
-        let settings = Self {
-            window,
-            status_label,
-        };
-        settings.update(initial);
-        settings
-    }
-
-    fn show(&self) {
-        use gtk::prelude::*;
-
-        self.window.show_all();
-        self.window.present();
-    }
-
-    fn update(&self, status: &UiStatus) {
-        use gtk::prelude::*;
-
-        self.status_label
-            .set_label(&format!("Status: {}", status.message));
-    }
-}
-
-struct SpeakTextDialog {
-    window: gtk::Window,
-}
-
-impl SpeakTextDialog {
-    fn new(command_tx: Sender<UiCommand>) -> Self {
-        use gtk::prelude::*;
-
-        let window = gtk::Window::new(gtk::WindowType::Toplevel);
-        window.set_title("Speak Text");
-        window.set_default_size(520, 360);
-
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 10);
-        root.set_margin_top(14);
-        root.set_margin_bottom(14);
-        root.set_margin_start(14);
-        root.set_margin_end(14);
-
-        let scroller = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        scroller.set_vexpand(true);
-
-        let text_view = gtk::TextView::new();
-        text_view.set_wrap_mode(gtk::WrapMode::WordChar);
-        scroller.add(&text_view);
-        root.pack_start(&scroller, true, true, 0);
-
-        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let generate = gtk::Button::with_label("Generate");
-        let play = gtk::Button::with_label("Play");
-        let close = gtk::Button::with_label("Close");
-        buttons.pack_start(&generate, false, false, 0);
-        buttons.pack_start(&play, false, false, 0);
-        buttons.pack_end(&close, false, false, 0);
-        root.pack_start(&buttons, false, false, 0);
-
-        let buffer = text_view.buffer().expect("TextView has a buffer");
-        let tx = command_tx.clone();
-        generate.connect_clicked(move |_| {
-            let start = buffer.start_iter();
-            let end = buffer.end_iter();
-            let text = buffer
-                .text(&start, &end, true)
-                .map(|value| value.to_string())
-                .unwrap_or_default();
-            let _ = tx.send(UiCommand::SpeakText(text));
-        });
-
-        let tx = command_tx.clone();
-        play.connect_clicked(move |_| {
-            let _ = tx.send(UiCommand::PlayLastSpeech);
-        });
-
-        let close_window = window.clone();
-        close.connect_clicked(move |_| {
-            close_window.hide();
-        });
-
-        window.add(&root);
-        Self { window }
-    }
-
-    fn show(&self) {
-        use gtk::prelude::*;
-
-        self.window.show_all();
-        self.window.present();
+        // A transparent corner: RGBA [r, g, b, 0x00] -> ARGB [0x00, r, g, b].
+        assert_eq!(
+            &icon.data[0..4],
+            &[0x00, 0x5c, 0x66, 0x70],
+            "corner pixel should be fully transparent ARGB"
+        );
     }
 }
