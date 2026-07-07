@@ -38,3 +38,23 @@ systemctl --user enable codex-voice.service
 systemctl --user --no-pager status codex-voice-server.service
 systemctl --user is-enabled codex-voice.service
 '''
+
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt --check"
+
+[tasks.check]
+description = "Type-check the workspace"
+run = "cargo check --workspace"
+
+[tasks.test]
+description = "Run the workspace test suite"
+run = "cargo test --workspace"
+
+[tasks.lint]
+description = "Clippy with warnings denied"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.verify]
+description = "Run all verification gates"
+depends = ["fmt", "check", "test", "lint"]
