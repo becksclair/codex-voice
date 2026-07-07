@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+/* Dark is the default theme; light is opted into via [data-theme="light"]. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  --color-bg-dark: #17091f;
+  --color-bg-light: #f3dff1;
+}
+
+:root {
+  color-scheme: dark;
+  background-color: var(--color-bg-dark);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  background-color: var(--color-bg-light);
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+}

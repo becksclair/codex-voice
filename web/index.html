@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#17091f" />
+    <title>Codex Voice</title>
+    <link
+      rel="manifest"
+      href="/web/manifest.webmanifest"
+      data-manifest-dark="/web/manifest.webmanifest"
+      data-manifest-light="/web/manifest-light.webmanifest"
+    />
+    <link rel="apple-touch-icon" href="/web/apple-touch-icon.png" />
+    <script>
+      // Pre-paint theme bootstrap: resolve and apply the theme before first
+      // paint so there is no flash. Kept in sync with the runtime settings.
+      (function () {
+        try {
+          const raw = localStorage.getItem("codex-voice.web.settings.v1");
+          const preference = raw ? JSON.parse(raw).theme || "auto" : "auto";
+          const resolved =
+            preference === "light" || preference === "dark"
+              ? preference
+              : matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          document.documentElement.dataset.theme = resolved;
+          document
+            .querySelector('meta[name="theme-color"]')
+            ?.setAttribute("content", resolved === "light" ? "#f3dff1" : "#17091f");
+          const manifest = document.querySelector('link[rel="manifest"]');
+          if (manifest) {
+            manifest.href =
+              resolved === "light"
+                ? manifest.dataset.manifestLight || manifest.href
+                : manifest.dataset.manifestDark || manifest.href;
+          }
+        } catch {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
