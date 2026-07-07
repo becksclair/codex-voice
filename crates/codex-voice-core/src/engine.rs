@@ -157,6 +157,26 @@ where
     }
 }
 
+/// Drives the engine from a hotkey-event channel on its own task, so the
+/// caller's event loop (e.g. a `tokio::select!` driving a tray) never blocks
+/// on transcription or insertion. Hotkey events that arrive while a
+/// transition is in flight are discarded once it completes, preserving the
+/// same "ignore hotkeys outside the expected state" semantics as inline
+/// `handle_hotkey` calls.
+pub async fn run_engine_loop<A, T, I>(
+    mut engine: DictationEngine<A, T, I>,
+    mut hotkeys: mpsc::Receiver<HotkeyEvent>,
+) where
+    A: AudioRecorder,
+    T: TranscriptionClient,
+    I: TextInjector,
+{
+    while let Some(event) = hotkeys.recv().await {
+        engine.handle_hotkey(event).await;
+        while hotkeys.try_recv().is_ok() {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +252,7 @@ mod tests {
     struct FakeTranscription {
         text: String,
         error: Option<String>,
+        delay: Option<Duration>,
     }
 
     impl FakeTranscription {
@@ -239,6 +260,7 @@ mod tests {
             Self {
                 text: text.into(),
                 error: None,
+                delay: None,
             }
         }
 
@@ -246,17 +268,50 @@ mod tests {
             Self {
                 text: String::new(),
                 error: Some(message.into()),
+                delay: None,
             }
+        }
+
+        /// Makes `transcribe` sleep for `delay` before resolving, so tests can
+        /// observe engine behavior while a transition is still in flight.
+        fn with_delay(mut self, delay: Duration) -> Self {
+            self.delay = Some(delay);
+            self
         }
     }
 
     #[async_trait]
     impl TranscriptionClient for FakeTranscription {
         async fn transcribe(&self, _recording: &RecordedAudio) -> TranscriptionResult<String> {
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
             if let Some(message) = &self.error {
                 return Err(TranscriptionError::Message(message.clone()));
             }
             Ok(self.text.clone())
+        }
+    }
+
+    /// Returns the same successful recording on every `stop()` call (unlike
+    /// `FakeAudio`, which consumes its recording after one use), so tests can
+    /// drive multiple sequential dictation cycles through the same audio fake.
+    struct RepeatingAudio {
+        recording: RecordedAudio,
+    }
+
+    #[async_trait]
+    impl AudioRecorder for RepeatingAudio {
+        async fn start(&self) -> AudioResult<()> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> AudioResult<Option<RecordedAudio>> {
+            Ok(Some(self.recording.clone()))
+        }
+
+        async fn cancel(&self) -> AudioResult<()> {
+            Ok(())
         }
     }
 
@@ -527,5 +582,83 @@ mod tests {
             .any(|event| matches!(event, AppEvent::Inserted(..))));
         assert_eq!(injector.call_count(), 0);
         assert_eq!(engine.state(), &DictationState::Idle);
+    }
+
+    #[tokio::test]
+    async fn engine_loop_discards_hotkeys_queued_during_transition() {
+        let (recording, _file) = recording_with_duration(Duration::from_millis(500));
+        let audio = Arc::new(FakeAudio::ok(Some(recording)));
+        let transcription =
+            Arc::new(FakeTranscription::ok("hello").with_delay(Duration::from_millis(40)));
+        let injector = Arc::new(FakeInjector::ok());
+        let (tx, mut rx) = mpsc::channel(8);
+        let engine = DictationEngine::new(audio, transcription, injector, tx);
+        let (hotkey_tx, hotkey_rx) = mpsc::channel(16);
+
+        let handle = tokio::spawn(run_engine_loop(engine, hotkey_rx));
+
+        hotkey_tx.send(HotkeyEvent::Pressed).await.unwrap();
+        // Let Pressed settle into Recording before Released is queued.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        hotkey_tx.send(HotkeyEvent::Released).await.unwrap();
+        // Let Released begin the (delayed) transcription, then queue a Pressed
+        // while the 40ms delay is still in flight.
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        hotkey_tx.send(HotkeyEvent::Pressed).await.unwrap();
+
+        // Let the delay resolve, the transition finish, and the post-handle
+        // drain discard the queued Pressed.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(hotkey_tx);
+        handle.await.unwrap();
+
+        let events = drain_events(&mut rx);
+        let recording_starts = events
+            .iter()
+            .filter(|event| matches!(event, AppEvent::StateChanged(DictationState::Recording)))
+            .count();
+        assert_eq!(
+            recording_starts, 1,
+            "trailing Pressed queued during transcription must be discarded"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&AppEvent::StateChanged(DictationState::Idle))
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_loop_processes_sequential_dictations() {
+        let (recording, _file) = recording_with_duration(Duration::from_millis(500));
+        let audio = Arc::new(RepeatingAudio { recording });
+        let transcription = Arc::new(FakeTranscription::ok("hello world"));
+        let injector = Arc::new(FakeInjector::ok());
+        let (tx, mut rx) = mpsc::channel(16);
+        let engine = DictationEngine::new(audio, transcription, injector.clone(), tx);
+        let (hotkey_tx, hotkey_rx) = mpsc::channel(16);
+
+        let handle = tokio::spawn(run_engine_loop(engine, hotkey_rx));
+
+        for _ in 0..2 {
+            hotkey_tx.send(HotkeyEvent::Pressed).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            hotkey_tx.send(HotkeyEvent::Released).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        drop(hotkey_tx);
+        handle.await.unwrap();
+
+        let events = drain_events(&mut rx);
+        let inserted = events
+            .iter()
+            .filter(|event| matches!(event, AppEvent::Inserted(..)))
+            .count();
+        assert_eq!(inserted, 2, "expected two complete dictation flows");
+        assert_eq!(injector.call_count(), 2);
+        assert_eq!(
+            events.last(),
+            Some(&AppEvent::StateChanged(DictationState::Idle))
+        );
     }
 }

@@ -7,7 +7,7 @@ pub mod speech;
 pub mod transcription;
 
 pub use audio::{AudioError, AudioRecorder, AudioResult, RecordedAudio};
-pub use engine::{AppEvent, DictationEngine, DictationState, ErrorStage};
+pub use engine::{run_engine_loop, AppEvent, DictationEngine, DictationState, ErrorStage};
 pub use platform::{
     HotkeyEvent, HotkeyService, InsertMethod, InsertReport, PermissionKind, PermissionService,
     PermissionStatus, PlatformError, PlatformResult, SelectedText, SelectedTextReader,

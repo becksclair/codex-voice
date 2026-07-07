@@ -8,7 +8,8 @@ use clap::Parser;
 use codex_voice_audio::CpalWavRecorder;
 use codex_voice_core::DictationState;
 use codex_voice_core::{
-    AppEvent, DictationEngine, HotkeyEvent, HotkeyService, SelectedTextReader, TextInjector,
+    run_engine_loop, AppEvent, DictationEngine, HotkeyEvent, HotkeyService, SelectedTextReader,
+    TextInjector,
 };
 #[cfg(target_os = "linux")]
 use codex_voice_platform::LinuxTextInjector;
@@ -119,7 +120,7 @@ async fn run() -> Result<()> {
     let injector = Arc::new(LinuxTextInjector::new());
     let speech_state = Arc::new(SpeechState::default());
     let DictationApp {
-        mut engine,
+        engine,
         mut app_rx,
         mut hotkey_rx,
     } = DictationApp::new(
@@ -128,6 +129,9 @@ async fn run() -> Result<()> {
     )
     .await?;
     println!("Codex Voice is running. Hold Control-M or the keyboard dictation key to dictate. Press Super-F6 to speak selected text.");
+
+    let (engine_tx, engine_rx) = tokio::sync::mpsc::channel::<HotkeyEvent>(16);
+    tokio::spawn(run_engine_loop(engine, engine_rx));
 
     let tray_busy = Arc::new(AtomicBool::new(false));
     let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
@@ -142,7 +146,7 @@ async fn run() -> Result<()> {
                             run_speak_selection(status_tx, reader, speech_state)
                         });
                     }
-                    other => engine.handle_hotkey(other).await,
+                    other => { let _ = engine_tx.try_send(other); }
                 }
             },
             Some(event) = app_rx.recv() => {
@@ -200,7 +204,7 @@ async fn run() -> Result<()> {
     let injector = Arc::new(WindowsTextInjector::new());
     let speech_state = Arc::new(SpeechState::default());
     let DictationApp {
-        mut engine,
+        engine,
         mut app_rx,
         mut hotkey_rx,
     } = DictationApp::new(
@@ -211,6 +215,9 @@ async fn run() -> Result<()> {
     println!(
         "Codex Voice is running. Hold Control-M to dictate. Press Win-F6 to speak selected text."
     );
+
+    let (engine_tx, engine_rx) = tokio::sync::mpsc::channel::<HotkeyEvent>(16);
+    tokio::spawn(run_engine_loop(engine, engine_rx));
 
     let tray_busy = Arc::new(AtomicBool::new(false));
     let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
@@ -225,7 +232,7 @@ async fn run() -> Result<()> {
                             run_speak_selection(status_tx, reader, speech_state)
                         });
                     }
-                    other => engine.handle_hotkey(other).await,
+                    other => { let _ = engine_tx.try_send(other); }
                 }
             },
             Some(event) = app_rx.recv() => {
@@ -283,7 +290,7 @@ async fn run() -> Result<()> {
     let injector = Arc::new(MacOSTextInjector::new());
     let speech_state = Arc::new(SpeechState::default());
     let DictationApp {
-        mut engine,
+        engine,
         mut app_rx,
         mut hotkey_rx,
     } = DictationApp::new(
@@ -292,6 +299,9 @@ async fn run() -> Result<()> {
     )
     .await?;
     println!("Codex Voice is running. Hold Control-M to dictate. Press Command-F6 to speak selected text.");
+
+    let (engine_tx, engine_rx) = tokio::sync::mpsc::channel::<HotkeyEvent>(16);
+    tokio::spawn(run_engine_loop(engine, engine_rx));
 
     let tray_busy = Arc::new(AtomicBool::new(false));
     let mut tray_poll = tokio::time::interval(Duration::from_millis(200));
@@ -306,7 +316,7 @@ async fn run() -> Result<()> {
                             run_speak_selection(status_tx, reader, speech_state)
                         });
                     }
-                    other => engine.handle_hotkey(other).await,
+                    other => { let _ = engine_tx.try_send(other); }
                 }
             },
             Some(event) = app_rx.recv() => {
