@@ -130,14 +130,21 @@ impl CodexLlmClient {
     }
 
     async fn tokens(&self, force_refresh: bool) -> SpeechResult<CodexAuthTokens> {
-        let payload = read_auth_file(&self.auth_file)?;
+        let auth_file = self.auth_file.clone();
+        let payload = tokio::task::spawn_blocking(move || read_auth_file(&auth_file))
+            .await
+            .map_err(|error| SpeechError::Auth(format!("auth read task failed: {error}")))??;
         let tokens = extract_tokens(&payload)?;
         if !force_refresh && !access_token_needs_refresh(&tokens.access_token) {
             return Ok(tokens);
         }
         let refreshed = refresh_tokens(&self.client, &payload, &tokens.refresh_token).await?;
-        write_auth_file(&self.auth_file, &refreshed)?;
-        extract_tokens(&refreshed)
+        let result_tokens = extract_tokens(&refreshed)?;
+        let auth_file = self.auth_file.clone();
+        tokio::task::spawn_blocking(move || write_auth_file(&auth_file, &refreshed))
+            .await
+            .map_err(|error| SpeechError::Auth(format!("auth write task failed: {error}")))??;
+        Ok(result_tokens)
     }
 }
 
@@ -273,27 +280,23 @@ fn write_auth_file(path: &Path, payload: &Value) -> SpeechResult<()> {
         })?;
     }
     let tmp_path = path.with_file_name(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{:08x}.tmp",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("auth.json"),
-        std::process::id()
+        std::process::id(),
+        rand::random::<u32>()
     ));
     let text = serde_json::to_string(payload)
         .map_err(|error| SpeechError::Auth(format!("failed to encode Codex auth file: {error}")))?;
-    std::fs::write(&tmp_path, format!("{text}\n")).map_err(|error| {
+    codex_voice_core::fs::write_private_file_atomic(
+        path,
+        &tmp_path,
+        format!("{text}\n").as_bytes(),
+    )
+    .map_err(|error| {
         SpeechError::Auth(format!(
             "failed to write refreshed Codex auth file: {error}"
-        ))
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp_path, path).map_err(|error| {
-        SpeechError::Auth(format!(
-            "failed to replace refreshed Codex auth file: {error}"
         ))
     })?;
     Ok(())
@@ -466,5 +469,52 @@ mod tests {
 
         assert_eq!(body["model"], "gpt-5.3-codex-spark");
         assert_eq!(body["reasoning"]["effort"], "medium");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_auth_writes_do_not_corrupt_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("auth.json");
+
+        let mut handles = Vec::new();
+        let mut expected_payloads = Vec::new();
+        for i in 0..8 {
+            let path = path.clone();
+            let payload = json!({ "tokens": { "account_id": format!("task-{i}") } });
+            expected_payloads.push(payload.clone());
+            handles.push(tokio::task::spawn_blocking(move || {
+                write_auth_file(&path, &payload)
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("task panicked").expect("write failed");
+        }
+
+        let text = std::fs::read_to_string(&path).expect("read final auth file");
+        let parsed: Value =
+            serde_json::from_str(&text).expect("final auth file must be valid JSON, not torn");
+        assert!(
+            expected_payloads.contains(&parsed),
+            "final payload {parsed:?} did not match any of the 8 writers' payloads"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn written_auth_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("auth.json");
+        let payload = json!({ "tokens": { "account_id": "task-0" } });
+
+        write_auth_file(&path, &payload).expect("write failed");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

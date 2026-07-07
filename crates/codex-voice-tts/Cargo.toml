@@ -10,6 +10,7 @@ bytes.workspace = true
 codex-voice-core = { path = "../codex-voice-core" }
 dirs.workspace = true
 hound.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json.workspace = true
