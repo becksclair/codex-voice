@@ -64,6 +64,21 @@ description = "Run the Playwright web PWA behavioral suite (requires bun + chrom
 dir = "{{cwd}}"
 run = "cd webtests && bunx playwright test"
 
+[tasks.web-build]
+description = "Build the standalone React frontend (web/) into web/dist"
+dir = "{{cwd}}"
+run = "cd web && bun install --frozen-lockfile && bun run build"
+
+[tasks.web-check]
+description = "Lint, format-check, and type-check the standalone React frontend (web/)"
+dir = "{{cwd}}"
+run = "cd web && bun run check"
+
+[tasks.web-test]
+description = "Run the standalone React frontend (web/) unit tests"
+dir = "{{cwd}}"
+run = "cd web && bun run test"
+
 [tasks.deny]
 description = "Check dependencies for advisories, license, and source policy"
 dir = "{{cwd}}"

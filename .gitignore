@@ -2,3 +2,5 @@
 .ultra-review-state.json
 __pycache__/
 *.py[cod]
+web/node_modules/
+web/dist/
