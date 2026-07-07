@@ -19,8 +19,13 @@ use codex_voice_core::DictationState;
 use std::{
     collections::HashMap,
     process::Command,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
+        Arc,
+    },
     thread,
+    time::Duration,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -57,13 +62,25 @@ pub struct LinuxUiConfig {
 pub struct StatusTray {
     status_tx: Sender<UiStatus>,
     command_rx: Receiver<UiCommand>,
-    _thread: thread::JoinHandle<()>,
+    /// Set by `Drop` and polled by the forwarder loop in [`run_tray`].
+    ///
+    /// Dropping `status_tx` cannot be used to signal shutdown: `status_sender`
+    /// hands out clones that the app holds across spawned tasks (see
+    /// `spawn_status_task` in `codex-voice-app`), so a clone can easily outlive
+    /// this `StatusTray` and keep `status_rx.recv()` from ever erroring. A
+    /// `join()` gated on that recv-disconnect could then hang indefinitely.
+    /// An explicit flag polled on a short timeout cannot hang and cannot miss
+    /// the shutdown request.
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl StatusTray {
     pub fn start(initial: UiStatus, config: LinuxUiConfig) -> Result<Self, UiError> {
         let (status_tx, status_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = shutdown.clone();
 
         let LinuxUiConfig {
             window_tx,
@@ -74,7 +91,14 @@ impl StatusTray {
         let thread = thread::Builder::new()
             .name("codex-voice-tray".to_string())
             .spawn(move || {
-                run_tray(initial, status_rx, command_tx, window_tx, ready_tx);
+                run_tray(
+                    initial,
+                    status_rx,
+                    command_tx,
+                    window_tx,
+                    ready_tx,
+                    thread_shutdown,
+                );
             })
             .map_err(|error| UiError::TrayInit(format!("failed to spawn tray thread: {error}")))?;
 
@@ -85,7 +109,8 @@ impl StatusTray {
         Ok(Self {
             status_tx,
             command_rx,
-            _thread: thread,
+            shutdown,
+            thread: Some(thread),
         })
     }
 
@@ -100,6 +125,20 @@ impl StatusTray {
     /// Returns a cloneable sender for updating the tray status.
     pub fn status_sender(&self) -> Sender<UiStatus> {
         self.status_tx.clone()
+    }
+}
+
+impl Drop for StatusTray {
+    fn drop(&mut self) {
+        // Ask the forwarder loop to stop, then wait for it to tear the ksni
+        // service down (`handle.shutdown()`) before this call returns. This
+        // closes the brief window where the process could exit while the
+        // StatusNotifierItem is still registered, which showed up as a
+        // ghost tray icon until the desktop noticed the D-Bus name vanish.
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -230,6 +269,7 @@ fn run_tray(
     command_tx: Sender<UiCommand>,
     window_tx: UnboundedSender<WindowEvent>,
     ready_tx: Sender<Result<(), UiError>>,
+    shutdown: Arc<AtomicBool>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -264,13 +304,37 @@ fn run_tray(
     let _ = ready_tx.send(Ok(()));
 
     let mut hud = HudWindow::new();
-    // Blocking recv on the tray thread; the ksni service keeps running on the
-    // runtime's worker thread regardless. Each status update refreshes the tray
-    // via the D-Bus-triggering handle update, drives the notify-send HUD, and
-    // mirrors live status into an open Settings window.
-    while let Ok(status) = status_rx.recv() {
+    // Track the last message forwarded to the window daemon so repeated
+    // identical statuses (e.g. periodic "Recording..." re-sends) don't spam
+    // an open Settings window with redundant `WindowEvent::Status` sends. The
+    // tray icon/tooltip and HUD notification still update on every status,
+    // since those reflect the D-Bus-visible tray state and should stay live
+    // even when the message text is unchanged.
+    let mut last_sent: Option<String> = None;
+    // Poll with a short timeout rather than a blocking recv so `Drop` can ask
+    // this loop to stop even though status_tx clones held by the app (see
+    // `StatusTray::shutdown`'s doc comment) may keep the channel open. The
+    // ksni service keeps running on the runtime's worker thread regardless of
+    // this loop; each status update refreshes the tray via the D-Bus-triggering
+    // handle update, drives the notify-send HUD, and mirrors live status into
+    // an open Settings window.
+    loop {
+        let status = match status_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(status) => status,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
         hud.update(&status);
-        let _ = window_tx.send(WindowEvent::Status(status.message.clone()));
+        if should_forward_window_status(&last_sent, &status.message) {
+            let _ = window_tx.send(WindowEvent::Status(status.message.clone()));
+            last_sent = Some(status.message.clone());
+        }
         let updated = runtime.block_on(handle.update(|tray: &mut KsniTray| {
             tray.status = status.clone();
         }));
@@ -283,9 +347,18 @@ fn run_tray(
         }
     }
 
-    // The app dropped the status sender: it is shutting down. Tear the service
-    // down cleanly so the icon disappears promptly.
+    // Either the app is shutting down (status sender disconnected or `Drop`
+    // requested a stop) or the ksni service ended on its own. Tear the
+    // service down cleanly so the icon disappears promptly.
     runtime.block_on(handle.shutdown());
+}
+
+/// Whether a status message should be forwarded to the window daemon, given
+/// the last message that was forwarded. Extracted as pure logic so the
+/// dedupe behavior (skip identical repeats, always forward the first message
+/// and any genuine change) is unit-testable without a live tray.
+fn should_forward_window_status(last_sent: &Option<String>, message: &str) -> bool {
+    last_sent.as_deref() != Some(message)
 }
 
 /// Maps a ksni spawn failure onto the friendly [`UiError::TrayInit`]. The ksni
@@ -423,6 +496,31 @@ impl HudWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `StatusTray::start` requires a live D-Bus session bus with a
+    // StatusNotifierWatcher (KDE Plasma, etc.), which isn't available in a
+    // headless test environment, so the `Drop` join behavior isn't covered by
+    // an automated test here. Manual verification: run the app under Plasma,
+    // quit it, and confirm the tray icon disappears immediately (no lingering
+    // ghost icon) instead of only after the desktop notices the D-Bus name
+    // drop on its own.
+
+    #[test]
+    fn should_forward_window_status_forwards_first_message() {
+        assert!(should_forward_window_status(&None, "Recording..."));
+    }
+
+    #[test]
+    fn should_forward_window_status_skips_identical_repeat() {
+        let last_sent = Some("Recording...".to_string());
+        assert!(!should_forward_window_status(&last_sent, "Recording..."));
+    }
+
+    #[test]
+    fn should_forward_window_status_forwards_genuine_change() {
+        let last_sent = Some("Recording...".to_string());
+        assert!(should_forward_window_status(&last_sent, "Transcribing..."));
+    }
 
     #[test]
     fn ksni_icon_reorders_rgba_to_argb() {
