@@ -68,6 +68,11 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
   const controllerRef = useRef<GenerationController | null>(null);
   const ensureControllerRef = useRef<(() => Promise<GenerationController>) | null>(null);
   const activeRef = useRef(false);
+  // Generation epoch: bumped by cancel/clear/unmount so a generate() that is
+  // still awaiting the lazy pipeline import can tell it was abandoned. Without
+  // this, a cancel issued before the controller exists is a no-op and the
+  // awaited generate resurrects the just-cleared state.
+  const epochRef = useRef(0);
   const configRef = useRef(config);
   const settingsRef = useRef(settings);
   configRef.current = config;
@@ -97,7 +102,8 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
         getDraftText,
         callbacks: {
           onStatus: (statusLabel, fraction) => {
-            setProgress(clamp(fraction, 0, 1));
+            // The controller already clamps the fraction to [0, 1].
+            setProgress(fraction);
             setLabel(statusLabel);
           },
           onGeneratingChange: (active) => {
@@ -222,6 +228,7 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
 
     return () => {
       disposed = true;
+      epochRef.current += 1;
       for (const cleanup of cleanups) cleanup();
       controllerRef.current?.cancel();
       controllerRef.current = null;
@@ -241,7 +248,10 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
     }
     const ensureController = ensureControllerRef.current;
     if (!ensureController) return false;
+    const epoch = epochRef.current;
     const controller = await ensureController();
+    // Abandoned while the pipeline import was in flight (cancel/clear/unmount).
+    if (epoch !== epochRef.current) return false;
     if (controller.isActive) {
       controller.cancel();
       activeRef.current = false;
@@ -252,6 +262,7 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
   };
 
   const cancelActive = (): void => {
+    epochRef.current += 1;
     const controller = controllerRef.current;
     if (controller?.isActive) {
       controller.cancel();

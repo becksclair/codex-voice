@@ -25,7 +25,17 @@ export function useWaveform(
     const controller = new WaveformController(canvas, slider);
     controllerRef.current = controller;
     controller.reset();
+    // The canvas palette comes from `--waveform-*` CSS variables read at draw
+    // time, so a theme change (settings or OS auto) needs an explicit redraw —
+    // an idle waveform otherwise keeps the previous theme's colors until the
+    // next incidental draw. `applyTheme` always stamps `data-theme` on <html>.
+    const themeObserver = new MutationObserver(() => controller.scheduleDraw());
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
     return () => {
+      themeObserver.disconnect();
       controllerRef.current = null;
     };
   }, [canvasRef, sliderRef]);

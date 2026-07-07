@@ -181,6 +181,13 @@ export async function prepareForProvider(
       if (remainingMs <= 0) break;
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), Math.min(attemptTimeoutMs, remainingMs));
+      // Chain the caller's cancellation signal into this attempt so cancelling
+      // a run aborts an in-flight prep request instead of letting it complete
+      // wastefully (cancellation is otherwise only observed at the loop top).
+      const externalSignal = options.signal ?? null;
+      const onExternalAbort = (): void => controller.abort();
+      if (externalSignal?.aborted) controller.abort();
+      else externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
       try {
         const response = await fetchSpeechPrepAttempt(
           activePrep,
@@ -308,6 +315,7 @@ export async function prepareForProvider(
         throw typed;
       } finally {
         clearTimeout(timer);
+        externalSignal?.removeEventListener("abort", onExternalAbort);
       }
     }
     if (lastError) {
