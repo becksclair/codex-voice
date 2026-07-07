@@ -1,0 +1,41 @@
+# cargo-deny configuration
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Use the default advisory database (RustSec) and default severity handling.
+# `cargo deny check advisories` fails on any active vulnerability or unmaintained
+# advisory unless explicitly ignored below.
+ignore = []
+
+[licenses]
+# Permissive baseline. Only licenses listed here are allowed for dependencies.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "BSL-1.0",
+    # symphonia (audio decoding, via rodio) is MPL-2.0: weak file-level copyleft
+    # on unmodified upstream dependencies, which is acceptable here.
+    "MPL-2.0",
+    # webpki-roots ships the Mozilla CA certificate set under the permissive
+    # Community Data License Agreement.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# GTK3 and symphonia pull in known transitive duplicate versions of several
+# crates. These duplicates are accepted rather than failing the build.
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+# Only allow dependencies sourced from the primary crates.io registry.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
