@@ -96,18 +96,25 @@ export function App() {
   };
 
   return (
-    <main>
-      <header>
-        <img className="app-icon" src="/web/icon-192.png" alt="Codex Voice" />
-        <div className="header-actions">
-          <span id="count">
+    <main className="mx-auto flex h-[var(--visual-viewport-height,100dvh)] min-h-0 max-w-[760px] translate-y-[var(--visual-viewport-offset-top,0px)] flex-col gap-3 overflow-hidden pt-[max(12px,env(safe-area-inset-top))] pr-[18px] pb-[max(18px,env(safe-area-inset-bottom))] pl-[18px] max-[420px]:px-3">
+      <header className="flex items-center justify-between gap-2.5">
+        <img
+          className="block h-3.5 w-3.5 rounded-[4px] shadow-[var(--icon-shadow)]"
+          src="/web/icon-192.png"
+          alt="Codex Voice"
+        />
+        <div className="flex items-center gap-2">
+          <span
+            id="count"
+            className="whitespace-nowrap text-[0.76rem] font-semibold text-[var(--count-color)] [text-shadow:var(--count-shadow)]"
+          >
             {charCount} {charCount === 1 ? "char" : "chars"}
           </span>
         </div>
       </header>
       <div
         id="error-banner"
-        className={error ? "error-banner visible" : "error-banner"}
+        className={`${error ? "flex" : "hidden"} min-h-11 items-center rounded-2xl border border-[var(--error-border)] bg-[var(--error-bg)] px-3 py-2.5 text-[0.95rem] text-[var(--error-text)]`}
         role="alert"
       >
         {error}
@@ -121,7 +128,7 @@ export function App() {
         onClearClick={() => void handleClear()}
         clearVisible={charCount > 0}
       />
-      <section className="controls">
+      <section className="grid flex-none gap-3.5">
         <WaveformPlayer
           elapsed={playback.elapsed}
           duration={playback.duration}

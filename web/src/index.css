@@ -8,27 +8,12 @@
   --color-bg-light: #f3dff1;
 }
 
-:root {
-  color-scheme: dark;
-  background-color: var(--color-bg-dark);
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
-  background-color: var(--color-bg-light);
-}
-
-body {
-  margin: 0;
-  min-height: 100dvh;
-}
-
 /*
- * Legacy PWA styles, ported verbatim from
- * crates/codex-voice-transcriber/assets/web/app.html (the <style> block,
- * lines ~45-659). The Tailwind @import/@theme above is retained; these rules
- * drive the shell UI unchanged. The --visual-viewport-height custom property
- * and data-theme theming continue to work as before.
+ * Design tokens, ported from the legacy PWA (app.html <style>). The palette,
+ * gradient, and shadow values switch on [data-theme]; utilities in the
+ * components consume them via `var(--token)` arbitrary values. Three of these
+ * (`--waveform-played`/`--waveform-future`/`--waveform-empty`) are read from
+ * `getComputedStyle` by waveform-controller.ts, so their names are load-bearing.
  */
 :root {
   color-scheme: dark;
@@ -228,9 +213,16 @@ body {
   --settings-bg: rgba(251, 246, 251, 0.78);
   --settings-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78), 0 8px 24px rgba(103, 50, 89, 0.08);
 }
-* {
-  box-sizing: border-box;
-}
+
+/*
+ * The remaining plain CSS is limited to what does not map cleanly to Tailwind
+ * utilities: root/body layout, the pseudo-element sheens, the spinner keyframe,
+ * the generate progress fill and canvas + seek marker/thumb math (all driven by
+ * custom properties), and the keyboard-open viewport adjustments. Everything
+ * else is expressed as utilities in the components. The `icon-button`, `buttons`,
+ * and `scrubber` class names are retained purely as hooks for the descendant
+ * pseudo-element rules below.
+ */
 html,
 body {
   min-height: 100%;
@@ -257,59 +249,8 @@ textarea,
 .waveform-slider {
   -webkit-tap-highlight-color: transparent;
 }
-main {
-  height: var(--visual-viewport-height, 100dvh);
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: max(12px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
-  max-width: 760px;
-  margin: 0 auto;
-  overflow: hidden;
-  transform: translateY(var(--visual-viewport-offset-top, 0px));
-}
-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.app-icon {
-  width: 14px;
-  height: 14px;
-  display: block;
-  border-radius: 4px;
-  box-shadow: var(--icon-shadow);
-}
-#count {
-  color: var(--count-color);
-  font-size: 0.76rem;
-  font-weight: 600;
-  text-shadow: var(--count-shadow);
-  white-space: nowrap;
-}
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.icon-button {
-  width: 44px;
-  min-width: 44px;
-  min-height: 44px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text);
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  box-shadow: var(--control-shadow);
-  backdrop-filter: blur(10px) saturate(1.25);
-  -webkit-backdrop-filter: blur(10px) saturate(1.25);
-}
+
+/* Stroked-icon styling shared by every button svg. */
 .icon-button svg,
 button svg {
   width: 20px;
@@ -321,132 +262,13 @@ button svg {
   fill: none;
   pointer-events: none;
 }
-.error-banner {
-  display: none;
-  min-height: 44px;
-  align-items: center;
-  padding: 10px 12px;
-  border: 1px solid var(--error-border);
-  border-radius: 16px;
-  color: var(--error-text);
-  background: var(--error-bg);
-  font-size: 0.95rem;
-}
-.error-banner.visible {
-  display: flex;
-}
-.text-shell {
-  position: relative;
-  flex: 1 1 auto;
-  display: flex;
-  min-height: 260px;
-  --text-edge-pad: 8px;
-  --text-button-clearance: 126px;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 22px;
-  background: var(--panel);
-  overflow: hidden;
-}
-textarea {
-  flex: 1 1 auto;
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-  resize: none;
-  border: 0;
-  border-radius: 0;
-  padding: var(--text-edge-pad) 16px calc(var(--text-button-clearance) + var(--text-edge-pad));
-  scroll-padding: var(--text-edge-pad) 16px
-    calc(var(--text-button-clearance) + var(--text-edge-pad));
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 0.94rem;
-  line-height: 1.45;
-  outline: none;
-}
-.text-shell:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-#paste {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-}
-#clear {
-  position: absolute;
-  right: 10px;
-  bottom: 70px;
-}
-.text-shell .icon-button {
-  color: var(--overlay-color);
-  background: var(--overlay-bg);
-  border: 1px solid var(--overlay-border);
-  box-shadow: var(--overlay-shadow);
-  backdrop-filter: blur(6px) saturate(1.25);
-  -webkit-backdrop-filter: blur(6px) saturate(1.25);
-}
-.text-shell .icon-button:hover {
-  background: var(--overlay-hover-bg);
-  border-color: var(--overlay-hover-border);
-}
-.text-shell .icon-button:active {
-  background: var(--overlay-active-bg);
-  box-shadow: var(--overlay-active-shadow);
-}
+
+/* Clear button hides via [hidden]; the id beats the inline-flex utility. */
 #clear[hidden] {
   display: none;
 }
-.controls {
-  flex: 0 0 auto;
-  display: grid;
-  gap: 14px;
-}
-.buttons {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 20px repeat(3, 44px);
-  align-items: center;
-  gap: 8px 12px;
-}
-#play {
-  grid-column: 3;
-}
-button {
-  min-height: 44px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 18px;
-  color: var(--button-text);
-  background: var(--accent);
-  font: inherit;
-  font-size: 0.98rem;
-  font-weight: 700;
-  cursor: pointer;
-  touch-action: manipulation;
-  box-shadow: var(--button-shadow);
-}
-.buttons button {
-  height: 44px;
-}
-button.secondary {
-  color: var(--text);
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-  box-shadow: var(--secondary-shadow);
-}
-.buttons .icon-button {
-  position: relative;
-  overflow: hidden;
-  border-radius: 13px;
-  color: var(--glass-button-color);
-  background: var(--glass-button-bg);
-  border-color: var(--glass-button-border);
-  box-shadow: var(--glass-button-shadow);
-  backdrop-filter: var(--glass-button-filter);
-  -webkit-backdrop-filter: var(--glass-button-filter);
-}
+
+/* Glass icon-button sheen overlays + raised icon (play/download/settings). */
 .buttons .icon-button::before {
   content: "";
   position: absolute;
@@ -469,26 +291,8 @@ button.secondary {
   z-index: 2;
   filter: var(--glass-icon-filter);
 }
-.buttons .icon-button:hover {
-  background: var(--glass-button-hover-bg);
-  border-color: var(--glass-button-hover-border);
-}
-#generate {
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.generate-main {
-  position: relative;
-  z-index: 1;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-}
+
+/* Generate button spinner + progress fill (animation + `--generate-progress`). */
 .spinner {
   display: none;
   width: 18px;
@@ -500,15 +304,6 @@ button.secondary {
 }
 #generate.generating .spinner {
   display: inline-block;
-}
-.generate-progress {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 3px;
-  background: var(--progress-track);
-  overflow: hidden;
 }
 .generate-progress span {
   display: block;
@@ -522,32 +317,8 @@ button.secondary {
     transform: rotate(360deg);
   }
 }
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-.buttons .icon-button:disabled {
-  opacity: 0.72;
-}
-.scrubber {
-  position: relative;
-  overflow: hidden;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 44px;
-  padding: 5px 14px;
-  border: 1px solid var(--seekbar-border);
-  border-radius: 999px;
-  background: var(--seekbar-bg);
-  box-shadow: var(--seekbar-shadow);
-  backdrop-filter: var(--seekbar-filter);
-  -webkit-backdrop-filter: var(--seekbar-filter);
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  font-size: 0.95rem;
-}
+
+/* Scrubber sheen overlay + stacking of its children. */
 .scrubber::before {
   content: "";
   position: absolute;
@@ -565,6 +336,8 @@ button:disabled {
   user-select: none;
   -webkit-user-select: none;
 }
+
+/* Waveform seek slider + canvas + marker/thumb, positioned from `--seek-progress`. */
 .waveform-slider {
   position: relative;
   height: 34px;
@@ -621,67 +394,11 @@ button:disabled {
 .waveform-slider.scrubbing .waveform-thumb {
   opacity: 1;
 }
-.settings {
-  border: 1px solid var(--line);
-  border-radius: 22px;
-  background: var(--settings-bg);
-  box-shadow: var(--settings-shadow);
-}
-.settings[hidden] {
-  display: none;
-}
-.settings-grid {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-}
-.field {
-  display: grid;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-select {
-  min-height: 42px;
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 0 10px;
-  background: var(--panel-soft);
-  color: var(--text);
-  font: inherit;
-}
-.toggles {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-.toggle {
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--text);
-  background: var(--panel-soft);
-  font-weight: 650;
-}
-.toggle input {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--mint);
-}
+
+/* Keyboard-open compaction (toggled on <html> by the visual-viewport hook). */
 html.keyboard-open main {
   padding-bottom: max(10px, env(safe-area-inset-bottom));
 }
 html.keyboard-open .text-shell {
   min-height: 120px;
-}
-@media (max-width: 420px) {
-  main {
-    padding-left: 12px;
-    padding-right: 12px;
-  }
 }

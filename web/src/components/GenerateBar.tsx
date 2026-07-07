@@ -1,5 +1,13 @@
 import type { CSSProperties } from "react";
 
+/**
+ * Shared utilities for the frosted-glass secondary icon buttons (play, download,
+ * settings). `icon-button` is retained as a hook for the sheen pseudo-elements
+ * and the raised-svg rule in index.css.
+ */
+const GLASS_ICON_BUTTON =
+  "icon-button relative inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer touch-manipulation items-center justify-center overflow-hidden rounded-[13px] border border-[var(--glass-button-border)] bg-[image:var(--glass-button-bg)] p-0 text-[var(--glass-button-color)] shadow-[var(--glass-button-shadow)] [backdrop-filter:var(--glass-button-filter)] [-webkit-backdrop-filter:var(--glass-button-filter)] hover:border-[var(--glass-button-hover-border)] hover:bg-[image:var(--glass-button-hover-bg)] disabled:cursor-not-allowed disabled:opacity-[0.72]";
+
 interface GenerateBarProps {
   generating: boolean;
   progress: number;
@@ -20,28 +28,34 @@ interface GenerateBarProps {
  * `#play-icon`), download (`#download`), and the settings toggle (`#settings-toggle`).
  */
 export function GenerateBar(props: GenerateBarProps) {
+  const generateClass =
+    "relative flex h-11 min-h-11 items-center justify-center overflow-hidden rounded-[18px] border-0 bg-[var(--accent)] px-2.5 text-[0.98rem] font-bold text-[var(--button-text)] cursor-pointer touch-manipulation shadow-[var(--button-shadow)] disabled:cursor-not-allowed disabled:opacity-[0.55]";
+
   return (
-    <div className="buttons">
+    <div className="buttons grid grid-cols-[minmax(0,1fr)_20px_repeat(3,44px)] items-center gap-x-3 gap-y-2">
       <button
         id="generate"
         type="button"
-        className={props.generating ? "generating" : undefined}
+        className={props.generating ? `${generateClass} generating` : generateClass}
         style={{ "--generate-progress": props.progress } as CSSProperties}
         disabled={props.generateDisabled}
         onClick={props.onGenerate}
       >
-        <span className="generate-main">
+        <span className="relative z-[1] inline-flex min-w-0 items-center justify-center gap-2">
           <span className="spinner" aria-hidden="true"></span>
           <span id="generate-label">{props.label}</span>
         </span>
-        <span className="generate-progress" aria-hidden="true">
+        <span
+          className="generate-progress absolute right-0 bottom-0 left-0 h-[3px] overflow-hidden bg-[var(--progress-track)]"
+          aria-hidden="true"
+        >
           <span></span>
         </span>
       </button>
       <button
         id="play"
         type="button"
-        className="secondary icon-button"
+        className={`${GLASS_ICON_BUTTON} col-start-3`}
         disabled={props.playDisabled}
         aria-label={props.paused ? "Play" : "Pause"}
         onClick={props.onTogglePlay}
@@ -60,7 +74,7 @@ export function GenerateBar(props: GenerateBarProps) {
       <button
         id="download"
         type="button"
-        className="secondary icon-button"
+        className={GLASS_ICON_BUTTON}
         disabled={props.downloadDisabled}
         aria-label="Download audio"
         onClick={props.onDownload}
@@ -74,7 +88,7 @@ export function GenerateBar(props: GenerateBarProps) {
       <button
         id="settings-toggle"
         type="button"
-        className="secondary icon-button"
+        className={GLASS_ICON_BUTTON}
         aria-label="Toggle settings"
         aria-expanded={props.settingsOpen}
         onClick={props.onToggleSettings}

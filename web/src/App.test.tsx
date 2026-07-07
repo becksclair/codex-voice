@@ -97,11 +97,13 @@ test("generate with empty text surfaces the error banner", () => {
   render(<App />);
   const generate = document.getElementById("generate") as HTMLButtonElement;
   const banner = document.getElementById("error-banner") as HTMLElement;
-  expect(banner.classList.contains("visible")).toBe(false);
+  expect(banner.textContent).toBe("");
+  expect(banner.classList.contains("hidden")).toBe(true);
 
   fireEvent.click(generate);
   expect(banner.textContent).toBe("Enter some text first.");
-  expect(banner.classList.contains("visible")).toBe(true);
+  expect(banner.classList.contains("flex")).toBe(true);
+  expect(banner.classList.contains("hidden")).toBe(false);
 });
 
 test("toggling a settings checkbox persists to localStorage", () => {

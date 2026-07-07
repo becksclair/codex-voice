@@ -19,7 +19,7 @@ interface WaveformPlayerProps {
  */
 export function WaveformPlayer(props: WaveformPlayerProps) {
   return (
-    <div className="scrubber">
+    <div className="scrubber relative grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 min-h-11 overflow-hidden rounded-full border border-[var(--seekbar-border)] bg-[image:var(--seekbar-bg)] px-3.5 py-[5px] text-[0.95rem] tabular-nums text-[var(--muted)] shadow-[var(--seekbar-shadow)] [backdrop-filter:var(--seekbar-filter)] [-webkit-backdrop-filter:var(--seekbar-filter)]">
       <time id="elapsed">{props.elapsed}</time>
       <div
         id="waveform-slider"

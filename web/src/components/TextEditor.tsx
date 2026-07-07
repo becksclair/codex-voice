@@ -1,5 +1,12 @@
 import type { ClipboardEvent, RefObject } from "react";
 
+/**
+ * Shared utilities for the translucent "overlay" icon buttons that float over
+ * the textarea. `icon-button` is retained only as a hook for the `svg` styling.
+ */
+const OVERLAY_ICON_BUTTON =
+  "icon-button inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer touch-manipulation items-center justify-center rounded-full border border-[var(--overlay-border)] bg-[image:var(--overlay-bg)] p-0 text-[var(--overlay-color)] shadow-[var(--overlay-shadow)] [backdrop-filter:blur(6px)_saturate(1.25)] [-webkit-backdrop-filter:blur(6px)_saturate(1.25)] hover:border-[var(--overlay-hover-border)] hover:bg-[image:var(--overlay-hover-bg)] active:bg-[image:var(--overlay-active-bg)] active:shadow-[var(--overlay-active-shadow)]";
+
 interface TextEditorProps {
   textRef: RefObject<HTMLTextAreaElement | null>;
   value: string;
@@ -14,7 +21,7 @@ interface TextEditorProps {
 /** The prompt textarea (`#text`) with its paste (`#paste`) and clear (`#clear`) buttons. */
 export function TextEditor(props: TextEditorProps) {
   return (
-    <div className="text-shell">
+    <div className="text-shell relative flex flex-auto min-h-[260px] overflow-hidden rounded-[22px] border border-[var(--line)] bg-[var(--panel)] p-0 [--text-button-clearance:126px] [--text-edge-pad:8px] focus-within:border-[var(--accent)] focus-within:shadow-[0_0_0_3px_var(--focus-ring)]">
       <textarea
         id="text"
         ref={props.textRef}
@@ -25,11 +32,12 @@ export function TextEditor(props: TextEditorProps) {
         autoCapitalize="sentences"
         spellCheck={true}
         placeholder="Type something to hear it spoken..."
+        className="h-full min-h-0 w-full flex-auto resize-none rounded-none border-0 bg-transparent px-4 pt-[var(--text-edge-pad)] pb-[calc(var(--text-button-clearance)_+_var(--text-edge-pad))] text-[0.94rem] leading-[1.45] text-[var(--text)] outline-none [scroll-padding:var(--text-edge-pad)_16px_calc(var(--text-button-clearance)_+_var(--text-edge-pad))]"
       ></textarea>
       <button
         id="paste"
         type="button"
-        className="icon-button"
+        className={`${OVERLAY_ICON_BUTTON} absolute right-2.5 bottom-2.5`}
         aria-label="Paste clipboard contents"
         onClick={props.onPasteClick}
       >
@@ -42,7 +50,7 @@ export function TextEditor(props: TextEditorProps) {
       <button
         id="clear"
         type="button"
-        className="secondary icon-button"
+        className={`${OVERLAY_ICON_BUTTON} absolute right-2.5 bottom-[70px]`}
         aria-label="Clear text"
         hidden={!props.clearVisible}
         onClick={props.onClearClick}
