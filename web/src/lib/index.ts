@@ -22,4 +22,9 @@ export * from "./synth/google.ts";
 export * from "./synth/elevenlabs.ts";
 export * from "./synth/serverJobs.ts";
 export * from "./prep/index.ts";
-export * from "./generation.ts";
+export * from "./personas.ts";
+// NOTE: `./generation.ts` is intentionally NOT re-exported here. It is the entry
+// point of the speech-prep/synthesis/streaming pipeline and is loaded lazily via
+// dynamic `import()` in `useGeneration`; re-exporting it from this shell-wide
+// barrel would pull the whole pipeline back into the initial chunk. Import from
+// `./generation.ts` directly (tests) or dynamically (the generation hook).

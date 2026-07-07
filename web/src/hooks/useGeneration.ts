@@ -1,16 +1,15 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import {
   clamp,
-  GenerationController,
   getLastGeneratedAudio,
   loadPendingGeneration,
   loadText,
   saveText,
   shouldApplyGeneratedText,
   type BrowserTtsConfig,
-  type GenerationMeta,
   type WebSettings,
 } from "../lib/index.ts";
+import type { GenerationController, GenerationMeta } from "../lib/generation.ts";
 import { reloadForWorkerUpdateWhenIdle, setBusyPredicate } from "../pwa.ts";
 import type { SetText } from "./usePersistedText.ts";
 import type { PlaybackApi } from "./usePlayback.ts";
@@ -50,6 +49,12 @@ export interface GenerationState {
  * Replaces the legacy controller construction, the `setGenerating`/`showError`
  * button wiring, the pagehide/pageshow/visibilitychange lifecycle handlers, and
  * the stored-state restore/resume bootstrap.
+ *
+ * The generation pipeline (`lib/generation.ts` and its speech-prep/synthesis/
+ * streaming dependencies) is loaded lazily via dynamic `import()`: the shell
+ * boots with only the editor, settings, and restored-audio playback. The
+ * controller is constructed on the first generate, or eagerly at load only when
+ * a pending generation must be resumed.
  */
 export function useGeneration(options: UseGenerationOptions): GenerationState {
   const { config, settings, textRef, setText, playback, waveformRef, showError, clearError } =
@@ -61,6 +66,7 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
   const [label, setLabel] = useState("Generate");
 
   const controllerRef = useRef<GenerationController | null>(null);
+  const ensureControllerRef = useRef<(() => Promise<GenerationController>) | null>(null);
   const activeRef = useRef(false);
   const configRef = useRef(config);
   const settingsRef = useRef(settings);
@@ -73,6 +79,7 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
   }, [config, settings]);
 
   useEffect(() => {
+    let disposed = false;
     const getDraftText = (): string => textRef.current?.value || loadText() || "";
 
     const setGeneratingClass = (active: boolean, text: string, fraction: number): void => {
@@ -81,58 +88,78 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
       setProgress(clamp(fraction, 0, 1));
     };
 
-    const controller = new GenerationController({
-      config: configRef.current,
-      settings: settingsRef.current,
-      getDraftText,
-      callbacks: {
-        onStatus: (statusLabel, fraction) => {
-          setProgress(clamp(fraction, 0, 1));
-          setLabel(statusLabel);
+    // Construct the controller with the current config/settings; the sync effect
+    // above keeps it current afterwards.
+    const buildController = (Controller: typeof GenerationController): GenerationController =>
+      new Controller({
+        config: configRef.current,
+        settings: settingsRef.current,
+        getDraftText,
+        callbacks: {
+          onStatus: (statusLabel, fraction) => {
+            setProgress(clamp(fraction, 0, 1));
+            setLabel(statusLabel);
+          },
+          onGeneratingChange: (active) => {
+            if (active) {
+              activeRef.current = true;
+              setBusy(true);
+              playback.setPlayDisabled(true);
+              setGeneratingClass(true, "Starting", 0.08);
+            } else {
+              activeRef.current = false;
+              setBusy(false);
+              setTimeout(() => {
+                if (!activeRef.current) setGeneratingClass(false, "Generate", 0);
+              }, 350);
+              reloadForWorkerUpdateWhenIdle();
+            }
+          },
+          onError: (message) => {
+            playback.setPlayDisabled(!playback.audioHasSrc());
+            if (!playback.audioHasSrc() && !playback.hasStream()) waveformRef.current?.reset();
+            showError(message);
+          },
+          onClearError: clearError,
+          onTextReplace: (value) => setText(value, { persist: false }),
+          onAudioReady: (blob, meta: GenerationMeta) => {
+            if (meta.streamed && meta.playback) {
+              playback.onStreamAudioReady(blob, meta.playback.stopped ? null : meta.playback);
+            } else {
+              playback.loadAudioBlob(blob);
+            }
+          },
+          playbackCallbacks: {
+            onPlayingChange: (playing) => playback.onPlayingChange(playing),
+            onProgress: (current, estimated, finished) =>
+              playback.onStreamProgress(current, estimated, finished),
+            onPeaks: (peaks, durationDelta) =>
+              waveformRef.current?.appendStreamingPeaks(peaks, durationDelta),
+            onFinished: () => waveformRef.current?.markStreamFinished(),
+            onReplayReady: (blob) => playback.onReplayReady(blob),
+          },
+          onStreamState: (state) => playback.onStreamState(state),
         },
-        onGeneratingChange: (active) => {
-          if (active) {
-            activeRef.current = true;
-            setBusy(true);
-            playback.setPlayDisabled(true);
-            setGeneratingClass(true, "Starting", 0.08);
-          } else {
-            activeRef.current = false;
-            setBusy(false);
-            setTimeout(() => {
-              if (!activeRef.current) setGeneratingClass(false, "Generate", 0);
-            }, 350);
-            reloadForWorkerUpdateWhenIdle();
-          }
-        },
-        onError: (message) => {
-          playback.setPlayDisabled(!playback.audioHasSrc());
-          if (!playback.audioHasSrc() && !playback.hasStream()) waveformRef.current?.reset();
-          showError(message);
-        },
-        onClearError: clearError,
-        onTextReplace: (value) => setText(value, { persist: false }),
-        onAudioReady: (blob, meta: GenerationMeta) => {
-          if (meta.streamed && meta.playback) {
-            playback.onStreamAudioReady(blob, meta.playback.stopped ? null : meta.playback);
-          } else {
-            playback.loadAudioBlob(blob);
-          }
-        },
-        playbackCallbacks: {
-          onPlayingChange: (playing) => playback.onPlayingChange(playing),
-          onProgress: (current, estimated, finished) =>
-            playback.onStreamProgress(current, estimated, finished),
-          onPeaks: (peaks, durationDelta) =>
-            waveformRef.current?.appendStreamingPeaks(peaks, durationDelta),
-          onFinished: () => waveformRef.current?.markStreamFinished(),
-          onReplayReady: (blob) => playback.onReplayReady(blob),
-        },
-        onStreamState: (state) => playback.onStreamState(state),
-      },
-    });
-    controllerRef.current = controller;
-    activeRef.current = false;
+      });
+
+    // Lazily import + construct the controller. Idempotent: repeated calls
+    // resolve to the same instance. Serialized via a pending promise so two
+    // concurrent triggers (e.g. generate + a resume) don't build two controllers.
+    let pending: Promise<GenerationController> | null = null;
+    const ensureController = (): Promise<GenerationController> => {
+      if (controllerRef.current) return Promise.resolve(controllerRef.current);
+      if (pending) return pending;
+      pending = import("../lib/generation.ts").then((mod) => {
+        if (controllerRef.current) return controllerRef.current;
+        const controller = buildController(mod.GenerationController);
+        controllerRef.current = controller;
+        activeRef.current = false;
+        if (disposed) controller.cancel();
+        return controller;
+      });
+      return pending;
+    };
+    ensureControllerRef.current = ensureController;
 
     setBusyPredicate(() => activeRef.current || playback.hasStream());
 
@@ -155,7 +182,10 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
 
     void (async () => {
       await restoreLastGeneratedAudio();
-      await controller.resumePending();
+      if (loadPendingGeneration()) {
+        const controller = await ensureController();
+        await controller.resumePending();
+      }
     })();
 
     const cleanups: Array<() => void> = [];
@@ -165,7 +195,7 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
     };
 
     on(window, "pagehide", () => {
-      if (activeRef.current) controller.markLifecycleInterrupted();
+      if (activeRef.current) controllerRef.current?.markLifecycleInterrupted();
       saveText(textRef.current?.value || "");
     });
     on(window, "pageshow", (event) => {
@@ -173,25 +203,29 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
         void restoreLastGeneratedAudio();
       }
       if (activeRef.current) setGeneratingClass(true, "Generating", 0.45);
-      if (!activeRef.current && loadPendingGeneration()) void controller.resumePending();
+      if (!activeRef.current && loadPendingGeneration()) {
+        void ensureController().then((controller) => controller.resumePending());
+      }
     });
     on(document, "visibilitychange", () => {
       if (document.visibilityState !== "visible" && activeRef.current) {
-        controller.markLifecycleInterrupted();
+        controllerRef.current?.markLifecycleInterrupted();
         return;
       }
       if (document.visibilityState === "visible" && activeRef.current) {
         setGeneratingClass(true, "Generating", 0.45);
       }
       if (document.visibilityState === "visible" && !activeRef.current && loadPendingGeneration()) {
-        void controller.resumePending();
+        void ensureController().then((controller) => controller.resumePending());
       }
     });
 
     return () => {
+      disposed = true;
       for (const cleanup of cleanups) cleanup();
-      controller.cancel();
+      controllerRef.current?.cancel();
       controllerRef.current = null;
+      ensureControllerRef.current = null;
       setBusyPredicate(() => false);
     };
     // Mount-once setup of the generation controller + lifecycle listeners; the
@@ -205,8 +239,9 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
       showError("Enter some text first.");
       return false;
     }
-    const controller = controllerRef.current;
-    if (!controller) return false;
+    const ensureController = ensureControllerRef.current;
+    if (!ensureController) return false;
+    const controller = await ensureController();
     if (controller.isActive) {
       controller.cancel();
       activeRef.current = false;

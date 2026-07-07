@@ -50,6 +50,21 @@ export function saveText(value: string): void {
   localStorage.setItem(TEXT_STORAGE_KEY, value);
 }
 
+/**
+ * Whether prepared/restored text may replace the current draft. Ports
+ * `shouldApplyGeneratedText` (app.html line ~1766).
+ *
+ * Lives here (rather than in the generation controller) so the app shell can
+ * apply restored audio's text without pulling in the generation pipeline chunk.
+ */
+export function shouldApplyGeneratedText(
+  currentDraft: string,
+  generationInput: string,
+  generatedText: string,
+): boolean {
+  return !currentDraft || currentDraft === generationInput || currentDraft === generatedText;
+}
+
 /** In-flight generation state persisted across reloads. */
 export interface PendingGeneration {
   input: string;

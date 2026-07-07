@@ -27,6 +27,7 @@ import {
 import { audioBlobFromBase64 } from "./audio/wav.ts";
 import type { BrowserPersonaConfig, BrowserTtsConfig } from "./config.ts";
 import { saveCachedConfig } from "./config.ts";
+import { resolvePersona, resolveProvider } from "./personas.ts";
 import { prepareForProvider, type PrepResult, type PrepSettings } from "./prep/index.ts";
 import type { WebSettings } from "./settings.ts";
 import {
@@ -36,12 +37,22 @@ import {
   saveLastGeneratedAudio,
   savePendingGeneration,
   saveText,
+  shouldApplyGeneratedText,
 } from "./storage.ts";
 import { canStreamElevenLabs, resolveElevenLabsModel } from "./synth/elevenlabs.ts";
 import { synthesizeElevenLabs } from "./synth/elevenlabs.ts";
 import { canStreamGoogle, resolveGoogleModel } from "./synth/google.ts";
 import { synthesizeGoogle } from "./synth/google.ts";
 import { createWebSpeechJob, waitForWebSpeechJob } from "./synth/serverJobs.ts";
+
+// Re-exported for API compatibility; the canonical home is `./personas.ts`.
+export {
+  firstPersonaForProvider,
+  personaSupportsProvider,
+  resolvePersona,
+  resolveProvider,
+  selectedPersonaName,
+} from "./personas.ts";
 
 /** Error carrying an HTTP-ish status, as thrown across the pipeline. */
 interface StatusError extends Error {
@@ -129,63 +140,6 @@ export function fallbackProvider(provider: string): string {
   return provider === "google" ? "elevenlabs" : "google";
 }
 
-/** Whether a persona can drive a provider. Ports `personaSupportsProvider`. */
-export function personaSupportsProvider(
-  persona: BrowserPersonaConfig | null | undefined,
-  provider: string,
-): boolean {
-  if (provider === "elevenlabs") return Boolean(persona?.elevenlabs?.voiceId);
-  return true;
-}
-
-/** First persona supporting a provider. Ports `firstPersonaForProvider`. */
-export function firstPersonaForProvider(
-  config: BrowserTtsConfig | null | undefined,
-  provider: string,
-): string | null {
-  const found = Object.entries(config?.personas || {}).find(([, persona]) =>
-    personaSupportsProvider(persona, provider),
-  );
-  return found ? found[0] : null;
-}
-
-/** Resolve the selected persona name for a provider. Ports `selectedPersonaName`. */
-export function selectedPersonaName(
-  config: BrowserTtsConfig,
-  provider: string | null,
-  settings: WebSettings,
-): string | null {
-  if (settings.voice === "provider-default") return null;
-  if (settings.voice?.startsWith("persona:")) return settings.voice.slice("persona:".length);
-  if (provider === "elevenlabs") {
-    const defaultPersona = config?.defaultPersona ? config.personas?.[config.defaultPersona] : null;
-    return personaSupportsProvider(defaultPersona, "elevenlabs")
-      ? config.defaultPersona || null
-      : firstPersonaForProvider(config, "elevenlabs");
-  }
-  return config?.defaultPersona || null;
-}
-
-/** Resolve the persona object for a provider. Ports `resolvePersona`. */
-export function resolvePersona(
-  config: BrowserTtsConfig,
-  provider: string | null,
-  settings: WebSettings,
-): BrowserPersonaConfig | null {
-  const name = selectedPersonaName(config, provider, settings);
-  return name && config.personas ? config.personas[name] || null : null;
-}
-
-/** Resolve the provider. Ports `resolveProvider`. */
-export function resolveProvider(
-  config: BrowserTtsConfig,
-  persona: BrowserPersonaConfig | null,
-  settings: WebSettings,
-): string {
-  if (settings.provider !== "auto") return settings.provider;
-  return persona?.provider || config.defaultProvider;
-}
-
 /** Whether a provider supports streaming for the current config/persona/settings. Ports `canStreamProvider`. */
 export function canStreamProvider(
   config: BrowserTtsConfig,
@@ -214,15 +168,6 @@ export function settingsMatchServerDefaults(settings: WebSettings): boolean {
     settings.emotionPreprocessing === true &&
     settings.summarization === false
   );
-}
-
-/** Whether prepared text may replace the current draft. Ports `shouldApplyGeneratedText`. */
-export function shouldApplyGeneratedText(
-  currentDraft: string,
-  generationInput: string,
-  generatedText: string,
-): boolean {
-  return !currentDraft || currentDraft === generationInput || currentDraft === generatedText;
 }
 
 /**
