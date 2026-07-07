@@ -64,6 +64,12 @@ Replacing the embedded single-file PWA (`crates/codex-voice-transcriber/assets/w
 | E | Performance | DONE — `82f89d5`+`42a7590` (generation chunk code-split, entry 87.3→73.4 kB gzip, 80 kB budget gate, Lighthouse 100/99; see web/PERFORMANCE.md) |
 | F | Live TTS smoke | DONE — `e1a72a6`+`09a5159` (single-run paid smoke, LIVE_TTS=1 gated, ~1,940 chars/run; mise run test-web-live) |
 
+## Follow-on plans (post-migration)
+
+| Plan | Title | Priority | Effort | Status |
+|------|-------|----------|--------|--------|
+| 023 | Replace the GTK3 tray stack with ksni + iced on Linux | P3 | M | TODO — plan written 2026-07-08 at `3ddc31f`; kills all 8 deny advisory ignores + libgtk-3-dev CI dep; requires operator desktop smoke |
+
 ## Findings considered and rejected (do not re-audit)
 
 - **Web dictation / PWA transcription surface** — operator decision (2026-07-07): the web app will NOT do dictation. The TTS-only asymmetry is intentional; do not re-propose.
@@ -77,7 +83,7 @@ Replacing the embedded single-file PWA (`crates/codex-voice-transcriber/assets/w
 - **Transcriber `client.rs` vs `upload.rs`** — outbound client vs inbound multipart parsing; distinct responsibilities, no dedup.
 - **Lockfile versions above manifest pins** (tokio 1.52 vs pin 1.44 etc.) — normal semver-caret resolution, not drift.
 - **thiserror 1+2, bitflags 1+2, winnow ×3, toml_edit ×3 transitive duplicates** — pinned inside GTK3/symphonia/zbus dependency trees; not locally fixable. Watch upstream.
-- **GTK3 (gtk-rs 0.18) on the Linux tray** — transitively required by tray-icon/libappindicator; aging but no local action until upstream moves.
+- **GTK3 (gtk-rs 0.18) on the Linux tray** — ~~no local action until upstream moves~~ superseded 2026-07-08: plan 023 migrates the Linux tray to ksni (SNI over D-Bus) and the GTK windows to iced, removing GTK3 entirely.
 - **`pcm_to_wav` trailing-odd-byte drop; audio-callback chunk drops on full channel; web-speech-job pruning only on create/status** — reviewed; harmless/intentional/bounded respectively.
 - **Streaming realtime transcription** — explicitly ROADMAP "Deferred (Out of Scope)"; not unbuilt intent.
 
