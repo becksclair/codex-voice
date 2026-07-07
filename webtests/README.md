@@ -41,6 +41,46 @@ Via mise, from the repo root:
 mise run test-web
 ```
 
+## Live TTS smoke (paid, opt-in)
+
+`tests/live.spec.ts` is a single-run, end-to-end smoke against the *real*
+synthesis stack. It is skipped by default (both in the normal suite and when run
+directly) and only executes when `LIVE_TTS=1` is set. It also skips cleanly when
+`/web/config` returns `503` or exposes no providers (i.e. the host has no real
+TTS config).
+
+Run it via mise (builds the frontend first):
+
+```sh
+mise run test-web-live
+# include the ElevenLabs leg (billed separately):
+LIVE_TTS_ELEVENLABS=1 mise run test-web-live
+```
+
+Or directly:
+
+```sh
+cd webtests
+LIVE_TTS=1 bunx playwright test tests/live.spec.ts
+```
+
+Requirements and cost:
+
+- Needs the operator's real `~/.codex/read-aloud-defaults.json` on the host so
+  `/web/config` returns live provider keys.
+- **Cost per run:** one ~1.9k-character Google synthesis (crafted to cross the
+  1600-char chunking threshold and split into three chunks, exercising the
+  chunk/stitch path) plus one short (~20-char) server-job synthesis. That is the
+  entire default spend.
+- The ElevenLabs leg is **off** even when `LIVE_TTS=1`; set
+  `LIVE_TTS_ELEVENLABS=1` to add one short (~70-char) ElevenLabs synthesis.
+
+In one browser session the Google leg asserts: config loads, provider select
+populates, generation completes (download/play enabled), no error banner, a
+plausible duration (> 10s), a non-blank waveform canvas, playback advancing, and
+a valid WAV download (RIFF magic + > 100KB). It then drives the server path
+(`POST /web/speech-jobs` → poll to `complete` → decode base64 audio).
+
 ## Notes
 
 - The server has no flag to override the TTS defaults path

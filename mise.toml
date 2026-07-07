@@ -68,6 +68,12 @@ dir = "{{cwd}}"
 depends = ["web-build"]
 run = "cd webtests && bunx playwright test"
 
+[tasks.test-web-live]
+description = "Run the single-run live TTS smoke (paid; requires real ~/.codex/read-aloud-defaults.json)"
+dir = "{{cwd}}"
+depends = ["web-build"]
+run = "cd webtests && LIVE_TTS=1 bunx playwright test tests/live.spec.ts"
+
 [tasks.web-install]
 description = "Install frontend dependencies (web/)"
 dir = "{{cwd}}"
