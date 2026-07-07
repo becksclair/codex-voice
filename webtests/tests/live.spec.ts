@@ -110,7 +110,7 @@ test.describe.serial('live TTS smoke', () => {
     await expect(page.locator('#play')).toBeEnabled();
 
     // --- Stage 6: no error surfaced ---
-    await expect(page.locator('#error-banner')).not.toHaveClass(/visible/);
+    await expect(page.locator('#error-banner')).toBeHidden();
     expect((await page.locator('#error-banner').textContent())?.trim() || '').toBe('');
 
     // --- Stage 7: plausible duration for ~1.9k chars of speech (> 10s) ---
@@ -221,7 +221,7 @@ test.describe.serial('live TTS smoke', () => {
     await page.locator('#generate').click();
 
     await expect(page.locator('#download')).toBeEnabled({ timeout: 120_000 });
-    await expect(page.locator('#error-banner')).not.toHaveClass(/visible/);
+    await expect(page.locator('#error-banner')).toBeHidden();
     await expect
       .poll(() => page.locator('#duration').textContent().then((t) => parseTimecode(t) ?? 0), {
         timeout: 30_000,
