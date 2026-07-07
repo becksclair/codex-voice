@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use app::{run_app, PlatformParts, TrayHandle};
-use cli::{Cli, Command, DoctorCommand, TranscriberCommand};
+use cli::{Cli, Command, DoctorCommand, TranscriberCommand, TtsCommand};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -77,6 +77,9 @@ async fn main() -> Result<()> {
                     .await
                     .map_err(Into::into)
             }
+        },
+        Command::Tts { command } => match command {
+            TtsCommand::Bench(args) => tts::run_tts_bench(args).await,
         },
     }
 }

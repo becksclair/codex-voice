@@ -49,6 +49,7 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
   - Persona-aware provider fallback
   - PCM → WAV wrapping in-process; compressed formats via `ffmpeg`
 - [x] Add `doctor tts` diagnostic
+- [x] Add `tts bench` speech-prep benchmark (replaces `scripts/tts_prep_benchmark.py`)
 - [x] Add `transcriber probe-limits` for backend stress testing
 - [x] Add `mise run setup` for Linux systemd user service install
 

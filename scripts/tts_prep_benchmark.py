@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# DEPRECATED: superseded by `codex-voice tts bench` (crates/codex-voice-app),
+# which reuses the Rust SpeechPrepClient/codex_llm contracts. Kept for reference.
 """Benchmark TTS prep/tagging models against one fixed text sample.
 
 The harness intentionally avoids OPENAI_API_KEY. Codex/GPT models are invoked

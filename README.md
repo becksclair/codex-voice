@@ -28,6 +28,7 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor codex-auth
 cargo run -p codex-voice-app --bin codex-voice -- doctor transcribe --file /path/to/sample.wav
 cargo run -p codex-voice-app --bin codex-voice -- doctor paste --text "codex voice portal paste test"
 cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello from codex voice"
+cargo run -p codex-voice-app --bin codex-voice -- tts bench --dry-run
 cargo run -p codex-voice-app --bin codex-voice -- server
 cargo run -p codex-voice-app --bin codex-voice -- transcriber probe-limits --file /path/to/long-audio.wav
 cargo run -p codex-voice-app --bin codex-voice -- run
@@ -142,6 +143,18 @@ backend and will return `400 INVALID_ARGUMENT`.
 
 ```bash
 cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello world"
+```
+
+`tts bench` measures speech-prep (performance-tagging) latency and output for a
+fixed sample across the default Codex and Google prep-model set, reusing the same
+`SpeechPrepClient`/Codex clients the service uses. Use `--dry-run` to print the
+planned requests without any network calls; `--models`, `--text`/`--file`, and
+`--iterations` tune the run. It replaces the deprecated
+`scripts/tts_prep_benchmark.py`.
+
+```bash
+cargo run -p codex-voice-app --bin codex-voice -- tts bench --dry-run
+cargo run -p codex-voice-app --bin codex-voice -- tts bench --models gemini-3.5-flash
 ```
 
 The `read-aloud-defaults.json` config is read from `~/.codex/read-aloud-defaults.json`

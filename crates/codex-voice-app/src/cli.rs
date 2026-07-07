@@ -26,6 +26,16 @@ pub enum Command {
         #[command(subcommand)]
         command: TranscriberCommand,
     },
+    Tts {
+        #[command(subcommand)]
+        command: TtsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TtsCommand {
+    /// Benchmark speech-prep models against a fixed sample.
+    Bench(super::tts::TtsBenchArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -214,6 +224,72 @@ mod tests {
             .expect("tailscale bind should succeed");
 
         assert_eq!(config.bind, bind);
+    }
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("cli should parse")
+    }
+
+    #[test]
+    fn parses_tts_bench_defaults() {
+        let cli = parse(&["codex-voice", "tts", "bench"]);
+        match cli.command {
+            Some(Command::Tts {
+                command: TtsCommand::Bench(args),
+            }) => {
+                assert!(args.text.is_none());
+                assert!(args.file.is_none());
+                assert!(args.models.is_none());
+                assert_eq!(args.iterations, 1);
+                assert!(!args.dry_run);
+            }
+            other => panic!("expected tts bench, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_tts_bench_flags() {
+        let cli = parse(&[
+            "codex-voice",
+            "tts",
+            "bench",
+            "--dry-run",
+            "--iterations",
+            "3",
+            "--models",
+            "gpt-5.5-none,gemini-3.5-flash",
+        ]);
+        match cli.command {
+            Some(Command::Tts {
+                command: TtsCommand::Bench(args),
+            }) => {
+                assert!(args.dry_run);
+                assert_eq!(args.iterations, 3);
+                assert_eq!(
+                    args.models,
+                    Some(vec![
+                        "gpt-5.5-none".to_string(),
+                        "gemini-3.5-flash".to_string(),
+                    ])
+                );
+            }
+            other => panic!("expected tts bench, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tts_bench_rejects_text_and_file_together() {
+        let error = Cli::try_parse_from([
+            "codex-voice",
+            "tts",
+            "bench",
+            "--text",
+            "hi",
+            "--file",
+            "/tmp/x.txt",
+        ])
+        .expect_err("--text and --file must conflict");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
