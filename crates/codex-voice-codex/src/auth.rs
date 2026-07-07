@@ -139,12 +139,35 @@ impl CodexAuthService {
 
 fn wait_for_account_read(
     child: &mut Child,
-    stdout: impl std::io::Read,
+    stdout: impl std::io::Read + Send + 'static,
     timeout: Duration,
 ) -> TranscriptionResult<()> {
     let deadline = Instant::now() + timeout;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
+
+    // std's BufReader::read_line has no timeout, so a blocking read on the main
+    // loop can't be interrupted by the deadline check below. Instead, read lines
+    // on a dedicated thread and forward them over a channel that the main loop
+    // can wait on with `recv_timeout`, keeping the deadline authoritative.
+    let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<String>>();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    if tx.send(Ok(std::mem::take(&mut line))).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
 
     loop {
         match child.try_wait() {
@@ -163,6 +186,9 @@ fn wait_for_account_read(
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
+            // Terminate first: killing the child closes the pipe, which lets the
+            // detached reader thread above observe EOF and exit on its own. We
+            // must not join it here — the pipe may still be open otherwise.
             terminate_child(child);
             return Err(TranscriptionError::Auth(format!(
                 "timed out after {}s waiting for codex account/read response",
@@ -170,30 +196,26 @@ fn wait_for_account_read(
             )));
         }
 
-        // Read one line with a timeout by setting a read timeout on the underlying handle.
-        // Since BufReader doesn't support timeouts directly, we use a short non-blocking poll
-        // pattern: try to read a line, and if we get WouldBlock, sleep briefly and retry.
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                // EOF — stdout closed
-                std::thread::sleep(Duration::from_millis(50));
-                continue;
-            }
-            Ok(_) => {
+        match rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(Ok(line)) => {
                 if is_account_read_response(&line) {
                     terminate_child(child);
                     return Ok(());
                 }
-                line.clear();
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(error) => {
+            Ok(Err(error)) => {
                 terminate_child(child);
                 return Err(TranscriptionError::Auth(format!(
                     "failed reading codex auth refresh response: {error}"
                 )));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // No line yet; loop back to re-check try_wait and the deadline.
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Reader thread hit EOF without a match. Behave like the old
+                // Ok(0) path: brief sleep, then let try_wait/deadline decide.
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
@@ -266,5 +288,63 @@ mod tests {
     #[test]
     fn rejects_account_read_response_without_result() {
         assert!(!is_account_read_response(r#"{"jsonrpc":"2.0","id": 2}"#));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn times_out_when_child_produces_no_output() {
+        // `cat` with no input reads stdin forever and never writes to stdout,
+        // so the deadline must be what ends the wait, not a natural EOF.
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn `cat`");
+        let stdout = child.stdout.take().expect("cat stdout should be piped");
+
+        let started = Instant::now();
+        let result = wait_for_account_read(&mut child, stdout, Duration::from_millis(300));
+        let elapsed = started.elapsed();
+
+        let error = result.expect_err("expected a timeout error");
+        assert!(
+            format!("{error}").contains("timed out"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "wait_for_account_read took too long: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn times_out_on_partial_line_without_newline() {
+        // Writes a partial line (no trailing newline) and then sleeps, so a
+        // blocking `read_line` would never return before the process exits.
+        // The deadline must still fire.
+        let mut child = Command::new("sh")
+            .args(["-c", "printf partial; sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn `sh`");
+        let stdout = child.stdout.take().expect("sh stdout should be piped");
+
+        let started = Instant::now();
+        let result = wait_for_account_read(&mut child, stdout, Duration::from_millis(300));
+        let elapsed = started.elapsed();
+
+        let error = result.expect_err("expected a timeout error");
+        assert!(
+            format!("{error}").contains("timed out"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "wait_for_account_read took too long: {elapsed:?}"
+        );
     }
 }
