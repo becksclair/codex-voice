@@ -477,6 +477,7 @@ name = "codex-voice-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "codex-voice-audio",
  "codex-voice-codex",

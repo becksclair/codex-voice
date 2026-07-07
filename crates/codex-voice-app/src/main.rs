@@ -173,8 +173,11 @@ async fn run() -> Result<()> {
     let log_path = logging::log_file_path();
     let tray = start_tray(LinuxUiConfig { log_path });
     let injector = Arc::new(LinuxTextInjector::new());
-    let (app_rx, hotkey_rx, engine_tx) =
-        spawn_engine(injector.clone(), codex_voice_platform::LinuxHotkeyService::new()).await?;
+    let (app_rx, hotkey_rx, engine_tx) = spawn_engine(
+        injector.clone(),
+        codex_voice_platform::LinuxHotkeyService::new(),
+    )
+    .await?;
     run_app(PlatformParts {
         hotkey_rx,
         app_rx,

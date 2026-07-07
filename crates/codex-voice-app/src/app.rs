@@ -554,3 +554,155 @@ async fn run_tray_diagnostics(status_tx: std::sync::mpsc::Sender<UiStatus>) {
 async fn run_tray_diagnostics(_status_tx: std::sync::mpsc::Sender<UiStatus>) {
     // unreachable on unsupported platforms because run() bails early
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_voice_core::{PlatformError, PlatformResult, SelectedText};
+    use std::sync::mpsc as std_mpsc;
+    use std::time::Duration;
+
+    /// Test double for [`TrayHandle`]: commands are fed from a std channel and
+    /// status updates are captured for assertions.
+    struct FakeTray {
+        commands: std_mpsc::Receiver<UiCommand>,
+        status_tx: std_mpsc::Sender<UiStatus>,
+    }
+
+    impl TrayHandle for FakeTray {
+        fn try_recv_command(&self) -> Option<UiCommand> {
+            self.commands.try_recv().ok()
+        }
+        fn update(&self, status: UiStatus) {
+            let _ = self.status_tx.send(status);
+        }
+        fn status_sender(&self) -> std_mpsc::Sender<UiStatus> {
+            self.status_tx.clone()
+        }
+    }
+
+    /// Test double for [`SelectedTextReader`] returning a fixed result.
+    struct FakeReader {
+        result: PlatformResult<SelectedText>,
+    }
+
+    #[async_trait::async_trait]
+    impl SelectedTextReader for FakeReader {
+        async fn selected_text(&self) -> PlatformResult<SelectedText> {
+            match &self.result {
+                Ok(selection) => Ok(selection.clone()),
+                Err(error) => Err(match error {
+                    PlatformError::Message(m) => PlatformError::Message(m.clone()),
+                    PlatformError::PermissionDenied(m) => {
+                        PlatformError::PermissionDenied(m.clone())
+                    }
+                    PlatformError::Unavailable(m) => PlatformError::Unavailable(m.clone()),
+                }),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_app_quits_on_tray_quit_command() {
+        let (_hotkey_tx, hotkey_rx) = mpsc::channel::<HotkeyEvent>(4);
+        let (_app_tx, app_rx) = mpsc::channel::<AppEvent>(4);
+        let (engine_tx, _engine_rx) = mpsc::channel::<HotkeyEvent>(4);
+
+        let (command_tx, command_rx) = std_mpsc::channel::<UiCommand>();
+        let (status_tx, _status_rx) = std_mpsc::channel::<UiStatus>();
+        command_tx
+            .send(UiCommand::Quit)
+            .expect("queue quit command");
+
+        let reader = Arc::new(FakeReader {
+            result: Ok(SelectedText {
+                text: String::new(),
+                chars: 0,
+                restored_clipboard: false,
+            }),
+        });
+
+        let parts = PlatformParts {
+            hotkey_rx,
+            app_rx,
+            engine_tx,
+            tray: Some(Box::new(FakeTray {
+                commands: command_rx,
+                status_tx,
+            })),
+            reader,
+            banner: "test".into(),
+        };
+
+        // The first interval tick fires immediately, draining the queued Quit
+        // command; run_app must then return promptly.
+        let result = tokio::time::timeout(Duration::from_secs(2), run_app(parts)).await;
+        assert!(result.is_ok(), "run_app did not return after Quit command");
+        assert!(result.unwrap().is_ok(), "run_app returned an error");
+    }
+
+    #[tokio::test]
+    async fn speak_text_reports_error_status_on_empty_text() {
+        let (status_tx, status_rx) = std_mpsc::channel::<UiStatus>();
+        let speech_state = Arc::new(SpeechState::default());
+
+        run_speak_text(status_tx, "   ".into(), speech_state).await;
+
+        let statuses: Vec<UiStatus> = status_rx.try_iter().collect();
+        assert_eq!(statuses.len(), 1, "expected exactly one status update");
+        assert!(
+            matches!(statuses[0].state, DictationState::Error(_)),
+            "expected an error state, got {:?}",
+            statuses[0].state
+        );
+        assert_eq!(statuses[0].message, "No text to speak");
+    }
+
+    #[tokio::test]
+    async fn speak_selection_reports_status_sequence_on_reader_failure() {
+        let (status_tx, status_rx) = std_mpsc::channel::<UiStatus>();
+        let speech_state = Arc::new(SpeechState::default());
+        let reader = Arc::new(FakeReader {
+            result: Err(PlatformError::Unavailable("no selection".into())),
+        });
+
+        run_speak_selection(status_tx, reader, speech_state).await;
+
+        let statuses: Vec<UiStatus> = status_rx.try_iter().collect();
+        assert_eq!(statuses.len(), 2, "expected two status updates");
+        assert_eq!(statuses[0].state, DictationState::Transcribing);
+        assert_eq!(statuses[0].message, "Reading selected text...");
+        assert!(
+            matches!(statuses[1].state, DictationState::Error(_)),
+            "expected an error state, got {:?}",
+            statuses[1].state
+        );
+        assert_eq!(statuses[1].message, "No selected text");
+    }
+
+    #[tokio::test]
+    async fn play_last_speech_reports_status_without_generated_file() {
+        let (status_tx, status_rx) = std_mpsc::channel::<UiStatus>();
+        // A fresh SpeechState has no recorded last_path, so run_play_last_speech
+        // falls back to the default output path. In a clean test environment that
+        // file does not exist, yielding a single "nothing to play" error status.
+        let speech_state = Arc::new(SpeechState::default());
+
+        // Guard against a stray pre-existing file at the fallback location.
+        if tokio::fs::metadata(speech_output_path()).await.is_ok() {
+            eprintln!("skipping: fallback speech file exists in this environment");
+            return;
+        }
+
+        run_play_last_speech(status_tx, speech_state).await;
+
+        let statuses: Vec<UiStatus> = status_rx.try_iter().collect();
+        assert_eq!(statuses.len(), 1, "expected exactly one status update");
+        assert!(
+            matches!(statuses[0].state, DictationState::Error(_)),
+            "expected an error state, got {:?}",
+            statuses[0].state
+        );
+        assert_eq!(statuses[0].message, "No generated speech to play");
+    }
+}
