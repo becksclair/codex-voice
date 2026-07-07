@@ -503,7 +503,7 @@ fn speech_prep_fit_limit(provider_limit: usize) -> usize {
 fn split_tts_text(input: &str, max_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut remaining = input.trim();
-    while remaining.chars().count() > max_chars {
+    while remaining.chars().nth(max_chars).is_some() {
         let split_at = split_index_at_or_before(remaining, max_chars);
         let (head, tail) = remaining.split_at(split_at);
         let head = head.trim();
@@ -618,7 +618,7 @@ impl SpeechClient for ConfiguredSpeechClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{split_tts_text, synthesize_ordered};
+    use super::{split_index_at_or_before, split_tts_text, synthesize_ordered};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -703,5 +703,62 @@ mod tests {
         let chunks = split_tts_text("abcdefghij klm", 5);
 
         assert_eq!(chunks, vec!["abcde", "fghij", "klm"]);
+    }
+
+    // Naive reference implementation using the original loop condition
+    // (`chars().count() > max`). Used to pin that the bounded condition
+    // produces identical chunk vectors.
+    fn split_tts_text_naive(input: &str, max_chars: usize) -> Vec<String> {
+        let mut chunks = Vec::new();
+        let mut remaining = input.trim();
+        while remaining.chars().count() > max_chars {
+            let split_at = split_index_at_or_before(remaining, max_chars);
+            let (head, tail) = remaining.split_at(split_at);
+            let head = head.trim();
+            if !head.is_empty() {
+                chunks.push(head.to_string());
+            }
+            remaining = tail.trim_start();
+        }
+        if !remaining.is_empty() {
+            chunks.push(remaining.to_string());
+        }
+        chunks
+    }
+
+    #[test]
+    fn split_matches_naive_count_semantics() {
+        let inputs = [
+            "",
+            "          ",
+            "exactly=10",  // exactly max (10 chars)
+            "exactly+11c", // max + 1 (11 chars)
+            "one two three four five six seven eight",
+            "emoji 😀😀😀 mixed 🎉 text with multibyte αβγδ chars",
+            "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+            "word   \t\n   with     long    whitespace     runs    here",
+            "αβγδεζηθικλμνξοπρστυφχψω",
+            "a b c d e f g h i j k l m n o p q r s t u v w x y z",
+        ];
+        for input in inputs {
+            assert_eq!(
+                split_tts_text(input, 10),
+                split_tts_text_naive(input, 10),
+                "mismatch for input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_handles_large_input_quickly() {
+        // 500_000-char ASCII with spaces every 10 chars.
+        let mut input = String::with_capacity(500_000);
+        while input.len() < 500_000 {
+            input.push_str("abcdefghi ");
+        }
+        input.truncate(500_000);
+
+        let chunks = split_tts_text(&input, 900);
+        assert_eq!(chunks, split_tts_text_naive(&input, 900));
     }
 }
