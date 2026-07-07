@@ -146,26 +146,35 @@ where
 /// Bridges the per-platform `StatusTray::start(initial, config)` constructors
 /// behind one generic call so `start_tray` stays platform-agnostic.
 trait TrayStart<C>: Sized {
-    fn try_start(initial: UiStatus, config: C) -> Result<Self, String>;
+    fn try_start(initial: UiStatus, config: C) -> Result<Self, codex_voice_ui::UiError>;
 }
 
 #[cfg(target_os = "linux")]
 impl TrayStart<LinuxUiConfig> for StatusTray {
-    fn try_start(initial: UiStatus, config: LinuxUiConfig) -> Result<Self, String> {
+    fn try_start(
+        initial: UiStatus,
+        config: LinuxUiConfig,
+    ) -> Result<Self, codex_voice_ui::UiError> {
         StatusTray::start(initial, config)
     }
 }
 
 #[cfg(target_os = "windows")]
 impl TrayStart<WindowsUiConfig> for StatusTray {
-    fn try_start(initial: UiStatus, config: WindowsUiConfig) -> Result<Self, String> {
+    fn try_start(
+        initial: UiStatus,
+        config: WindowsUiConfig,
+    ) -> Result<Self, codex_voice_ui::UiError> {
         StatusTray::start(initial, config)
     }
 }
 
 #[cfg(target_os = "macos")]
 impl TrayStart<MacOSUiConfig> for StatusTray {
-    fn try_start(initial: UiStatus, config: MacOSUiConfig) -> Result<Self, String> {
+    fn try_start(
+        initial: UiStatus,
+        config: MacOSUiConfig,
+    ) -> Result<Self, codex_voice_ui::UiError> {
         StatusTray::start(initial, config)
     }
 }
