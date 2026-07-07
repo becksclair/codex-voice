@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use codex_voice_codex::{CodexAuthService, CodexTranscriptionClient};
 use codex_voice_core::{
     RecordedAudio, TranscriptionClient, TranscriptionError, TranscriptionResult,
@@ -6,6 +5,41 @@ use codex_voice_core::{
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Errors returned by the transcriber library's public entry points.
+///
+/// The HTTP layer keeps its own `ApiError`; this type covers the non-HTTP
+/// library functions (backend resolution, discovery-file I/O, and the limit
+/// probe) so an app boundary can distinguish a recoverable auth/backend
+/// failure from a fatal filesystem or serialization error without matching on
+/// message text.
+#[derive(Debug, thiserror::Error)]
+pub enum TranscriberError {
+    /// Resolving Codex authentication or constructing a transcription client
+    /// failed.
+    #[error(transparent)]
+    Backend(#[from] TranscriptionError),
+    /// A filesystem operation failed while probing limits or writing the
+    /// discovery file. `context` preserves the operation description that the
+    /// call site would previously have attached via `anyhow` context.
+    #[error("{context}: {source}")]
+    Io {
+        context: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Serializing the discovery document to JSON failed.
+    #[error(transparent)]
+    Serialize(#[from] serde_json::Error),
+    /// Splitting the source audio into chunks with ffmpeg failed during a
+    /// limit probe.
+    #[error("failed to split audio for limit probe: {0}")]
+    Chunking(String),
+    /// A discovery path was malformed (for example, it had no parent
+    /// directory).
+    #[error("{0}")]
+    Discovery(String),
+}
 
 pub mod chunking;
 pub mod client;
@@ -82,7 +116,8 @@ impl TranscriptionClient for RuntimeTranscriptionClient {
     }
 }
 
-pub async fn resolve_transcription_backend() -> Result<ResolvedTranscriptionBackend> {
+pub async fn resolve_transcription_backend(
+) -> Result<ResolvedTranscriptionBackend, TranscriberError> {
     if let Some(local) =
         client::LocalTranscriberClient::discover(DEFAULT_PROBE_TIMEOUT, DEFAULT_RUNTIME_TIMEOUT)
             .await
@@ -111,10 +146,13 @@ pub async fn resolve_transcription_backend() -> Result<ResolvedTranscriptionBack
     })
 }
 
-pub async fn probe_limits(config: ProbeLimitsConfig) -> Result<()> {
+pub async fn probe_limits(config: ProbeLimitsConfig) -> Result<(), TranscriberError> {
     let source_size = tokio::fs::metadata(&config.file)
         .await
-        .with_context(|| format!("failed to stat {}", config.file.display()))?
+        .map_err(|source| TranscriberError::Io {
+            context: format!("failed to stat {}", config.file.display()),
+            source,
+        })?
         .len();
     println!("file: {}", config.file.display());
     println!("source_bytes: {source_size}");
@@ -158,7 +196,7 @@ pub async fn probe_limits(config: ProbeLimitsConfig) -> Result<()> {
     let chunks =
         chunking::split_audio_with_ffmpeg(&config.ffmpeg_binary, &config.file, chunk_seconds, None)
             .await
-            .context("failed to split audio for limit probe")?;
+            .map_err(|error| TranscriberError::Chunking(error.to_string()))?;
     let limit = config.max_chunks.min(chunks.paths.len());
     for (index, path) in chunks.paths.iter().take(limit).enumerate() {
         let bytes = tokio::fs::metadata(path)
@@ -211,5 +249,31 @@ async fn probe_one(
             };
             println!("attempt={label} bytes={bytes} status=error error={truncated}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_error_display_includes_context_and_source() {
+        let error = TranscriberError::Io {
+            context: "failed to stat /tmp/recording.wav".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "failed to stat /tmp/recording.wav: no such file"
+        );
+    }
+
+    #[test]
+    fn chunking_error_display_preserves_probe_context() {
+        let error = TranscriberError::Chunking("ffmpeg failed with status 1".to_string());
+        assert_eq!(
+            error.to_string(),
+            "failed to split audio for limit probe: ffmpeg failed with status 1"
+        );
     }
 }

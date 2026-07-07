@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -9,6 +8,8 @@ use std::{
 };
 
 use codex_voice_core::fs::{set_owner_only_directory_permissions, write_private_file_atomic};
+
+use crate::TranscriberError;
 
 const TOKEN_ENV: &str = "CODEX_VOICE_TRANSCRIBER_TOKEN";
 const URL_ENV: &str = "CODEX_VOICE_TRANSCRIBER_URL";
@@ -128,22 +129,30 @@ pub(super) fn read_discovery_file() -> Option<TranscriberDiscoveryFile> {
     serde_json::from_str(&text).ok()
 }
 
-pub fn write_discovery_file(discovery: &TranscriberDiscoveryFile) -> Result<()> {
+pub fn write_discovery_file(discovery: &TranscriberDiscoveryFile) -> Result<(), TranscriberError> {
     let path = discovery_path();
-    let parent = path
-        .parent()
-        .context("transcriber discovery path has no parent")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
-    set_owner_only_directory_permissions(parent)
-        .with_context(|| format!("failed to restrict {}", parent.display()))?;
+    let parent = path.parent().ok_or_else(|| {
+        TranscriberError::Discovery("transcriber discovery path has no parent".to_string())
+    })?;
+    std::fs::create_dir_all(parent).map_err(|source| TranscriberError::Io {
+        context: format!("failed to create {}", parent.display()),
+        source,
+    })?;
+    set_owner_only_directory_permissions(parent).map_err(|source| TranscriberError::Io {
+        context: format!("failed to restrict {}", parent.display()),
+        source,
+    })?;
     let tmp_path = path.with_extension(format!(
         "json.{}.tmp",
         hex::encode(rand::random::<[u8; 8]>())
     ));
     let text = serde_json::to_string_pretty(discovery)?;
-    write_private_file_atomic(&path, &tmp_path, text.as_bytes())
-        .with_context(|| format!("failed to write discovery file {}", path.display()))?;
+    write_private_file_atomic(&path, &tmp_path, text.as_bytes()).map_err(|source| {
+        TranscriberError::Io {
+            context: format!("failed to write discovery file {}", path.display()),
+            source,
+        }
+    })?;
     Ok(())
 }
 

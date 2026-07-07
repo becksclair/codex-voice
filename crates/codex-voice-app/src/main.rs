@@ -73,7 +73,9 @@ async fn main() -> Result<()> {
         },
         Command::Transcriber { command } => match command {
             TranscriberCommand::ProbeLimits(args) => {
-                codex_voice_transcriber::probe_limits(args.try_into()?).await
+                codex_voice_transcriber::probe_limits(args.try_into()?)
+                    .await
+                    .map_err(Into::into)
             }
         },
     }

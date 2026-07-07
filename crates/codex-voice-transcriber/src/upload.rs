@@ -1,4 +1,3 @@
-use anyhow::Result;
 use axum::extract::Multipart;
 use codex_voice_core::TranscriptionError;
 use std::io::Write;
