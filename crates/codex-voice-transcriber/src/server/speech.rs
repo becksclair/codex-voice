@@ -94,7 +94,10 @@ async fn config_fingerprint(path: &FsPath) -> Option<ConfigFingerprint> {
     })
 }
 
-pub(crate) async fn reload_tts_config_once(tts: &Arc<RwLock<TtsServiceState>>, path: &FsPath) -> Result<()> {
+pub(crate) async fn reload_tts_config_once(
+    tts: &Arc<RwLock<TtsServiceState>>,
+    path: &FsPath,
+) -> Result<()> {
     let path = path.to_path_buf();
     let (speech, config) = tokio::task::spawn_blocking(move || {
         let loader = ReadAloudConfigLoader::new(path);
@@ -140,7 +143,10 @@ pub(crate) fn web_speech_client(state: &ServiceState) -> Result<Arc<dyn SpeechCl
         .ok_or_else(|| ApiError::service_unavailable("TTS service is not configured"))
 }
 
-pub(crate) async fn speech(State(state): State<ServiceState>, request: Request) -> Result<Response, ApiError> {
+pub(crate) async fn speech(
+    State(state): State<ServiceState>,
+    request: Request,
+) -> Result<Response, ApiError> {
     authorize(request.headers(), &state.auth)?;
 
     let speech_client = state

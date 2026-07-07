@@ -446,7 +446,9 @@ fn web_app_body() -> String {
         )
 }
 
-pub(crate) async fn web_config(State(state): State<ServiceState>) -> Result<impl IntoResponse, ApiError> {
+pub(crate) async fn web_config(
+    State(state): State<ServiceState>,
+) -> Result<impl IntoResponse, ApiError> {
     let config = state
         .tts
         .read()
