@@ -56,7 +56,9 @@ pub(super) fn repair_sentence_boundary_bare_cues(
         return prepared.to_string();
     }
 
-    let original_lower = original.to_ascii_lowercase();
+    // `phrases` can include user palette phrases with non-ASCII letters, so
+    // fold with full Unicode case rules to match `bare_performance_cue_phrases`.
+    let original_lower = original.to_lowercase();
     let mut repaired = prepared.to_string();
     for _ in 0..8 {
         let Some((start, phrase_len, after_len, phrase)) =
@@ -94,11 +96,16 @@ pub(super) fn find_sentence_boundary_bare_cue(
             if original_lower.contains(phrase) {
                 continue;
             }
-            let Some(after) = strip_ascii_prefix_ignore_case(rest, phrase) else {
+            let Some(after) = strip_prefix_ignore_case(rest, phrase) else {
                 continue;
             };
+            // The matched prefix length in `rest` can differ from
+            // `phrase.len()` under Unicode case folding (e.g. some
+            // characters expand when lowercased), so derive it from the
+            // actual match rather than assuming byte-length parity.
+            let matched_len = rest.len() - after.len();
             let after_len = cue_trailing_delimiter_len(after)?;
-            return Some((start, phrase.len(), after_len, phrase.clone()));
+            return Some((start, matched_len, after_len, phrase.clone()));
         }
     }
     None

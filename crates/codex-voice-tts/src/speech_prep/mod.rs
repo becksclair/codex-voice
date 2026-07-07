@@ -702,15 +702,15 @@ fn cue_trailing_delimiter_len(value: &str) -> Option<usize> {
 }
 
 fn looks_like_bare_performance_cue(cue: &str, tag_palette: &[String]) -> bool {
-    let lower = cue.to_ascii_lowercase();
+    // Palette phrases are user-supplied and may contain non-ASCII letters
+    // (e.g. "café"), so fold with full Unicode case rules rather than
+    // ASCII-only lowercasing.
+    let lower = cue.to_lowercase();
     let words = words_without_tags(cue);
     if words.is_empty() || words.len() > 5 {
         return false;
     }
-    if tag_palette
-        .iter()
-        .any(|tag| tag.eq_ignore_ascii_case(lower.as_str()))
-    {
+    if tag_palette.iter().any(|tag| tag.to_lowercase() == lower) {
         return true;
     }
 
@@ -825,7 +825,7 @@ fn bare_performance_cue_phrases(tag_palette: &[String]) -> Vec<String> {
         tag_palette
             .iter()
             .filter(|tag| looks_like_bare_performance_cue(tag, tag_palette))
-            .map(|tag| tag.to_ascii_lowercase()),
+            .map(|tag| tag.to_lowercase()),
     );
     phrases.sort_by_key(|phrase| std::cmp::Reverse(phrase.len()));
     phrases.dedup();
@@ -849,6 +849,42 @@ fn strip_ascii_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'
     } else {
         None
     }
+}
+
+/// Unicode-aware case-insensitive prefix strip.
+///
+/// User-supplied palette phrases (e.g. from `read-aloud-defaults.json`) can
+/// contain non-ASCII letters, so a plain byte-length prefix strip is not
+/// safe: `char::to_lowercase()` can change the byte (and even char) length
+/// of a folded string (e.g. Turkish `İ` folds to the two-character `i̇`).
+/// This walks both strings char-by-char, comparing folded chars, and only
+/// ever returns a slice at a boundary derived from `value.char_indices()`,
+/// so the result is always char-boundary-safe.
+fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    if prefix.is_empty() {
+        return Some(value);
+    }
+    if prefix.is_ascii() {
+        // Fast path: byte-length prefix stripping is safe when the prefix is
+        // pure ASCII, since ASCII case folding never changes byte length.
+        return strip_ascii_prefix_ignore_case(value, prefix);
+    }
+
+    let prefix_folded: Vec<char> = prefix.chars().flat_map(char::to_lowercase).collect();
+    let mut matched = 0usize;
+    for (index, ch) in value.char_indices() {
+        let end = index + ch.len_utf8();
+        for folded in ch.to_lowercase() {
+            if matched >= prefix_folded.len() || prefix_folded[matched] != folded {
+                return None;
+            }
+            matched += 1;
+        }
+        if matched == prefix_folded.len() {
+            return Some(&value[end..]);
+        }
+    }
+    None
 }
 
 fn validate_style_instruction_output(original: &str, instruction: &str) -> SpeechResult<()> {
@@ -1046,6 +1082,42 @@ mod tests {
         );
         // Shorter values are still a clean non-match.
         assert_eq!(strip_ascii_prefix_ignore_case("ab", "abc"), None);
+    }
+
+    #[test]
+    fn strip_prefix_ignore_case_matches_non_ascii_palette_phrases() {
+        // Non-ASCII palette phrases (e.g. user-configured "café") must
+        // case-fold correctly rather than silently under-matching.
+        assert_eq!(
+            strip_prefix_ignore_case("Café au lait", "café"),
+            Some(" au lait")
+        );
+        assert_eq!(
+            strip_prefix_ignore_case("CAFÉ au lait", "café"),
+            Some(" au lait")
+        );
+        assert_eq!(strip_prefix_ignore_case("Latte au lait", "café"), None);
+    }
+
+    #[test]
+    fn strip_prefix_ignore_case_handles_folding_that_changes_byte_length() {
+        // Latin capital letter sharp S (U+1E9E, 3 bytes in UTF-8) lowercases
+        // to sharp S (U+00DF, 2 bytes in UTF-8), so the matched prefix
+        // length in the value differs from the phrase's byte length. This
+        // must not panic and must not mis-slice at a non-boundary.
+        let value = "\u{1E9E} nights";
+        let result = strip_prefix_ignore_case(value, "\u{00DF}");
+        assert_eq!(result, Some(" nights"));
+    }
+
+    #[test]
+    fn strip_prefix_ignore_case_ascii_behavior_is_unchanged() {
+        assert_eq!(strip_prefix_ignore_case("ab\u{2026}cdef", "abc"), None);
+        assert_eq!(
+            strip_prefix_ignore_case("Tender words", "tender"),
+            Some(" words")
+        );
+        assert_eq!(strip_prefix_ignore_case("ab", "abc"), None);
     }
 
     fn default_test_palette() -> Vec<String> {
