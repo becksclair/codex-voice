@@ -59,6 +59,11 @@ description = "Clippy with warnings denied"
 dir = "{{cwd}}"
 run = "cargo clippy --workspace --all-targets -- -D warnings"
 
+[tasks.test-web]
+description = "Run the Playwright web PWA behavioral suite (requires bun + chromium)"
+dir = "{{cwd}}"
+run = "cd webtests && bunx playwright test"
+
 [tasks.verify]
 description = "Run all verification gates"
 depends = ["fmt", "check", "test", "lint"]

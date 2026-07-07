@@ -1,0 +1,11 @@
+{
+  "name": "codex-voice-webtests",
+  "private": true,
+  "description": "Playwright behavioral test suite for the embedded Codex Voice web PWA.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0"
+  }
+}
