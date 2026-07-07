@@ -1,5 +1,13 @@
+mod prompts;
+mod shorten;
+mod tag_repair;
+
 use codex_voice_core::{SpeechError, SpeechResult};
 use reqwest::Client;
+
+use prompts::build_prompt;
+use shorten::{extractive_shorten_to_fit, shorten_or_extract};
+use tag_repair::{repair_bare_leading_performance_cue, validate_performance_tags_output};
 
 use crate::codex_llm::CodexLlmClient;
 use crate::config::{
@@ -510,114 +518,6 @@ fn normalize_speech_prep_model_name(provider: SpeechPrepProviderKind, model: &st
     }
 }
 
-fn build_prompt(
-    text: &str,
-    max_length: usize,
-    mode: SpeechPrepMode,
-    strategy: SpeechPrepStrategy,
-    tag_palette: &[String],
-    context: &SpeechPrepContext<'_>,
-) -> String {
-    match mode {
-        SpeechPrepMode::Shorten => format!(
-            "Prepare this text for text-to-speech playback. Preserve the user's meaning, key facts, decisions, and the full requested message. Shorten only when necessary to stay under {max_length} characters. Keep the prepared text at least {min_length} characters unless the source text itself is shorter. Do not collapse prose into a short abstract. Remove repetition, code blocks, URLs, file paths, and formatting noise. Return only natural speakable prose, no markdown, no preamble, no labels.\n\nText:\n\"\"\"{text}\"\"\"",
-            min_length = shorten_min_output_chars(text.chars().count(), max_length)
-        ),
-        SpeechPrepMode::PerformanceTags => match strategy {
-            SpeechPrepStrategy::InlineTags => {
-                build_performance_tags_prompt(text, max_length, tag_palette, context)
-            }
-            SpeechPrepStrategy::StyleInstruction => {
-                build_style_instruction_prompt(text, STYLE_INSTRUCTION_MAX_CHARS, context)
-            }
-            SpeechPrepStrategy::Off => String::new(),
-        },
-    }
-}
-
-fn build_performance_tags_prompt(
-    text: &str,
-    max_length: usize,
-    tag_palette: &[String],
-    context: &SpeechPrepContext<'_>,
-) -> String {
-    let mut prompt = String::with_capacity(text.len() + 1600);
-    prompt.push_str("You are a TTS performance tagger. Do not rewrite the text. Do not summarize. Insert concise emotion/performance tags only where they improve delivery. Use tags sparingly. Keep tags local to the phrase or paragraph they affect. Prefer natural performance: warm, amused, teasing, soft, relieved, sleepy, serious, whispering, laughing, affectionate. Never add tags that contradict the text. Return only the tagged text. Every performance cue you add must be enclosed in square brackets, like [softly] or [sigh of relief]. If no cue improves delivery, return the original text unchanged.\n");
-    prompt.push_str("Use inline bracketed audio tags from this palette when they fit: ");
-    for (index, tag) in tag_palette.iter().enumerate() {
-        if index > 0 {
-            prompt.push_str(", ");
-        }
-        prompt.push('[');
-        prompt.push_str(tag);
-        prompt.push(']');
-    }
-    prompt.push_str(". Closely related performable cues are allowed when the palette does not fit, but they must also be square-bracketed. Keep the result under ");
-    prompt.push_str(&max_length.to_string());
-    prompt.push_str(" characters.\n\n");
-
-    push_delivery_context(&mut prompt, context);
-
-    prompt.push_str("Text:\n\"\"\"");
-    prompt.push_str(text);
-    prompt.push_str("\"\"\"");
-    prompt
-}
-
-fn build_style_instruction_prompt(
-    text: &str,
-    max_instruction_length: usize,
-    context: &SpeechPrepContext<'_>,
-) -> String {
-    let mut prompt = String::with_capacity(text.len() + 1400);
-    prompt.push_str("You are a TTS delivery director for Google Gemini speech synthesis. Do not rewrite, summarize, quote, or repeat the text. Return only a 1-3 sentence natural-language delivery instruction for how the voice should perform this exact message: emotional state, pacing, intimacy, tension, hesitation, warmth, and release. Keep it concrete and speakable as direction, not content. Never include bracket tags. Keep the instruction under ");
-    prompt.push_str(&max_instruction_length.to_string());
-    prompt.push_str(" characters.\n\n");
-    push_delivery_context(&mut prompt, context);
-    prompt.push_str("Text to direct, not rewrite:\n\"\"\"");
-    prompt.push_str(text);
-    prompt.push_str("\"\"\"");
-    prompt
-}
-
-fn push_delivery_context(prompt: &mut String, context: &SpeechPrepContext<'_>) {
-    if let Some(persona) = context.persona {
-        prompt.push_str("Delivery context:\n");
-        prompt.push_str("- persona: ");
-        prompt.push_str(&persona.label);
-        prompt.push_str(" - ");
-        prompt.push_str(&persona.description);
-        prompt.push('\n');
-        if let Some(scene) = &persona.prompt_scene {
-            prompt.push_str("- scene: ");
-            prompt.push_str(scene);
-            prompt.push('\n');
-        }
-        if let Some(style) = &persona.prompt_style {
-            prompt.push_str("- style: ");
-            prompt.push_str(style);
-            prompt.push('\n');
-        }
-        if let Some(pacing) = &persona.prompt_pacing {
-            prompt.push_str("- pace: ");
-            prompt.push_str(pacing);
-            prompt.push('\n');
-        }
-        for constraint in &persona.prompt_constraints {
-            prompt.push_str("- constraint: ");
-            prompt.push_str(constraint);
-            prompt.push('\n');
-        }
-        prompt.push('\n');
-    }
-
-    if let Some(instructions) = context.instructions {
-        prompt.push_str("Additional delivery hints:\n");
-        prompt.push_str(instructions);
-        prompt.push_str("\n\n");
-    }
-}
-
 fn prepare_input_for_prompt(text: &str, max_input_length: usize) -> SpeechResult<String> {
     let sanitized = sanitize_for_tts(text, usize::MAX)?;
     Ok(truncate_chars(&sanitized, max_input_length))
@@ -640,33 +540,6 @@ fn performance_tags_max_output_tokens(
 
 fn shorten_min_output_chars(input_chars: usize, max_length: usize) -> usize {
     input_chars.min(max_length).min(MIN_SHORTEN_OUTPUT_CHARS)
-}
-
-fn validate_shorten_output(
-    input_chars: usize,
-    prepared: &str,
-    max_length: usize,
-) -> SpeechResult<()> {
-    let min_chars = shorten_min_output_chars(input_chars, max_length);
-    let prepared_chars = prepared.chars().count();
-    if prepared_chars < min_chars {
-        return Err(SpeechError::Request(format!(
-            "speech prep shortened text below minimum: {prepared_chars} below {min_chars}"
-        )));
-    }
-    Ok(())
-}
-
-fn shorten_or_extract(input: &str, prepared: &str, max_length: usize) -> String {
-    let shortened = truncate_chars(prepared, max_length);
-    if validate_shorten_output(input.chars().count(), &shortened, max_length).is_ok() {
-        return shortened;
-    }
-    extractive_shorten_to_fit(input, max_length)
-}
-
-fn extractive_shorten_to_fit(input: &str, max_length: usize) -> String {
-    truncate_chars(input, max_length)
 }
 
 fn fallback_performance_tag<'a>(text: &str, tag_palette: &'a [String]) -> Option<&'a str> {
@@ -753,51 +626,6 @@ fn fallback_performance_tag<'a>(text: &str, tag_palette: &'a [String]) -> Option
         .map(|(tag, _)| *tag)
 }
 
-fn validate_performance_tags_output(original: &str, prepared: &str) -> SpeechResult<()> {
-    let tags = collect_bracket_tags(prepared);
-    if tags.is_empty() && original.trim() != prepared.trim() {
-        return Err(SpeechError::Request(
-            "speech prep added performance direction without square-bracket tags".into(),
-        ));
-    }
-    let word_count = words_without_tags(original).len().max(1);
-    let max_tags = word_count.div_ceil(40).clamp(2, 16);
-    if tags.len() > max_tags {
-        return Err(SpeechError::Request(format!(
-            "speech prep returned too many performance tags: {} above max {}",
-            tags.len(),
-            max_tags
-        )));
-    }
-
-    let preserve = preservation_ratio(original, prepared);
-    let original_words = words_without_tags(original);
-    let prepared_words = words_without_tags(prepared);
-    let tail_preserved = original_words
-        .last()
-        .is_none_or(|tail| prepared_words.iter().any(|word| word == tail));
-    if preserve < 0.97 || !tail_preserved {
-        return Err(SpeechError::Request(format!(
-            "speech prep changed text too much: preservation ratio {:.3}",
-            preserve
-        )));
-    }
-    Ok(())
-}
-
-fn repair_bare_leading_performance_cue(
-    original: &str,
-    prepared: &str,
-    tag_palette: &[String],
-) -> String {
-    if original.trim() == prepared.trim() {
-        return prepared.to_string();
-    }
-
-    let prepared = repair_leading_bare_cue(original, prepared, tag_palette);
-    repair_sentence_boundary_bare_cues(original, &prepared, tag_palette)
-}
-
 fn repair_leading_bare_cue(original: &str, prepared: &str, tag_palette: &[String]) -> String {
     let trimmed = prepared.trim_start();
     let leading_ws_len = prepared.len().saturating_sub(trimmed.len());
@@ -826,40 +654,6 @@ fn repair_leading_bare_cue(original: &str, prepared: &str, tag_palette: &[String
     }
 }
 
-fn repair_sentence_boundary_bare_cues(
-    original: &str,
-    prepared: &str,
-    tag_palette: &[String],
-) -> String {
-    let phrases = bare_performance_cue_phrases(tag_palette);
-    if phrases.is_empty() {
-        return prepared.to_string();
-    }
-
-    let original_lower = original.to_ascii_lowercase();
-    let mut repaired = prepared.to_string();
-    for _ in 0..8 {
-        let Some((start, phrase_len, after_len, phrase)) =
-            find_sentence_boundary_bare_cue(&repaired, &phrases, &original_lower)
-        else {
-            break;
-        };
-        let candidate = format!(
-            "{}[{}] {}",
-            &repaired[..start],
-            phrase,
-            repaired[start + phrase_len + after_len..].trim_start()
-        );
-        if preservation_ratio(original, &candidate) >= 0.97 {
-            repaired = candidate;
-        } else {
-            break;
-        }
-    }
-
-    repaired
-}
-
 fn preserved_text_start(original: &str, prepared: &str) -> Option<usize> {
     let original_words = words_without_tags(original);
     let first_words = original_words.iter().take(3).collect::<Vec<_>>();
@@ -879,46 +673,6 @@ fn preserved_text_start(original: &str, prepared: &str) -> Option<usize> {
             })
         })
         .map(|(_, (_, start, _))| *start)
-}
-
-fn find_sentence_boundary_bare_cue(
-    text: &str,
-    phrases: &[String],
-    original_lower: &str,
-) -> Option<(usize, usize, usize, String)> {
-    for (start, _) in text.char_indices() {
-        if !is_sentence_boundary(text, start) || is_inside_bracket_tag(text, start) {
-            continue;
-        }
-        let rest = &text[start..];
-        for phrase in phrases {
-            if original_lower.contains(phrase) {
-                continue;
-            }
-            let Some(after) = strip_ascii_prefix_ignore_case(rest, phrase) else {
-                continue;
-            };
-            let after_len = cue_trailing_delimiter_len(after)?;
-            return Some((start, phrase.len(), after_len, phrase.clone()));
-        }
-    }
-    None
-}
-
-fn is_sentence_boundary(text: &str, index: usize) -> bool {
-    if index == 0 {
-        return true;
-    }
-    let prefix = &text[..index];
-    let mut chars = prefix.chars().rev();
-    let mut skipped_newline = false;
-    while matches!(chars.clone().next(), Some(ch) if ch.is_whitespace()) {
-        skipped_newline |= chars.next() == Some('\n');
-    }
-    if skipped_newline {
-        return true;
-    }
-    matches!(chars.next(), Some('.') | Some('!') | Some('?') | Some('\n'))
 }
 
 fn is_inside_bracket_tag(text: &str, index: usize) -> bool {
@@ -1271,6 +1025,7 @@ fn truncate_chars(text: &str, max_length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::shorten::validate_shorten_output;
     use super::*;
 
     fn default_test_palette() -> Vec<String> {
