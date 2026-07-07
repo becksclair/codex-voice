@@ -74,6 +74,34 @@ dir = "{{cwd}}"
 depends = ["web-build"]
 run = "cd webtests && LIVE_TTS=1 bunx playwright test tests/live.spec.ts"
 
+[tasks.serve]
+description = "Run the audio server in the foreground (default bind 127.0.0.1:3845)"
+dir = "{{cwd}}"
+run = "cargo run -p codex-voice-app --bin codex-voice -- server"
+
+[tasks.web-dev]
+description = "Run the Vite dev server with HMR (proxies /web APIs to CODEX_VOICE_BACKEND, default 127.0.0.1:3845)"
+dir = "{{cwd}}"
+depends = ["web-install"]
+run = "cd web && bun run dev"
+
+[tasks.dev]
+description = "Full-stack dev: audio server + Vite dev server with HMR (Ctrl-C stops both)"
+dir = "{{cwd}}"
+run = '''
+set -eu
+trap 'kill 0' INT TERM EXIT
+cargo run -q -p codex-voice-app --bin codex-voice -- server &
+(cd web && bun install --frozen-lockfile && bun run dev) &
+wait
+'''
+
+[tasks.web-fmt]
+description = "Format the web frontend in place (oxfmt)"
+dir = "{{cwd}}"
+depends = ["web-install"]
+run = "cd web && bun run fmt"
+
 [tasks.web-install]
 description = "Install frontend dependencies (web/)"
 dir = "{{cwd}}"

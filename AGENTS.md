@@ -33,9 +33,40 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"
 - Update `README.md` and `ROADMAP.md` when command contracts change.
 - Preserve Linux-first scope until portal hotkey/paste proof is complete.
 
-## JS/Web Tooling Conventions
+## Web Frontend (`web/`)
 
-The standalone web frontend lives at `web/` (see `web/README.md`). Use `bun` as the package manager — never `npm` or `npx`; use `bunx` for one-off executables. Lint and format with oxlint and oxfmt, run unit tests with vitest, and keep TypeScript in strict mode. `mise run verify` includes the web gates (`web-check` = oxlint + oxfmt + tsc, and `web-test` = vitest), so a green `verify` covers the frontend as well as the Rust workspace.
+The TTS web PWA is a standalone React app at `web/`, decoupled from the Rust service. Deep reference: `web/README.md` (stack decisions, PWA/manifest details, route-shadowing constraint) and `web/PERFORMANCE.md` (bundle budget rationale, measured numbers).
+
+### Architecture in one paragraph
+
+`bun run build` in `web/` produces `web/dist` (content-hashed assets under `dist/assets/`). The transcriber crate's `build.rs` copies `web/dist` into `$OUT_DIR` and embeds it via `include_dir!`, so the release binary is self-contained. When `web/dist` is absent, a stub page is embedded instead and cargo prints a warning — plain cargo builds never require bun, and dist-content tests skip themselves. At runtime, `codex-voice server --web-dist <dir>` serves a dist directory from disk (fully shadowing the embedded copy), which allows deploying web updates without rebuilding the Rust binary. The JSON API surface (`/web/config`, `/web/speech`, `/web/speech-jobs*`) is served by Rust and is independent of the asset pipeline.
+
+### Using it
+
+| Command | What it does |
+| --- | --- |
+| `mise run dev` | Full-stack development: audio server + Vite dev server with HMR; Ctrl-C stops both |
+| `mise run web-dev` | Vite dev server only (HMR at `http://localhost:5173/web/`; proxies `/web` APIs to `CODEX_VOICE_BACKEND`, default `http://127.0.0.1:3845`) |
+| `mise run serve` | Audio server only, foreground, default bind `127.0.0.1:3845` |
+| `mise run web-build` | Production build into `web/dist` |
+| `mise run web-check` | oxlint + oxfmt `--check` + `tsc --noEmit` |
+| `mise run web-fmt` | Format in place with oxfmt |
+| `mise run web-test` | vitest unit/component suite |
+| `mise run test-web` | Playwright e2e suite (builds the frontend first, spawns the real Rust server) |
+| `mise run test-web-live` | Single-run live TTS smoke — **paid** (~2k characters); needs real `~/.codex/read-aloud-defaults.json`; ElevenLabs leg opt-in via `LIVE_TTS_ELEVENLABS=1` |
+| `mise run setup` | Builds the frontend, then the release binary (embedding it), installs, and enables user services |
+
+Typical development loop: `mise run dev`, edit under `web/src/`, changes hot-reload instantly; the Rust server only needs a restart when Rust code changes. To point HMR at the deployed Tailscale instance instead of a local server: `CODEX_VOICE_BACKEND=http://<tailscale-ip>:3845 mise run web-dev`.
+
+### Developing it
+
+- Package manager is `bun` — never `npm` or `npx`; use `bunx` for one-off executables. Lint/format with oxlint/oxfmt, unit-test with vitest, TypeScript stays strict.
+- Layout: pure logic in `web/src/lib/` (storage, config, settings, theme, synthesis, prep, streaming, generation — DOM-free and unit-tested), hooks in `web/src/hooks/`, components in `web/src/components/`. Keep new logic in `lib/` with tests; keep components thin.
+- The React Compiler is enabled: do not add `useMemo`/`useCallback`/`memo` for performance — write plain code and let the compiler memoize.
+- Styling is Tailwind 4 utilities plus a small themed-token layer in `web/src/index.css`. Theming works via `data-theme` on `<html>` (set pre-paint by an inline script in `index.html`). The CSS custom properties read by JS at runtime (e.g. `--waveform-*`) are load-bearing names — do not rename.
+- **Frozen test contracts** (Playwright and component tests assert on these; do not rename): the 23 element IDs (`#text`, `#generate`, `#count`, `#paste`, `#settings-toggle`, `#generate-on-paste`, `#theme`, `#waveform`, …), the localStorage keys `codex-voice.web.{text,config.v1,settings.v1,generation.v1}`, and the IndexedDB names `codex-voice-web-audio`/`generated`/`last`.
+- An initial-load JS budget (80 kB gzip) is enforced by `bun run build`; if a change trips it, prefer moving code behind the generation-boundary dynamic import (see `web/PERFORMANCE.md`) over raising the budget.
+- Cache policy is structural: only content-hashed `/web/assets/*` paths are immutable; keep long-lived assets under the hashed `assets/` directory.
 
 ## Security & Secrets
 
@@ -61,6 +92,7 @@ The standalone web frontend lives at `web/` (see `web/README.md`). Use `bun` as 
 - Transcriber service/client/discovery: `crates/codex-voice-transcriber/` -> [see AGENTS.md](crates/codex-voice-transcriber/AGENTS.md)
 - Platform adapters: `crates/codex-voice-platform/` -> [see AGENTS.md](crates/codex-voice-platform/AGENTS.md)
 - Native tray/HUD/settings surfaces for Linux, macOS, and Windows: `crates/codex-voice-ui/` -> [see AGENTS.md](crates/codex-voice-ui/AGENTS.md)
+- Web frontend (React PWA): `web/` -> [see README.md](web/README.md); e2e suite: `webtests/` -> [see README.md](webtests/README.md)
 - Architecture plan: `ROADMAP.md` (see `docs/execplan-rust-native-cross-platform.md.ARCHIVED` for original detailed research)
 
 ### Quick Find Commands
@@ -79,7 +111,7 @@ find crates -name '*test*' -o -name '*.rs'
 
 - Relevant crate-level checks pass, then root `cargo fmt --check`, `cargo check --workspace`, and `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings` after non-trivial Rust changes.
-- After web frontend changes, run the web gates (`mise run web-check` and `mise run web-test`); `mise run verify` runs the full Rust + web gate set.
+- After web frontend changes, run the web gates (`mise run web-check` and `mise run web-test`); `mise run verify` runs the full Rust + web gate set. For behavioral or DOM changes, also run `mise run test-web` (Playwright).
 - After modifying any installed/runtime service behavior, rebuild and restart the affected user services before marking the task complete, then verify the restarted service is healthy.
 - For Linux runtime changes, run `doctor linux-portals` and the 1-second `doctor audio` smoke when relevant.
 - For TTS changes, run `doctor tts` with a short test phrase.

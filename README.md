@@ -119,7 +119,8 @@ the running service at it without recompiling `codex-voice`.
 
 ### Development
 
-Run the backend and the Vite dev server side by side:
+Run `mise run dev` for the one-command full stack (audio server + Vite dev
+server with HMR; Ctrl-C stops both), or run the two halves side by side:
 
 ```bash
 # terminal 1 — backend (default 127.0.0.1:3845)
@@ -131,11 +132,13 @@ cd web && bun run dev
 ```
 
 Then browse http://localhost:5173/web/. From the repo root, the mise tasks
-`web-install`, `web-build`, `web-check` (oxlint + oxfmt + tsc), and `web-test`
-(vitest) wrap the frontend toolchain; `mise run verify` includes `web-check`
-and `web-test`, `mise run test-web` runs the Playwright suite against a freshly
-built frontend, and `mise run setup` builds the frontend before the release
-binary.
+`web-dev`, `web-install`, `web-build`, `web-check` (oxlint + oxfmt + tsc),
+`web-test` (vitest), and `web-fmt` wrap the frontend toolchain, and `serve`
+runs the backend alone; `mise run verify` includes `web-check` and `web-test`,
+`mise run test-web` runs the Playwright suite against a freshly built frontend,
+`mise run test-web-live` runs the paid single-run live TTS smoke, and
+`mise run setup` builds the frontend before the release binary. The full
+command table lives in the "Web Frontend" section of `AGENTS.md`.
 
 `/web/config` and the `/web/speech*` routes are deliberately unauthenticated
 so the PWA can call them without a bearer token; the trust boundary is

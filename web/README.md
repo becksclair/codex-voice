@@ -46,7 +46,13 @@ workbox and the React Compiler.
 
 ## Dev workflow
 
-Run the Rust backend and the Vite dev server side by side:
+The one-command path from the repo root:
+
+```bash
+mise run dev    # audio server + Vite dev server with HMR; Ctrl-C stops both
+```
+
+Or run the Rust backend and the Vite dev server side by side:
 
 ```bash
 # terminal 1 — backend (default 127.0.0.1:3845)
@@ -71,8 +77,10 @@ CODEX_VOICE_BACKEND=http://127.0.0.1:9000 bun run dev
 - `bun run test` — vitest run.
 - `bun run fmt` — oxfmt write.
 
-From the repo root, the mise tasks `web-build`, `web-check`, and `web-test` wrap
-these.
+From the repo root, the mise tasks wrap these: `dev` (full stack), `web-dev`,
+`web-build`, `web-check`, `web-test`, and `web-fmt`, plus `serve` (backend only),
+`test-web` (Playwright e2e), and `test-web-live` (paid live TTS smoke). See the
+"Web Frontend" section of the root `AGENTS.md` for the full command table.
 
 ## PWA / manifests
 
