@@ -48,6 +48,9 @@ self.addEventListener('activate', (event) => {
             .map((key) => caches.delete(key))
         )
       )
+      // Cache cleanup is best-effort: activate fires once per worker version,
+      // so a rejected delete must never block the unregister + reload below.
+      .catch(() => {})
       .then(() => self.registration.unregister())
       .then(() => self.clients.matchAll({ type: 'window' }))
       .then((clients) => {
