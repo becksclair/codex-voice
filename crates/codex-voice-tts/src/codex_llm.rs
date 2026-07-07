@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -6,6 +7,7 @@ use codex_voice_core::{SpeechError, SpeechResult};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -16,6 +18,9 @@ pub struct CodexLlmClient {
     client: Client,
     auth_file: PathBuf,
     base_url: String,
+    /// Serializes token refreshes so concurrent callers that both observe an
+    /// expired access token do not each hit the refresh endpoint.
+    refresh_guard: Arc<Mutex<()>>,
 }
 
 impl CodexLlmClient {
@@ -27,6 +32,7 @@ impl CodexLlmClient {
             client,
             auth_file,
             base_url: normalize_codex_base_url(&base_url),
+            refresh_guard: Arc::new(Mutex::new(())),
         })
     }
 
@@ -130,14 +136,25 @@ impl CodexLlmClient {
     }
 
     async fn tokens(&self, force_refresh: bool) -> SpeechResult<CodexAuthTokens> {
-        let auth_file = self.auth_file.clone();
-        let payload = tokio::task::spawn_blocking(move || read_auth_file(&auth_file))
-            .await
-            .map_err(|error| SpeechError::Auth(format!("auth read task failed: {error}")))??;
+        let payload = self.read_auth_payload().await?;
         let tokens = extract_tokens(&payload)?;
         if !force_refresh && !access_token_needs_refresh(&tokens.access_token) {
             return Ok(tokens);
         }
+
+        // Serialize refreshes: only one caller performs the refresh + write at a
+        // time. The fast path above stays unlocked.
+        let _guard = self.refresh_guard.lock().await;
+
+        // Double-checked locking: a concurrent refresh may have already produced
+        // fresh tokens while we waited for the guard. Re-read and re-check before
+        // spending a second network round-trip.
+        let payload = self.read_auth_payload().await?;
+        let tokens = extract_tokens(&payload)?;
+        if !force_refresh && !access_token_needs_refresh(&tokens.access_token) {
+            return Ok(tokens);
+        }
+
         let refreshed = refresh_tokens(&self.client, &payload, &tokens.refresh_token).await?;
         let result_tokens = extract_tokens(&refreshed)?;
         let auth_file = self.auth_file.clone();
@@ -145,6 +162,13 @@ impl CodexLlmClient {
             .await
             .map_err(|error| SpeechError::Auth(format!("auth write task failed: {error}")))??;
         Ok(result_tokens)
+    }
+
+    async fn read_auth_payload(&self) -> SpeechResult<Value> {
+        let auth_file = self.auth_file.clone();
+        tokio::task::spawn_blocking(move || read_auth_file(&auth_file))
+            .await
+            .map_err(|error| SpeechError::Auth(format!("auth read task failed: {error}")))?
     }
 }
 
@@ -469,6 +493,46 @@ mod tests {
 
         assert_eq!(body["model"], "gpt-5.3-codex-spark");
         assert_eq!(body["reasoning"]["effort"], "medium");
+    }
+
+    fn unexpired_access_token() -> String {
+        let exp = chrono_like_timestamp() + 3600;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json!({ "exp": exp })).unwrap());
+        format!("header.{payload}.signature")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_tokens_calls_reuse_fresh_token_without_refresh() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("auth.json");
+        let auth = json!({
+            "tokens": {
+                "access_token": unexpired_access_token(),
+                "refresh_token": "refresh-abc",
+                "account_id": "acct-123",
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&auth).unwrap()).expect("write auth fixture");
+
+        // Point the refresh endpoint at an address that cannot serve a refresh;
+        // the fixture token is not expired, so the fast path must return it and
+        // neither concurrent caller may attempt a network refresh.
+        let client = CodexLlmClient::new(
+            path.clone(),
+            "http://127.0.0.1:0".to_string(),
+            Duration::from_secs(5),
+        )
+        .expect("client");
+
+        let a = client.clone();
+        let b = client.clone();
+        let (result_a, result_b) = tokio::join!(a.tokens(false), b.tokens(false));
+
+        let tokens_a = result_a.expect("first tokens() succeeded without refresh");
+        let tokens_b = result_b.expect("second tokens() succeeded without refresh");
+        assert_eq!(tokens_a.account_id, "acct-123");
+        assert_eq!(tokens_b.account_id, "acct-123");
     }
 
     #[tokio::test(flavor = "multi_thread")]
