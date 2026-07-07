@@ -414,8 +414,14 @@ pub(crate) enum WebSpeechJobState {
 }
 
 pub(crate) fn prune_web_speech_jobs(jobs: &mut HashMap<String, WebSpeechJobRecord>) {
-    let now = Instant::now();
-    jobs.retain(|_, record| now.duration_since(record.updated_at) <= WEB_SPEECH_JOB_TTL);
+    prune_web_speech_jobs_at(Instant::now(), jobs);
+}
+
+pub(crate) fn prune_web_speech_jobs_at(
+    now: Instant,
+    jobs: &mut HashMap<String, WebSpeechJobRecord>,
+) {
+    jobs.retain(|_, record| now.saturating_duration_since(record.updated_at) <= WEB_SPEECH_JOB_TTL);
 }
 
 pub(crate) async fn web_app() -> impl IntoResponse {

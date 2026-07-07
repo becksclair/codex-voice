@@ -76,6 +76,7 @@ pub fn set_owner_only_file_permissions(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

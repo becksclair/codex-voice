@@ -169,10 +169,11 @@ fn poll_control_m(events: mpsc::Sender<HotkeyEvent>) {
             }
         }
         let speak_pressed = key_down(VK_F6) && super_down();
-        if speak_pressed && !speak_active {
-            if events.blocking_send(HotkeyEvent::SpeakSelection).is_err() {
-                break;
-            }
+        if speak_pressed
+            && !speak_active
+            && events.blocking_send(HotkeyEvent::SpeakSelection).is_err()
+        {
+            break;
         }
         speak_active = speak_pressed;
         thread::sleep(POLL_INTERVAL);

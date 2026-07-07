@@ -1,7 +1,7 @@
 use super::speech::{reload_tts_config_once, TtsServiceState};
 use super::transcribe::transcribe_chunk_paths;
 use super::web::{
-    prune_web_speech_jobs, versioned_web_asset, web_build_version, web_cache_name,
+    prune_web_speech_jobs_at, versioned_web_asset, web_build_version, web_cache_name,
     BrowserTtsConfig, WebSpeechJobRecord, WebSpeechJobState, WebSpeechResponse, WEB_BUILD_REVISION,
     WEB_SPEECH_JOB_TTL,
 };
@@ -751,6 +751,12 @@ async fn web_speech_jobs_complete_after_create() {
 #[test]
 fn web_speech_job_pruning_removes_expired_audio_results() {
     let mut jobs = HashMap::new();
+    let old_updated_at = Instant::now();
+    // Prune at a point strictly after the TTL of the "old" record. Advancing
+    // "now" forward avoids subtracting from `Instant::now()`, which underflows
+    // on hosts with low uptime (fresh CI runners, Windows VMs) and aborts the
+    // test process.
+    let prune_at = old_updated_at + WEB_SPEECH_JOB_TTL + Duration::from_secs(1);
     jobs.insert(
         "old".to_string(),
         WebSpeechJobRecord {
@@ -761,15 +767,18 @@ fn web_speech_job_pruning_removes_expired_audio_results() {
                 mime_type: "audio/wav".to_string(),
                 format: "wav".to_string(),
             }),
-            updated_at: Instant::now() - WEB_SPEECH_JOB_TTL - Duration::from_secs(1),
+            updated_at: old_updated_at,
         },
     );
     jobs.insert(
         "fresh".to_string(),
-        WebSpeechJobRecord::new(WebSpeechJobState::Pending),
+        WebSpeechJobRecord {
+            state: WebSpeechJobState::Pending,
+            updated_at: prune_at,
+        },
     );
 
-    prune_web_speech_jobs(&mut jobs);
+    prune_web_speech_jobs_at(prune_at, &mut jobs);
 
     assert!(!jobs.contains_key("old"));
     assert!(jobs.contains_key("fresh"));
