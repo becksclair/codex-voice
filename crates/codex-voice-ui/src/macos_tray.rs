@@ -12,7 +12,7 @@ use tray_icon::{
 };
 
 use crate::tray_common::{
-    build_icon_cache, icon_for_state, UiCommand, MENU_DIAGNOSTICS, MENU_LOGS, MENU_QUIT,
+    build_icon_cache, icon_for_state, UiCommand, UiError, MENU_DIAGNOSTICS, MENU_LOGS, MENU_QUIT,
     MENU_SETTINGS, MENU_SPEAK_TEXT, MENU_STATUS, MENU_TEST_RECORDING,
 };
 use crate::UiStatus;
@@ -29,7 +29,7 @@ pub struct StatusTray {
 }
 
 impl StatusTray {
-    pub fn start(initial: UiStatus, config: MacOSUiConfig) -> Result<Self, String> {
+    pub fn start(initial: UiStatus, config: MacOSUiConfig) -> Result<Self, UiError> {
         let (status_tx, status_rx) = mpsc::channel();
         let (command_tx, command_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -40,7 +40,7 @@ impl StatusTray {
 
         ready_rx
             .recv()
-            .map_err(|_| "tray thread stopped during startup".to_string())??;
+            .map_err(|_| UiError::EventLoop("tray thread stopped during startup".to_string()))??;
 
         Ok(Self {
             status_tx,
@@ -67,7 +67,7 @@ fn run_tray(
     config: MacOSUiConfig,
     status_rx: Receiver<UiStatus>,
     command_tx: Sender<UiCommand>,
-    ready_tx: Sender<Result<(), String>>,
+    ready_tx: Sender<Result<(), UiError>>,
 ) {
     let result = initialize_tray(initial, config, status_rx, command_tx, ready_tx.clone());
     if let Err(error) = result {
@@ -81,8 +81,8 @@ fn initialize_tray(
     config: MacOSUiConfig,
     status_rx: Receiver<UiStatus>,
     command_tx: Sender<UiCommand>,
-    ready_tx: Sender<Result<(), String>>,
-) -> Result<(), String> {
+    ready_tx: Sender<Result<(), UiError>>,
+) -> Result<(), UiError> {
     let menu = Menu::new();
     let status_item = MenuItem::with_id(MENU_STATUS, initial.tray_label(), false, None);
     let test_recording_item =
@@ -105,9 +105,10 @@ fn initialize_tray(
         &utility_separator,
         &quit_item,
     ])
-    .map_err(|error| format!("failed to build tray menu: {error}"))?;
+    .map_err(|error| UiError::TrayInit(format!("failed to build tray menu: {error}")))?;
 
-    let icons = build_icon_cache().map_err(|e| format!("failed to build icon cache: {e}"))?;
+    let icons = build_icon_cache()
+        .map_err(|e| UiError::Icon(format!("failed to build icon cache: {e}")))?;
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -115,7 +116,7 @@ fn initialize_tray(
         .with_title(initial.title())
         .with_tooltip("Codex Voice")
         .build()
-        .map_err(|error| format!("failed to create tray icon: {error}"))?;
+        .map_err(|error| UiError::TrayInit(format!("failed to create tray icon: {error}")))?;
 
     let _ = ready_tx.send(Ok(()));
     let mut current_status = initial;
@@ -127,7 +128,7 @@ fn initialize_tray(
             status_item.set_text(current_status.tray_label());
             tray.set_title(Some(current_status.title()));
             tray.set_icon(Some(icon_for_state(&icons, &current_status.state)))
-                .map_err(|error| format!("failed to update tray icon: {error}"))?;
+                .map_err(|error| UiError::Icon(format!("failed to update tray icon: {error}")))?;
             hud.update(&current_status);
         }
 

@@ -78,7 +78,7 @@ fn insert_method_label(method: InsertMethod) -> &'static str {
 
 mod tray_common;
 
-pub use tray_common::UiCommand;
+pub use tray_common::{UiCommand, UiError};
 
 #[cfg(target_os = "linux")]
 mod linux_tray;

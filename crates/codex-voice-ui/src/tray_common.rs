@@ -28,7 +28,26 @@ pub enum UiCommand {
     Quit,
 }
 
-pub fn build_icon_cache() -> Result<HashMap<DictationState, Icon>, String> {
+/// Errors raised while constructing or driving a platform status tray.
+///
+/// Each message payload already carries a descriptive prefix at its call site;
+/// the variant classifies the failure so callers can distinguish a tray/menu
+/// initialization failure from an icon-rendering failure or a lost background
+/// thread without string matching.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum UiError {
+    /// The platform tray, menu, or settings window failed to initialize.
+    #[error("{0}")]
+    TrayInit(String),
+    /// A status icon could not be rendered.
+    #[error("{0}")]
+    Icon(String),
+    /// The tray background thread stopped or a channel closed unexpectedly.
+    #[error("{0}")]
+    EventLoop(String),
+}
+
+pub fn build_icon_cache() -> Result<HashMap<DictationState, Icon>, UiError> {
     use codex_voice_core::DictationState::*;
     let mut cache = HashMap::new();
     for state in [
@@ -56,7 +75,7 @@ pub fn icon_for_state(cache: &HashMap<DictationState, Icon>, state: &DictationSt
         .expect("icon cache contains all states")
 }
 
-pub fn build_icon_for_state(state: &DictationState) -> Result<Icon, String> {
+pub fn build_icon_for_state(state: &DictationState) -> Result<Icon, UiError> {
     let color = match state {
         DictationState::Idle => [0x5c, 0x66, 0x70, 0xff],
         DictationState::Recording => [0xdb, 0x36, 0x36, 0xff],
@@ -83,7 +102,7 @@ pub fn build_icon_for_state(state: &DictationState) -> Result<Icon, String> {
     }
 
     Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE)
-        .map_err(|error| format!("failed to build tray icon: {error}"))
+        .map_err(|error| UiError::Icon(format!("failed to build tray icon: {error}")))
 }
 
 #[cfg(test)]
@@ -99,12 +118,28 @@ mod tests {
     /// (`_`) because its concrete type is platform-specific.
     #[test]
     fn status_tray_surface_contract() {
-        let _start: fn(crate::UiStatus, _) -> Result<crate::StatusTray, String> =
+        let _start: fn(crate::UiStatus, _) -> Result<crate::StatusTray, UiError> =
             crate::StatusTray::start;
         let _update: fn(&crate::StatusTray, crate::UiStatus) = crate::StatusTray::update;
         let _try_recv: fn(&crate::StatusTray) -> Option<UiCommand> =
             crate::StatusTray::try_recv_command;
         let _status_sender: fn(&crate::StatusTray) -> std::sync::mpsc::Sender<crate::UiStatus> =
             crate::StatusTray::status_sender;
+    }
+
+    #[test]
+    fn ui_error_display_preserves_message() {
+        assert_eq!(
+            UiError::TrayInit("failed to initialize GTK: boom".to_string()).to_string(),
+            "failed to initialize GTK: boom"
+        );
+        assert_eq!(
+            UiError::Icon("failed to build tray icon: bad rgba".to_string()).to_string(),
+            "failed to build tray icon: bad rgba"
+        );
+        assert_eq!(
+            UiError::EventLoop("tray thread stopped during startup".to_string()).to_string(),
+            "tray thread stopped during startup"
+        );
     }
 }

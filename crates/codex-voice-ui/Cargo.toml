@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 codex-voice-core = { path = "../codex-voice-core" }
+thiserror.workspace = true
 tray-icon.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

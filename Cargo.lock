@@ -607,6 +607,7 @@ version = "0.1.0"
 dependencies = [
  "codex-voice-core",
  "gtk",
+ "thiserror 2.0.18",
  "tray-icon",
  "windows-sys 0.61.2",
 ]
