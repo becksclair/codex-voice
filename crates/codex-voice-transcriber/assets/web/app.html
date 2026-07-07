@@ -3285,15 +3285,32 @@
       return { bytes, mimeType };
     }
 
+    // Synthesize chunks with bounded concurrency while preserving input order.
+    // `fn` is invoked as `fn(chunk, index)`; results are returned in the same
+    // order as `chunks`. Fails fast: the first rejection propagates immediately.
+    async function synthesizeChunksOrdered(chunks, limit, fn) {
+      const results = new Array(chunks.length);
+      let nextIndex = 0;
+      const worker = async () => {
+        while (true) {
+          const index = nextIndex++;
+          if (index >= chunks.length) return;
+          results[index] = await fn(chunks[index], index);
+        }
+      };
+      const poolSize = Math.max(1, Math.min(limit, chunks.length));
+      await Promise.all(Array.from({ length: poolSize }, () => worker()));
+      return results;
+    }
+
     async function synthesizeGoogle(config, input, persona, instructions, signal = null, runId = generationRunId) {
       if (Array.from(input).length >= ttsChunkMinChars) {
         const chunks = splitTtsText(input);
         if (chunks.length > 1) {
-          const audios = [];
-          for (const chunk of chunks) {
+          const audios = await synthesizeChunksOrdered(chunks, 3, (chunk) => {
             throwIfGenerationCancelled(signal, runId);
-            audios.push(await fetchGoogleAudio(config, chunk, persona, instructions, signal, runId));
-          }
+            return fetchGoogleAudio(config, chunk, persona, instructions, signal, runId);
+          });
           const mimeType = audios[0].mimeType || 'audio/L16;codec=pcm;rate=24000';
           const sampleRate = parseSampleRate(mimeType);
           if (audios.every((audio) => (audio.mimeType || '').toLowerCase().startsWith('audio/l16') || (audio.mimeType || '').toLowerCase().startsWith('audio/pcm'))) {
@@ -3371,12 +3388,11 @@
         const chunks = splitTtsText(input);
         if (chunks.length > 1) {
           const outputFormat = 'pcm_24000';
-          const parts = [];
-          for (const chunk of chunks) {
+          const parts = await synthesizeChunksOrdered(chunks, 3, async (chunk) => {
             throwIfGenerationCancelled(signal, runId);
             const blob = await synthesizeElevenLabsSingle(config, chunk, persona, outputFormat, true, signal, runId);
-            parts.push(new Uint8Array(await blob.arrayBuffer()));
-          }
+            return new Uint8Array(await blob.arrayBuffer());
+          });
           const sampleRate = elevenLabsSampleRate(outputFormat);
           return wavBlobFromPcm(concatPcmChunksWithBoundarySilence(parts, sampleRate), sampleRate);
         }
