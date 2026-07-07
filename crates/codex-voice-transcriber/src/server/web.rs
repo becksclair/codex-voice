@@ -4,7 +4,7 @@ use super::{ApiError, ServiceState};
 use axum::{
     extract::{Path, State},
     http::{header, StatusCode},
-    response::{Html, IntoResponse},
+    response::IntoResponse,
     Json,
 };
 use base64::Engine;
@@ -418,32 +418,43 @@ pub(crate) fn prune_web_speech_jobs(jobs: &mut HashMap<String, WebSpeechJobRecor
     jobs.retain(|_, record| now.duration_since(record.updated_at) <= WEB_SPEECH_JOB_TTL);
 }
 
-pub(crate) async fn web_app() -> Html<String> {
-    Html(web_app_body())
+pub(crate) async fn web_app() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        web_app_body(),
+    )
 }
 
-fn web_app_body() -> String {
-    WEB_APP_HTML
-        .replace(
-            "__WEB_MANIFEST_URL__",
-            &versioned_web_asset("/web/manifest.webmanifest"),
-        )
-        .replace(
-            "__WEB_MANIFEST_LIGHT_URL__",
-            &versioned_web_asset("/web/manifest-light.webmanifest"),
-        )
-        .replace(
-            "__WEB_ICON_192_URL__",
-            &versioned_web_asset("/web/icon-192.png"),
-        )
-        .replace(
-            "__WEB_ICON_512_URL__",
-            &versioned_web_asset("/web/icon-512.png"),
-        )
-        .replace(
-            "__WEB_APPLE_TOUCH_ICON_URL__",
-            &versioned_web_asset("/web/apple-touch-icon.png"),
-        )
+fn web_app_body() -> &'static str {
+    // Safe to memoize: the body is a pure function of compile-time constants
+    // (WEB_BUILD_REVISION via versioned_web_asset), so it never varies per request.
+    static BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| {
+        WEB_APP_HTML
+            .replace(
+                "__WEB_MANIFEST_URL__",
+                &versioned_web_asset("/web/manifest.webmanifest"),
+            )
+            .replace(
+                "__WEB_MANIFEST_LIGHT_URL__",
+                &versioned_web_asset("/web/manifest-light.webmanifest"),
+            )
+            .replace(
+                "__WEB_ICON_192_URL__",
+                &versioned_web_asset("/web/icon-192.png"),
+            )
+            .replace(
+                "__WEB_ICON_512_URL__",
+                &versioned_web_asset("/web/icon-512.png"),
+            )
+            .replace(
+                "__WEB_APPLE_TOUCH_ICON_URL__",
+                &versioned_web_asset("/web/apple-touch-icon.png"),
+            )
+    })
 }
 
 pub(crate) async fn web_config(

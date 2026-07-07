@@ -161,6 +161,7 @@ fn service_router(state: ServiceState) -> Router {
         .route("/audio/speech", speech_routes.clone())
         .route("/v1/audio/speech", speech_routes)
         .layer(cors)
+        .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state)
 }
 

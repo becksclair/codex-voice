@@ -173,6 +173,81 @@ async fn web_paste_handler_does_not_refocus_textarea() {
 }
 
 #[tokio::test]
+async fn web_app_sets_no_cache_and_html_content_type() {
+    let app = service_router(test_state_with_speech(1024));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html")));
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache"
+    );
+}
+
+#[tokio::test]
+async fn web_app_serves_gzip_when_requested() {
+    let identity_len = {
+        let app = service_router(test_state_with_speech(1024));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/web")
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK);
+        body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads")
+            .len()
+    };
+
+    let app = service_router(test_state_with_speech(1024));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web")
+                .header(header::ACCEPT_ENCODING, "gzip")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        Some("gzip")
+    );
+    let gzip_len = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body reads")
+        .len();
+    assert!(
+        gzip_len < identity_len,
+        "gzip body ({gzip_len}) should be smaller than identity body ({identity_len})"
+    );
+}
+
+#[tokio::test]
 async fn web_config_is_public_and_exports_browser_tts_config() {
     let app = service_router(test_state_with_web_tts_config(1024));
     let response = app
