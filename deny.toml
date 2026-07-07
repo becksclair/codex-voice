@@ -5,7 +5,23 @@
 # Use the default advisory database (RustSec) and default severity handling.
 # `cargo deny check advisories` fails on any active vulnerability or unmaintained
 # advisory unless explicitly ignored below.
-ignore = []
+ignore = [
+    # The Linux tray (tray-icon -> libappindicator) transitively requires the
+    # gtk-rs GTK3 bindings, which are unmaintained upstream. This is accepted,
+    # documented debt (see plans/README.md, deferred findings): no local action
+    # is possible until tray-icon moves off GTK3. Unmaintained-only — these are
+    # not vulnerabilities. Revisit when upstream migrates.
+    "RUSTSEC-2024-0412", # gdk
+    "RUSTSEC-2024-0413", # atk
+    "RUSTSEC-2024-0415", # gtk
+    "RUSTSEC-2024-0416", # atk-sys
+    "RUSTSEC-2024-0418", # gdkx11
+    "RUSTSEC-2024-0419", # gdkx11-sys
+    "RUSTSEC-2024-0420", # gtk3-macros
+    # proc-macro-error is unmaintained; pulled transitively by the same GTK3
+    # tray stack (gtk3-macros). Same upstream cause, same rationale.
+    "RUSTSEC-2024-0370",
+]
 
 [licenses]
 # Permissive baseline. Only licenses listed here are allowed for dependencies.
