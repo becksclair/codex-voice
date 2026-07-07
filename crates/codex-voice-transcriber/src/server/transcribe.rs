@@ -6,11 +6,18 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use serde::Serialize;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::chunking::{self, MAX_GENERATED_CHUNKS, PCM_BYTES_PER_SECOND};
 use crate::client;
 use crate::upload::{self, Upload};
+use codex_voice_core::TranscriptionClient;
+
+/// Upstream transcription requests in flight per chunked upload.
+const CHUNK_TRANSCRIBE_CONCURRENCY: usize = 4;
 
 pub(crate) async fn transcribe(
     State(state): State<ServiceState>,
@@ -119,15 +126,34 @@ async fn transcribe_chunked(state: &ServiceState, upload: &Upload) -> Result<Str
         ),
         chunking::ChunkingError::Io { message } => ApiError::internal(message),
     })?;
-    let mut transcripts = Vec::with_capacity(chunks.paths.len());
-    for path in &chunks.paths {
-        let filename = upload::filename_for_path(path);
-        transcripts.push(
-            client::transcribe_path(state.backend.as_ref(), path, &filename, "audio/wav")
-                .await
-                .map_err(|error| ApiError::backend(error.to_string()))?,
-        );
-    }
+    transcribe_chunk_paths(&state.backend, &chunks.paths).await
+}
+
+/// Transcribes each chunk path with bounded concurrency, preserving chunk
+/// order in the joined result (required by `upload::join_transcripts`).
+///
+/// Uses `buffered` (not `buffer_unordered`): it runs up to
+/// `CHUNK_TRANSCRIBE_CONCURRENCY` requests concurrently while yielding
+/// results in the original input order, so no reordering step is needed
+/// before joining. Fails fast on the first error, matching the previous
+/// serial loop's `?`-propagation semantics.
+pub(super) async fn transcribe_chunk_paths(
+    backend: &Arc<dyn TranscriptionClient>,
+    paths: &[PathBuf],
+) -> Result<String, ApiError> {
+    let transcripts: Vec<String> = stream::iter(paths.to_vec())
+        .map(|path| {
+            let filename = upload::filename_for_path(&path);
+            let backend = Arc::clone(backend);
+            async move {
+                client::transcribe_path(backend.as_ref(), &path, &filename, "audio/wav")
+                    .await
+                    .map_err(|error| ApiError::backend(error.to_string()))
+            }
+        })
+        .buffered(CHUNK_TRANSCRIBE_CONCURRENCY)
+        .try_collect()
+        .await?;
     Ok(upload::join_transcripts(&transcripts))
 }
 

@@ -581,6 +581,7 @@ dependencies = [
  "codex-voice-core",
  "codex-voice-tts",
  "dirs",
+ "futures-util",
  "hex",
  "rand 0.9.4",
  "reqwest",

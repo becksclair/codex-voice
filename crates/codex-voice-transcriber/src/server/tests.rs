@@ -1,4 +1,5 @@
 use super::speech::{reload_tts_config_once, TtsServiceState};
+use super::transcribe::transcribe_chunk_paths;
 use super::web::{
     prune_web_speech_jobs, versioned_web_asset, web_build_version, web_cache_name,
     BrowserTtsConfig, WebSpeechJobRecord, WebSpeechJobState, WebSpeechResponse, WEB_BUILD_REVISION,
@@ -8,10 +9,10 @@ use super::*;
 use crate::test_support::*;
 use axum::body;
 use axum::http::{header, StatusCode};
-use codex_voice_core::SpeechFormat;
+use codex_voice_core::{SpeechFormat, TranscriptionClient};
 use codex_voice_tts::config::SpeechPrepProviderKind;
 use std::collections::HashMap;
-use std::path::Path as FsPath;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
@@ -1031,6 +1032,55 @@ async fn oversized_upload_without_ffmpeg_returns_413() {
         .await
         .expect("request succeeds");
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn chunked_transcripts_join_in_order_under_concurrency() {
+    // The first chunk is deliberately the slowest. If the concurrent stream
+    // reordered results (e.g. by using buffer_unordered instead of
+    // buffered), the faster later chunks would finish first and the joined
+    // transcript would come out scrambled.
+    const CHUNK_COUNT: u64 = 4;
+    let delays: Vec<Duration> = (0..CHUNK_COUNT)
+        .map(|index| Duration::from_millis((CHUNK_COUNT - index) * 10))
+        .collect();
+    let backend = Arc::new(DelayedFakeBackend::new(delays)) as Arc<dyn TranscriptionClient>;
+    let paths: Vec<PathBuf> = (0..CHUNK_COUNT)
+        .map(|index| PathBuf::from(format!("chunk-{index}.wav")))
+        .collect();
+
+    let joined = transcribe_chunk_paths(&backend, &paths)
+        .await
+        .expect("chunk transcription succeeds");
+
+    assert_eq!(joined, "part-0\n\npart-1\n\npart-2\n\npart-3");
+}
+
+#[tokio::test]
+async fn chunked_transcription_runs_concurrently() {
+    const CHUNK_COUNT: usize = 4;
+    let delays = vec![Duration::from_millis(50); CHUNK_COUNT];
+    let fake = Arc::new(DelayedFakeBackend::new(delays));
+    let backend = Arc::clone(&fake) as Arc<dyn TranscriptionClient>;
+    let paths: Vec<PathBuf> = (0..CHUNK_COUNT)
+        .map(|index| PathBuf::from(format!("chunk-{index}.wav")))
+        .collect();
+
+    let started = Instant::now();
+    transcribe_chunk_paths(&backend, &paths)
+        .await
+        .expect("chunk transcription succeeds");
+    let elapsed = started.elapsed();
+
+    assert!(
+        fake.max_active() >= 2,
+        "expected overlapping in-flight transcriptions, saw max_active={}",
+        fake.max_active()
+    );
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "expected concurrent execution well under serial time (~200ms), took {elapsed:?}"
+    );
 }
 
 #[test]

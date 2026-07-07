@@ -10,6 +10,7 @@ use codex_voice_tts::config::{
     SpeechPrepConfig, SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies,
 };
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,6 +32,56 @@ impl TranscriptionClient for FakeBackend {
             .expect("fake backend lock")
             .push(recording.filename.clone());
         Ok("hello from service".into())
+    }
+}
+
+/// Fake backend for exercising bounded-concurrency transcription of chunked
+/// uploads. Each call sleeps for the delay configured for its chunk index
+/// (parsed from the `chunk-<index>.wav` filename produced by
+/// `upload::filename_for_path`) and returns `"part-<index>"`, so tests can
+/// assert both ordering (via the returned text) and overlap (via
+/// `max_active`).
+pub struct DelayedFakeBackend {
+    delays: Vec<Duration>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl DelayedFakeBackend {
+    pub fn new(delays: Vec<Duration>) -> Self {
+        Self {
+            delays,
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+        }
+    }
+
+    /// High-water mark of concurrently in-flight `transcribe` calls.
+    pub fn max_active(&self) -> usize {
+        self.max_active.load(Ordering::SeqCst)
+    }
+}
+
+fn chunk_index_from_filename(filename: &str) -> usize {
+    filename
+        .strip_prefix("chunk-")
+        .and_then(|rest| rest.strip_suffix(".wav"))
+        .and_then(|index| index.parse().ok())
+        .unwrap_or_else(|| panic!("test filename {filename:?} must look like chunk-<index>.wav"))
+}
+
+#[async_trait::async_trait]
+impl TranscriptionClient for DelayedFakeBackend {
+    async fn transcribe(
+        &self,
+        recording: &codex_voice_core::RecordedAudio,
+    ) -> TranscriptionResult<String> {
+        let index = chunk_index_from_filename(&recording.filename);
+        let now_active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(now_active, Ordering::SeqCst);
+        tokio::time::sleep(self.delays[index]).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(format!("part-{index}"))
     }
 }
 
