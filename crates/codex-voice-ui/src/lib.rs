@@ -76,23 +76,27 @@ fn insert_method_label(method: InsertMethod) -> &'static str {
     }
 }
 
+mod tray_common;
+
+pub use tray_common::UiCommand;
+
 #[cfg(target_os = "linux")]
 mod linux_tray;
 
 #[cfg(target_os = "linux")]
-pub use linux_tray::{LinuxUiConfig, StatusTray, UiCommand};
+pub use linux_tray::{LinuxUiConfig, StatusTray};
 
 #[cfg(target_os = "windows")]
 mod windows_tray;
 
 #[cfg(target_os = "windows")]
-pub use windows_tray::{StatusTray, UiCommand, WindowsUiConfig};
+pub use windows_tray::{StatusTray, WindowsUiConfig};
 
 #[cfg(target_os = "macos")]
 mod macos_tray;
 
 #[cfg(target_os = "macos")]
-pub use macos_tray::{MacOSUiConfig, StatusTray, UiCommand};
+pub use macos_tray::{MacOSUiConfig, StatusTray};
 
 #[cfg(test)]
 mod tests {
