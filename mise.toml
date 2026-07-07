@@ -3,6 +3,9 @@ description = "Build codex-voice, install it, and enable user services"
 run = '''
 set -eu
 
+# Build the web frontend first: the release binary embeds web/dist at compile time.
+(cd web && bun install --frozen-lockfile && bun run build)
+
 cargo build --release -p codex-voice-app --bin codex-voice
 sudo install -Dm755 target/release/codex-voice /usr/local/bin/codex-voice
 sudo install -Dm755 packaging/codex-voice-wrapper.sh /usr/local/bin/codex-voice-wrapper
@@ -62,21 +65,30 @@ run = "cargo clippy --workspace --all-targets -- -D warnings"
 [tasks.test-web]
 description = "Run the Playwright web PWA behavioral suite (requires bun + chromium)"
 dir = "{{cwd}}"
+depends = ["web-build"]
 run = "cd webtests && bunx playwright test"
+
+[tasks.web-install]
+description = "Install frontend dependencies (web/)"
+dir = "{{cwd}}"
+run = "cd web && bun install --frozen-lockfile"
 
 [tasks.web-build]
 description = "Build the standalone React frontend (web/) into web/dist"
 dir = "{{cwd}}"
-run = "cd web && bun install --frozen-lockfile && bun run build"
+depends = ["web-install"]
+run = "cd web && bun run build"
 
 [tasks.web-check]
 description = "Lint, format-check, and type-check the standalone React frontend (web/)"
 dir = "{{cwd}}"
+depends = ["web-install"]
 run = "cd web && bun run check"
 
 [tasks.web-test]
 description = "Run the standalone React frontend (web/) unit tests"
 dir = "{{cwd}}"
+depends = ["web-install"]
 run = "cd web && bun run test"
 
 [tasks.deny]
@@ -86,4 +98,4 @@ run = "cargo deny check advisories licenses sources"
 
 [tasks.verify]
 description = "Run all verification gates"
-depends = ["fmt", "check", "test", "lint"]
+depends = ["fmt", "check", "test", "lint", "web-check", "web-test"]
