@@ -838,7 +838,9 @@ fn is_bare_cue_delimiter(ch: char) -> bool {
 
 fn strip_ascii_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     let prefix_len = prefix.len();
-    if value.len() < prefix_len {
+    // A byte index that lands inside a multibyte char would panic to slice —
+    // and cannot match an ASCII prefix anyway, so treat it as a non-match.
+    if value.len() < prefix_len || !value.is_char_boundary(prefix_len) {
         return None;
     }
     let candidate = &value[..prefix_len];
@@ -1027,6 +1029,24 @@ fn truncate_chars(text: &str, max_length: usize) -> String {
 mod tests {
     use super::shorten::validate_shorten_output;
     use super::*;
+
+    #[test]
+    fn strip_ascii_prefix_ignores_multibyte_boundary_instead_of_panicking() {
+        // Regression: a prefix whose byte length lands inside a multibyte char
+        // (e.g. the '\u{2026}' ellipsis in real prose) used to panic on the
+        // byte slice. It must simply be a non-match.
+        assert_eq!(
+            strip_ascii_prefix_ignore_case("ab\u{2026}cdef", "abc"),
+            None
+        );
+        // Matching still works and is case-insensitive.
+        assert_eq!(
+            strip_ascii_prefix_ignore_case("Tender words", "tender"),
+            Some(" words")
+        );
+        // Shorter values are still a clean non-match.
+        assert_eq!(strip_ascii_prefix_ignore_case("ab", "abc"), None);
+    }
 
     fn default_test_palette() -> Vec<String> {
         vec![
