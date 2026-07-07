@@ -69,6 +69,11 @@ fn emit_rerun_for_tree(source: &Path) {
         let path = entry.path();
         let file_type = entry.file_type().expect("stat web/dist entry");
         if file_type.is_dir() {
+            // Register the subdirectory itself: cargo's rerun-if-changed on a
+            // directory watches only that directory's own mtime, so without
+            // this a file added to (or removed from) an existing subdirectory
+            // would not retrigger the copy and the embed would go stale.
+            println!("cargo:rerun-if-changed={}", path.display());
             emit_rerun_for_tree(&path);
         } else {
             println!("cargo:rerun-if-changed={}", path.display());

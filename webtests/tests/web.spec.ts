@@ -117,3 +117,31 @@ test('theme setting persists across a reload', async ({ page }) => {
   await page.locator('#settings-toggle').click();
   await expect(page.locator('#theme')).toHaveValue('light');
 });
+
+test('service worker takes control of /web (offline-capable scope)', async ({ page }) => {
+  // Regression guard for the scope mismatch: the app's canonical URL is /web
+  // (no trailing slash) while the worker script lives at /web/sw.js, whose
+  // default scope /web/ does NOT cover /web. The app registers with an explicit
+  // scope of /web, authorized by the Service-Worker-Allowed header. If either
+  // side regresses, navigator.serviceWorker.ready never resolves here because
+  // no registration's scope matches the document URL.
+  await page.goto('/web');
+  const scope = await page.evaluate(async () => {
+    const registration = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('no service worker registration matched /web')), 15_000),
+      ),
+    ]);
+    return registration.scope;
+  });
+  expect(new URL(scope).pathname).toBe('/web');
+
+  // After a reload the (now active) worker must actually control the page.
+  await page.reload();
+  await expect
+    .poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null), {
+      timeout: 15_000,
+    })
+    .toBe(true);
+});

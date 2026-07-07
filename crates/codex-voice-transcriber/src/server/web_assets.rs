@@ -39,8 +39,16 @@ const LEGACY_SERVICE_WORKER_JS: &str = r#"self.addEventListener('install', () =>
 });
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    self.registration
-      .unregister()
+    caches
+      .keys()
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((key) => key.startsWith('codex-voice-web-'))
+            .map((key) => caches.delete(key))
+        )
+      )
+      .then(() => self.registration.unregister())
       .then(() => self.clients.matchAll({ type: 'window' }))
       .then((clients) => {
         clients.forEach((client) => client.navigate(client.url));
@@ -115,14 +123,25 @@ async fn read_override_asset(root: &Path, rel: &str) -> Option<Vec<u8>> {
 }
 
 fn asset_response(path: &str, body: Vec<u8>) -> Response {
-    (
+    let mut response = (
         [
             (header::CONTENT_TYPE, content_type_for(path)),
             (header::CACHE_CONTROL, cache_control_for(path).to_string()),
         ],
         body,
     )
-        .into_response()
+        .into_response();
+    // The app's canonical URL is /web (no trailing slash). A worker script at
+    // /web/sw.js may only claim /web/ by default, which does not cover /web
+    // itself; this header authorizes the wider registration scope /web used by
+    // the frontend so the installed PWA is controlled (and works offline).
+    if path == "sw.js" {
+        response.headers_mut().insert(
+            header::HeaderName::from_static("service-worker-allowed"),
+            header::HeaderValue::from_static("/web"),
+        );
+    }
+    response
 }
 
 fn content_type_for(path: &str) -> String {
