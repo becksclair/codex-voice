@@ -375,7 +375,9 @@ async fn tts_config_reload_updates_swappable_service_state() {
         .await
         .expect("config reload succeeds");
 
-    let state = tts.read().expect("TTS state lock");
+    let state = tts
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(state.speech.is_some());
     let web_config = state.web_tts_config.clone().expect("web config loaded");
     let json = serde_json::to_value(web_config).expect("serializes");
@@ -394,7 +396,7 @@ async fn tts_config_reload_keeps_previous_state_when_new_config_is_invalid() {
         .expect("initial config reload succeeds");
     let before = serde_json::to_value(
         tts.read()
-            .expect("TTS state lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .web_tts_config
             .clone()
             .expect("web config loaded"),
@@ -411,7 +413,7 @@ async fn tts_config_reload_keeps_previous_state_when_new_config_is_invalid() {
 
     let after = serde_json::to_value(
         tts.read()
-            .expect("TTS state lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .web_tts_config
             .clone()
             .expect("web config remains loaded"),

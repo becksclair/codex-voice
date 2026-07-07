@@ -452,7 +452,7 @@ pub(crate) async fn web_config(
     let config = state
         .tts
         .read()
-        .expect("TTS state lock")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .web_tts_config
         .as_ref()
         .cloned()
@@ -640,7 +640,7 @@ pub(crate) async fn web_speech_job_create(
     let mut jobs = state
         .web_speech_jobs
         .lock()
-        .expect("web speech job store lock");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     prune_web_speech_jobs(&mut jobs);
     jobs.insert(
         id.clone(),
@@ -657,7 +657,7 @@ pub(crate) async fn web_speech_job_create(
             Err(error) => WebSpeechJobState::Failed(WebSpeechJobError::from(error)),
         };
         jobs.lock()
-            .expect("web speech job store lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(job_id, WebSpeechJobRecord::new(state));
     });
 
@@ -678,7 +678,7 @@ pub(crate) async fn web_speech_job_status(
         let mut jobs = state
             .web_speech_jobs
             .lock()
-            .expect("web speech job store lock");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         prune_web_speech_jobs(&mut jobs);
         jobs.get(&id)
             .cloned()

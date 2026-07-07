@@ -169,7 +169,15 @@ async fn health(
     headers: HeaderMap,
 ) -> Result<Json<Health>, ApiError> {
     authorize(&headers, &state.auth)?;
-    let tts = state.tts.read().expect("TTS state lock");
+    // Recover from a poisoned lock instead of propagating the panic: the guarded
+    // state is a plain snapshot (config / job map), not a partially-mutated
+    // invariant, so a panic while another thread held the lock leaves the data
+    // valid. Recovering keeps one failure from turning into a persistent panic
+    // loop on this endpoint. Applied uniformly at every lock site below.
+    let tts = state
+        .tts
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let capabilities = ServiceCapabilities {
         transcriptions: true,
         speech: tts.speech.is_some(),

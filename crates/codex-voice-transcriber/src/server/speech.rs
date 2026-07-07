@@ -112,7 +112,9 @@ pub(crate) async fn reload_tts_config_once(
     .await
     .context("TTS config reload task failed")??;
 
-    *tts.write().expect("TTS state lock") = TtsServiceState::configured(speech, &config);
+    *tts.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        TtsServiceState::configured(speech, &config);
     Ok(())
 }
 
@@ -136,7 +138,7 @@ pub(crate) fn web_speech_client(state: &ServiceState) -> Result<Arc<dyn SpeechCl
     state
         .tts
         .read()
-        .expect("TTS state lock")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .speech
         .as_ref()
         .cloned()
@@ -152,7 +154,7 @@ pub(crate) async fn speech(
     let speech_client = state
         .tts
         .read()
-        .expect("TTS state lock")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .speech
         .as_ref()
         .cloned()
