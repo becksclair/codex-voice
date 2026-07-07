@@ -4,6 +4,7 @@ pub mod config;
 pub mod convert;
 pub mod elevenlabs;
 pub mod google;
+mod provider;
 mod provider_timeout;
 pub mod sanitize;
 pub mod secret;

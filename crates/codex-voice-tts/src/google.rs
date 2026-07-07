@@ -1,8 +1,9 @@
 use codex_voice_core::{SpeechError, SpeechFormat, SpeechRequest, SpeechResult, SynthesizedSpeech};
 use reqwest::Client;
 
-use crate::config::{GoogleRuntimeConfig, ResolvedPersona};
+use crate::config::{GoogleRuntimeConfig, ProviderKind, ResolvedPersona};
 use crate::convert::convert_speech;
+use crate::provider::TtsProvider;
 use crate::provider_timeout::tts_timeout_for_input;
 use crate::sanitize::sanitize_for_tts;
 
@@ -186,6 +187,34 @@ impl GoogleSpeechClient {
         })??;
 
         convert_speech(native, request.format).await
+    }
+}
+
+#[async_trait::async_trait]
+impl TtsProvider for GoogleSpeechClient {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Google
+    }
+
+    fn supports_inline_audio_tags(&self, request: &SpeechRequest) -> bool {
+        GoogleSpeechClient::supports_inline_audio_tags(self, request)
+    }
+
+    fn resolved_model_id(&self, request: &SpeechRequest) -> SpeechResult<String> {
+        Ok(GoogleSpeechClient::resolved_model_id(self, request).to_string())
+    }
+
+    fn max_text_length(&self) -> usize {
+        GoogleSpeechClient::max_text_length(self)
+    }
+
+    async fn synthesize(
+        &self,
+        request: &SpeechRequest,
+        persona: Option<&ResolvedPersona>,
+        native_voice: Option<&str>,
+    ) -> SpeechResult<SynthesizedSpeech> {
+        GoogleSpeechClient::synthesize(self, request, persona, native_voice).await
     }
 }
 
