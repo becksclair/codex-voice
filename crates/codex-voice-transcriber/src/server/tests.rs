@@ -1,10 +1,10 @@
 use super::speech::{reload_tts_config_once, TtsServiceState};
 use super::transcribe::transcribe_chunk_paths;
 use super::web::{
-    prune_web_speech_jobs_at, versioned_web_asset, web_build_version, web_cache_name,
-    BrowserTtsConfig, WebSpeechJobRecord, WebSpeechJobState, WebSpeechResponse, WEB_BUILD_REVISION,
-    WEB_SPEECH_JOB_TTL,
+    prune_web_speech_jobs_at, BrowserTtsConfig, WebSpeechJobRecord, WebSpeechJobState,
+    WebSpeechResponse, WEB_SPEECH_JOB_TTL,
 };
+use super::web_assets::web_dist_is_stub;
 use super::*;
 use crate::test_support::*;
 use axum::body;
@@ -64,111 +64,6 @@ async fn cors_headers_are_present_on_unauthorized_response() {
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .and_then(|value| value.to_str().ok()),
         Some("http://localhost:5173")
-    );
-}
-
-#[tokio::test]
-async fn web_app_returns_phone_tts_shell() {
-    let app = service_router(test_state_with_speech(1024));
-    let response = app
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/web")
-                .body(body::Body::empty())
-                .expect("request builds"),
-        )
-        .await
-        .expect("request succeeds");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("text/html")),
-        "web app should return text/html"
-    );
-    let bytes = body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body reads");
-    let html = std::str::from_utf8(&bytes).expect("html is utf-8");
-
-    assert!(
-        !html.contains("__WEB_"),
-        "all __WEB_*_URL__ placeholders should be substituted"
-    );
-
-    // Every DOM id the client-side JS binds via getElementById must be present
-    // in the served markup (derived from
-    // `grep -o "getElementById([^)]*)" assets/web/app.html`).
-    for id in [
-        "clear",
-        "count",
-        "download",
-        "duration",
-        "elapsed",
-        "emotion",
-        "error-banner",
-        "generate",
-        "generate-label",
-        "generate-on-paste",
-        "model",
-        "paste",
-        "play",
-        "play-icon",
-        "provider",
-        "settings-panel",
-        "settings-toggle",
-        "summarize",
-        "text",
-        "theme",
-        "voice",
-        "waveform",
-        "waveform-slider",
-    ] {
-        assert!(
-            html.contains(&format!("id=\"{id}\"")),
-            "served HTML should contain id=\"{id}\" for a getElementById binding"
-        );
-    }
-}
-
-#[tokio::test]
-async fn web_paste_handler_does_not_refocus_textarea() {
-    // Regression guard for the paste-focus fix: the paste-button click handler
-    // must not call `text.focus()` after a paste, which previously stole focus
-    // from the user. The reset (clear) handler's `text.focus()` elsewhere is
-    // intentional and deliberately outside the slice checked here.
-    let app = service_router(test_state_with_speech(1024));
-    let response = app
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/web")
-                .body(body::Body::empty())
-                .expect("request builds"),
-        )
-        .await
-        .expect("request succeeds");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body reads");
-    let html = std::str::from_utf8(&bytes).expect("html is utf-8");
-
-    let start = html
-        .find("navigator.clipboard.readText")
-        .expect("paste-button handler start marker present");
-    let end = html[start..]
-        .find("Clipboard paste failed.")
-        .map(|offset| start + offset)
-        .expect("paste-button handler end marker present");
-    let paste_handler = &html[start..end];
-
-    assert!(
-        !paste_handler.contains("text.focus()"),
-        "paste handler must not re-focus the textarea after paste"
     );
 }
 
@@ -510,81 +405,7 @@ fn browser_config_export_omits_absent_providers() {
 }
 
 #[tokio::test]
-async fn web_manifest_returns_install_metadata() {
-    let app = service_router(test_state_with_speech(1024));
-    let response = app
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/web/manifest.webmanifest")
-                .body(body::Body::empty())
-                .expect("request builds"),
-        )
-        .await
-        .expect("request succeeds");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get(header::CONTENT_TYPE).unwrap(),
-        "application/manifest+json"
-    );
-    assert_eq!(
-        response.headers().get(header::CACHE_CONTROL).unwrap(),
-        "no-cache"
-    );
-    let bytes = body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body reads");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("manifest is valid json");
-
-    assert_eq!(manifest["name"], "Codex Voice");
-    assert_eq!(manifest["short_name"], "Voice");
-    assert_eq!(manifest["start_url"], "/web");
-    assert_eq!(manifest["scope"], "/web");
-    assert_eq!(manifest["display"], "standalone");
-    assert_eq!(manifest["theme_color"], "#17091f");
-    assert_eq!(manifest["background_color"], "#17091f");
-    assert_eq!(manifest["version"], web_build_version());
-    assert_eq!(manifest["build_revision"], WEB_BUILD_REVISION);
-    let icons = manifest["icons"].as_array().expect("icons array");
-    assert!(icons.iter().any(|icon| {
-        icon["src"] == versioned_web_asset("/web/icon-192.png")
-            && icon["sizes"] == "192x192"
-            && icon["type"] == "image/png"
-    }));
-    assert!(icons.iter().any(|icon| {
-        icon["src"] == versioned_web_asset("/web/icon-512.png")
-            && icon["sizes"] == "512x512"
-            && icon["purpose"] == "any"
-    }));
-    assert!(icons.iter().any(|icon| {
-        icon["src"] == versioned_web_asset("/web/icon-maskable-512.png")
-            && icon["sizes"] == "512x512"
-            && icon["purpose"] == "maskable"
-    }));
-
-    let app = service_router(test_state_with_speech(1024));
-    let response = app
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/web/manifest-light.webmanifest")
-                .body(body::Body::empty())
-                .expect("request builds"),
-        )
-        .await
-        .expect("request succeeds");
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body reads");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("manifest is valid json");
-    assert_eq!(manifest["theme_color"], "#f3dff1");
-    assert_eq!(manifest["background_color"], "#f3dff1");
-}
-
-#[tokio::test]
-async fn web_service_worker_returns_install_and_fetch_handlers() {
+async fn legacy_service_worker_self_destructs() {
     let app = service_router(test_state_with_speech(1024));
     let response = app
         .oneshot(
@@ -609,24 +430,93 @@ async fn web_service_worker_returns_install_and_fetch_handlers() {
         .await
         .expect("body reads");
     let script = std::str::from_utf8(&bytes).expect("script is utf-8");
-    assert!(script.contains(&format!(
-        "const CACHE_NAME = {};",
-        serde_json::to_string(&web_cache_name()).expect("cache name serializes")
-    )));
-    assert!(script.contains(&format!(
-        "const WEB_BUILD_REVISION = {};",
-        serde_json::to_string(WEB_BUILD_REVISION).expect("revision serializes")
-    )));
+    assert!(script.contains("self.registration"));
+    assert!(script.contains("unregister"));
 }
 
 #[tokio::test]
-async fn web_icon_routes_return_png_assets() {
-    for path in [
-        "/web/icon-192.png",
-        "/web/icon-512.png",
-        "/web/icon-maskable-512.png",
-        "/web/apple-touch-icon.png",
-    ] {
+async fn web_hashed_assets_are_immutable() {
+    if web_dist_is_stub() {
+        eprintln!("skipped: stub web dist");
+        return;
+    }
+    let asset = super::web_assets::first_embedded_asset_under("assets/")
+        .expect("real web dist should contain a hashed asset under assets/");
+
+    let app = service_router(test_state_with_speech(1024));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/web/{asset}"))
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK, "{asset}");
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=31536000, immutable",
+        "{asset}"
+    );
+}
+
+#[tokio::test]
+async fn web_unhashed_dist_files_are_not_immutable() {
+    // index.html lives at the dist root (not under assets/) and is never
+    // content-hashed, so it must revalidate rather than being cached forever.
+    let app = service_router(test_state_with_speech(1024));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web/index.html")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache"
+    );
+    assert!(response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html")));
+}
+
+#[tokio::test]
+async fn web_spa_fallback_serves_index_for_extensionless_paths() {
+    let app = service_router(test_state_with_speech(1024));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web/settings/profile")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html")));
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache"
+    );
+}
+
+#[tokio::test]
+async fn web_asset_traversal_is_rejected() {
+    for path in ["/web/../Cargo.toml", "/web/..%2fCargo.toml"] {
         let app = service_router(test_state_with_speech(1024));
         let response = app
             .oneshot(
@@ -638,20 +528,78 @@ async fn web_icon_routes_return_png_assets() {
             .await
             .expect("request succeeds");
 
-        assert_eq!(response.status(), StatusCode::OK, "{path}");
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "image/png",
-            "{path}"
-        );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         let bytes = body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body reads");
         assert!(
-            bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
-            "{path} should return a PNG"
+            !bytes.windows(7).any(|window| window == b"package"),
+            "{path} must not leak Cargo.toml contents"
         );
     }
+}
+
+#[tokio::test]
+async fn web_dist_override_takes_precedence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("index.html"),
+        "<!doctype html><title>OVERRIDE-MARKER</title>",
+    )
+    .expect("index written");
+    std::fs::create_dir_all(dir.path().join("assets")).expect("assets dir");
+    std::fs::write(
+        dir.path().join("assets").join("app.abc123.js"),
+        "console.log('override');\n",
+    )
+    .expect("asset written");
+
+    let mut state = test_state_with_speech(1024);
+    state.web_dist_override = Some(dir.path().to_path_buf());
+    let app = service_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache"
+    );
+    let bytes = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    let html = std::str::from_utf8(&bytes).expect("html is utf-8");
+    assert!(
+        html.contains("OVERRIDE-MARKER"),
+        "override index.html should be served"
+    );
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web/assets/app.abc123.js")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=31536000, immutable"
+    );
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/javascript; charset=utf-8"
+    );
 }
 
 #[tokio::test]

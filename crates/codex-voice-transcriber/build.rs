@@ -1,74 +1,77 @@
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::fs;
+use std::path::{Path, PathBuf};
 
+/// Stage the built web UI into `$OUT_DIR/web-dist` so `include_dir!` can embed
+/// it. The real assets are produced by the Vite/React build in `web/dist`. When
+/// that directory is absent (a fresh checkout that has not run the web build),
+/// a minimal placeholder page is embedded instead so the crate always compiles.
 fn main() {
-    println!("cargo:rerun-if-changed=src/server.rs");
-    println!("cargo:rerun-if-changed=assets/web/icon-192.png");
-    println!("cargo:rerun-if-changed=assets/web/icon-512.png");
-    println!("cargo:rerun-if-changed=assets/web/icon-maskable-512.png");
-    println!("cargo:rerun-if-changed=assets/web/apple-touch-icon.png");
-    println!("cargo:rerun-if-changed=../../Cargo.toml");
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/index");
-    if let Some(head_ref) = git_output(&["symbolic-ref", "-q", "HEAD"]) {
-        println!("cargo:rerun-if-changed=../../.git/{head_ref}");
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
+    let dest = out_dir.join("web-dist");
+    let source = PathBuf::from("../../web/dist");
+    let index = source.join("index.html");
+
+    // Always rebuild when the presence of a built dist changes, so creating
+    // `web/dist` later triggers a rebuild that swaps out the stub.
+    println!("cargo:rerun-if-changed=../../web/dist");
+
+    // Start from a clean staging directory to avoid leaving stale files behind
+    // when switching between the real dist and the stub.
+    if dest.exists() {
+        fs::remove_dir_all(&dest).expect("clear staging web-dist directory");
     }
+    fs::create_dir_all(&dest).expect("create staging web-dist directory");
 
-    let revision = build_revision();
-    println!("cargo:rustc-env=CODEX_VOICE_WEB_REVISION={revision}");
-}
-
-fn build_revision() -> String {
-    let timestamp = unix_timestamp();
-    let Some(commit) = git_output(&["rev-parse", "--short=12", "HEAD"]) else {
-        return sanitize_revision(&format!("nogit-{timestamp}"));
-    };
-
-    if git_dirty() {
-        sanitize_revision(&format!("{commit}-dirty-{timestamp}"))
+    if index.exists() {
+        copy_dir_recursive(&source, &dest);
+        emit_rerun_for_tree(&source);
+        println!("cargo:rustc-env=CODEX_VOICE_WEB_DIST_KIND=real");
     } else {
-        sanitize_revision(&commit)
+        fs::write(dest.join("index.html"), STUB_INDEX_HTML).expect("write stub index.html");
+        println!("cargo:warning=web/dist not found; embedding stub web UI");
+        println!("cargo:rustc-env=CODEX_VOICE_WEB_DIST_KIND=stub");
     }
 }
 
-fn git_dirty() -> bool {
-    !git_status_ok(&["diff", "--quiet", "--ignore-submodules", "--"])
-        || !git_status_ok(&["diff", "--cached", "--quiet", "--ignore-submodules", "--"])
-}
+const STUB_INDEX_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex Voice</title>
+</head>
+<body>
+<main>
+<h1>Web UI not built</h1>
+<p>Run <code>bun install &amp;&amp; bun run build</code> in <code>web/</code> to build the interface.</p>
+</main>
+</body>
+</html>
+"#;
 
-fn git_status_ok(args: &[&str]) -> bool {
-    Command::new("git")
-        .args(args)
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-fn git_output(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
+fn copy_dir_recursive(source: &Path, dest: &Path) {
+    for entry in fs::read_dir(source).expect("read web/dist directory") {
+        let entry = entry.expect("read web/dist entry");
+        let file_type = entry.file_type().expect("stat web/dist entry");
+        let target = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            fs::create_dir_all(&target).expect("create web-dist subdirectory");
+            copy_dir_recursive(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).expect("copy web-dist file");
+        }
     }
-    let value = String::from_utf8(output.stdout).ok()?;
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_string())
 }
 
-fn sanitize_revision(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+fn emit_rerun_for_tree(source: &Path) {
+    for entry in fs::read_dir(source).expect("read web/dist directory") {
+        let entry = entry.expect("read web/dist entry");
+        let path = entry.path();
+        let file_type = entry.file_type().expect("stat web/dist entry");
+        if file_type.is_dir() {
+            emit_rerun_for_tree(&path);
+        } else {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }

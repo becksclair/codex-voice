@@ -8,7 +8,6 @@ use axum::{
     Json,
 };
 use base64::Engine;
-use bytes::Bytes;
 use codex_voice_core::{SpeechClient, SpeechFormat, SpeechRequest};
 use codex_voice_tts::config::{
     ElevenLabsPersonaConfig, FallbackPolicy, GooglePersonaConfig, ProviderKind, ResolvedPersona,
@@ -22,15 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const WEB_ICON_192: &[u8] = include_bytes!("../../assets/web/icon-192.png");
-const WEB_ICON_512: &[u8] = include_bytes!("../../assets/web/icon-512.png");
-const WEB_ICON_MASKABLE_512: &[u8] = include_bytes!("../../assets/web/icon-maskable-512.png");
-const WEB_APPLE_TOUCH_ICON: &[u8] = include_bytes!("../../assets/web/apple-touch-icon.png");
-pub(crate) const WEB_BUILD_REVISION: &str = env!("CODEX_VOICE_WEB_REVISION");
 pub(crate) const WEB_SPEECH_JOB_TTL: Duration = Duration::from_secs(6 * 60 * 60);
-
-const WEB_SW_BODY_JS: &str = include_str!("../../assets/web/sw.js");
-const WEB_APP_HTML: &str = include_str!("../../assets/web/app.html");
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -424,45 +415,6 @@ pub(crate) fn prune_web_speech_jobs_at(
     jobs.retain(|_, record| now.saturating_duration_since(record.updated_at) <= WEB_SPEECH_JOB_TTL);
 }
 
-pub(crate) async fn web_app() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        web_app_body(),
-    )
-}
-
-fn web_app_body() -> &'static str {
-    // Safe to memoize: the body is a pure function of compile-time constants
-    // (WEB_BUILD_REVISION via versioned_web_asset), so it never varies per request.
-    static BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    BODY.get_or_init(|| {
-        WEB_APP_HTML
-            .replace(
-                "__WEB_MANIFEST_URL__",
-                &versioned_web_asset("/web/manifest.webmanifest"),
-            )
-            .replace(
-                "__WEB_MANIFEST_LIGHT_URL__",
-                &versioned_web_asset("/web/manifest-light.webmanifest"),
-            )
-            .replace(
-                "__WEB_ICON_192_URL__",
-                &versioned_web_asset("/web/icon-192.png"),
-            )
-            .replace(
-                "__WEB_ICON_512_URL__",
-                &versioned_web_asset("/web/icon-512.png"),
-            )
-            .replace(
-                "__WEB_APPLE_TOUCH_ICON_URL__",
-                &versioned_web_asset("/web/apple-touch-icon.png"),
-            )
-    })
-}
-
 pub(crate) async fn web_config(
     State(state): State<ServiceState>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -482,118 +434,6 @@ pub(crate) async fn web_config(
         ],
         Json(config),
     ))
-}
-
-pub(crate) fn web_build_version() -> String {
-    format!("{}+{}", env!("CARGO_PKG_VERSION"), WEB_BUILD_REVISION)
-}
-
-pub(crate) fn web_cache_name() -> String {
-    format!("codex-voice-web-{}", web_build_version())
-}
-
-pub(crate) fn versioned_web_asset(path: &str) -> String {
-    format!("{path}?v={WEB_BUILD_REVISION}")
-}
-
-fn web_manifest_body(background_color: &str, theme_color: &str) -> String {
-    serde_json::json!({
-        "name": "Codex Voice",
-        "short_name": "Voice",
-        "description": "Quick text-to-speech for Codex Voice.",
-        "id": "/web",
-        "start_url": "/web",
-        "scope": "/web",
-        "display": "standalone",
-        "background_color": background_color,
-        "theme_color": theme_color,
-        "version": web_build_version(),
-        "build_revision": WEB_BUILD_REVISION,
-        "icons": [
-            {
-                "src": versioned_web_asset("/web/icon-192.png"),
-                "sizes": "192x192",
-                "type": "image/png",
-                "purpose": "any"
-            },
-            {
-                "src": versioned_web_asset("/web/icon-512.png"),
-                "sizes": "512x512",
-                "type": "image/png",
-                "purpose": "any"
-            },
-            {
-                "src": versioned_web_asset("/web/icon-maskable-512.png"),
-                "sizes": "512x512",
-                "type": "image/png",
-                "purpose": "maskable"
-            }
-        ]
-    })
-    .to_string()
-}
-
-fn web_service_worker_body() -> String {
-    let cache_name = serde_json::to_string(&web_cache_name()).expect("cache name serializes");
-    let build_revision =
-        serde_json::to_string(WEB_BUILD_REVISION).expect("build revision serializes");
-    format!("const CACHE_NAME = {cache_name};\nconst WEB_BUILD_REVISION = {build_revision};\n{WEB_SW_BODY_JS}")
-}
-
-pub(crate) async fn web_manifest() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "application/manifest+json"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        web_manifest_body("#17091f", "#17091f"),
-    )
-}
-
-pub(crate) async fn web_manifest_light() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "application/manifest+json"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        web_manifest_body("#f3dff1", "#f3dff1"),
-    )
-}
-
-pub(crate) async fn web_service_worker() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        web_service_worker_body(),
-    )
-}
-
-fn web_png_response(bytes: &'static [u8]) -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "image/png"),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-        ],
-        Bytes::from_static(bytes),
-    )
-}
-
-pub(crate) async fn web_icon_192() -> impl IntoResponse {
-    web_png_response(WEB_ICON_192)
-}
-
-pub(crate) async fn web_icon_512() -> impl IntoResponse {
-    web_png_response(WEB_ICON_512)
-}
-
-pub(crate) async fn web_icon_maskable_512() -> impl IntoResponse {
-    web_png_response(WEB_ICON_MASKABLE_512)
-}
-
-pub(crate) async fn web_apple_touch_icon() -> impl IntoResponse {
-    web_png_response(WEB_APPLE_TOUCH_ICON)
 }
 
 #[derive(Debug, Deserialize)]

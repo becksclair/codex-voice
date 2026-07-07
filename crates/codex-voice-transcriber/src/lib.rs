@@ -64,6 +64,9 @@ pub struct ServeConfig {
     pub token_env: String,
     pub ffmpeg_binary: String,
     pub no_auth: bool,
+    /// Optional directory whose contents are served in place of the embedded
+    /// web dist, for local development against an unbundled `web/dist`.
+    pub web_dist_override: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]

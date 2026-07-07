@@ -150,6 +150,7 @@ pub(crate) fn test_state_with_speech_backend_and_config(
             tts_config.as_ref(),
         ))),
         web_speech_jobs: Arc::new(Mutex::new(HashMap::new())),
+        web_dist_override: None,
         auth: ServiceAuth {
             token: "test-token".into(),
             no_auth: false,

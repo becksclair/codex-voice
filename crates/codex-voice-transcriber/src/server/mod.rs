@@ -27,15 +27,15 @@ mod speech;
 mod tests;
 mod transcribe;
 mod web;
+mod web_assets;
 
 pub(crate) use speech::TtsServiceState;
 use speech::{speech, watch_tts_config};
 use transcribe::transcribe;
 use web::{
-    web_app, web_apple_touch_icon, web_config, web_icon_192, web_icon_512, web_icon_maskable_512,
-    web_manifest, web_manifest_light, web_service_worker, web_speech, web_speech_job_create,
-    web_speech_job_status, WebSpeechJobStore,
+    web_config, web_speech, web_speech_job_create, web_speech_job_status, WebSpeechJobStore,
 };
+use web_assets::{legacy_service_worker, serve_web_asset, serve_web_index};
 
 const SPEECH_BODY_LIMIT_BYTES: usize = 64 * 1024;
 const MULTIPART_OVERHEAD_BYTES: u64 = 64 * 1024;
@@ -45,6 +45,9 @@ pub(crate) struct ServiceState {
     pub(crate) backend: Arc<dyn TranscriptionClient>,
     pub(crate) tts: Arc<RwLock<TtsServiceState>>,
     pub(crate) web_speech_jobs: WebSpeechJobStore,
+    /// Optional directory whose contents shadow the embedded web dist, for
+    /// local development against an unbundled `web/dist` without a rebuild.
+    pub(crate) web_dist_override: Option<PathBuf>,
     pub(crate) auth: ServiceAuth,
     pub(crate) codex_upload_limit_bytes: u64,
     pub(crate) client_upload_limit_bytes: u64,
@@ -94,6 +97,7 @@ pub async fn serve(
         backend,
         tts,
         web_speech_jobs: Arc::new(Mutex::new(HashMap::new())),
+        web_dist_override: config.web_dist_override,
         auth: ServiceAuth {
             token: discovery.token.clone(),
             no_auth: config.no_auth,
@@ -143,18 +147,13 @@ fn service_router(state: ServiceState) -> Router {
     Router::new()
         .route("/healthz", health_routes.clone())
         .route("/v1/healthz", health_routes)
-        .route("/web", get(web_app))
+        .route("/web", get(serve_web_index))
         .route("/web/config", get(web_config))
-        .route("/web/manifest.webmanifest", get(web_manifest))
-        .route("/web/manifest-light.webmanifest", get(web_manifest_light))
-        .route("/web-sw.js", get(web_service_worker))
-        .route("/web/icon-192.png", get(web_icon_192))
-        .route("/web/icon-512.png", get(web_icon_512))
-        .route("/web/icon-maskable-512.png", get(web_icon_maskable_512))
-        .route("/web/apple-touch-icon.png", get(web_apple_touch_icon))
+        .route("/web-sw.js", get(legacy_service_worker))
         .route("/web/speech", web_speech_routes)
         .route("/web/speech-jobs", web_speech_job_routes)
         .route("/web/speech-jobs/{id}", get(web_speech_job_status))
+        .route("/web/{*path}", get(serve_web_asset))
         .route("/audio/transcriptions", transcribe_routes.clone())
         .route("/v1/audio/transcriptions", transcribe_routes)
         .layer(DefaultBodyLimit::max(transcription_body_limit))

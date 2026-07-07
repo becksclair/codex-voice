@@ -17,6 +17,8 @@ codex-voice-tts = { path = "../codex-voice-tts" }
 dirs.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+include_dir.workspace = true
+mime_guess.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true

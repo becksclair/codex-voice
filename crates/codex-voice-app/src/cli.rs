@@ -94,6 +94,11 @@ pub struct ServerArgs {
         help = "Require bearer token authentication"
     )]
     pub require_auth: bool,
+    #[arg(
+        long,
+        help = "Serve the web UI from this directory instead of the embedded build"
+    )]
+    pub web_dist: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -131,6 +136,7 @@ impl TryFrom<ServerArgs> for codex_voice_transcriber::ServeConfig {
             token_env: value.token_env,
             ffmpeg_binary: value.ffmpeg_binary,
             no_auth: !value.require_auth,
+            web_dist_override: value.web_dist,
         })
     }
 }
@@ -191,6 +197,7 @@ mod tests {
             token_env: "CODEX_VOICE_TRANSCRIBER_TOKEN".to_string(),
             ffmpeg_binary: "ffmpeg".to_string(),
             require_auth: false,
+            web_dist: None,
         }
     }
 
