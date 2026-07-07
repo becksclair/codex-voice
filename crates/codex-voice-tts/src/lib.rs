@@ -14,3 +14,4 @@ pub use client::ConfiguredSpeechClient;
 pub use config::{ProviderKind, ReadAloudConfigLoader, ResolvedPersona, ResolvedTtsConfig};
 pub use sanitize::sanitize_for_tts;
 pub use secret::resolve_secret;
+pub use speech_prep::{collect_bracket_tags, SpeechPrepClient};

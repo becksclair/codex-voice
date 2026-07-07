@@ -187,6 +187,56 @@ impl SpeechPrepClient {
         Ok(Some(shortened))
     }
 
+    /// Run one performance-tags speech-prep generation for benchmarking.
+    ///
+    /// Builds the production performance-tags prompt for `text` and dispatches
+    /// it to the configured provider, returning the raw model output. Unlike
+    /// [`SpeechPrepClient::prepare`], this skips the `should_prepare` gating and
+    /// the post-generation validation so a benchmark can measure latency and
+    /// inspect output for any input. Provider HTTP is reused unchanged.
+    pub async fn benchmark(&self, text: &str) -> SpeechResult<String> {
+        let context = SpeechPrepContext {
+            target: SpeechPrepTarget {
+                provider: ProviderKind::Google,
+                model_id: &self.config.model,
+                supports_inline_audio_tags: true,
+            },
+            persona: None,
+            instructions: None,
+        };
+        let input = prepare_input_for_prompt(text, self.config.max_input_length)?;
+        let prompt = build_prompt(
+            &input,
+            self.config.max_length,
+            SpeechPrepMode::PerformanceTags,
+            SpeechPrepStrategy::InlineTags,
+            &self.config.tag_palette,
+            &context,
+        );
+        let max_output_tokens = performance_tags_max_output_tokens(
+            input.chars().count(),
+            self.config.max_length,
+            self.config.cap_performance_tags,
+        );
+        let body = match self.config.provider {
+            SpeechPrepProviderKind::Google => Some(serde_json::json!({
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{ "text": prompt }]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.45,
+                    "maxOutputTokens": max_output_tokens,
+                    "thinkingConfig": { "thinkingLevel": "MINIMAL" }
+                }
+            })),
+            SpeechPrepProviderKind::Codex => None,
+        };
+        self.prepare_with_fallbacks(&prompt, body.as_ref()).await
+    }
+
     pub async fn prepare(
         &self,
         text: &str,
@@ -1084,7 +1134,12 @@ fn validate_style_instruction_output(original: &str, instruction: &str) -> Speec
     Ok(())
 }
 
-fn collect_bracket_tags(text: &str) -> Vec<&str> {
+/// Collect square-bracket audio/performance tags (e.g. `[softly]`) from `text`.
+///
+/// Tags must be non-empty, at most 80 bytes, and single-line; other bracket
+/// content is skipped. Shared by speech-prep validation and the CLI benchmark
+/// so both count tags identically.
+pub fn collect_bracket_tags(text: &str) -> Vec<&str> {
     let mut tags = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find('[') {
