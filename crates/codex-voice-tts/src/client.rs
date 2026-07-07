@@ -11,6 +11,7 @@ use crate::config::{
 use crate::convert::{concatenate_pcm_chunks, concatenate_wav_chunks, convert_speech};
 use crate::elevenlabs::ElevenLabsSpeechClient;
 use crate::google::GoogleSpeechClient;
+use crate::provider::TtsProvider;
 use crate::speech_prep::{SpeechPrepClient, SpeechPrepContext, SpeechPrepOutput, SpeechPrepTarget};
 
 const CHUNKED_TTS_MIN_CHARS: usize = 1_600;
@@ -23,8 +24,8 @@ const CHUNKED_TTS_CONCURRENCY: usize = 3;
 pub struct ConfiguredSpeechClient {
     config: ResolvedTtsConfig,
     speech_prep: Option<SpeechPrepClient>,
-    google: Option<GoogleSpeechClient>,
-    elevenlabs: Option<ElevenLabsSpeechClient>,
+    google: Option<Box<dyn TtsProvider>>,
+    elevenlabs: Option<Box<dyn TtsProvider>>,
 }
 
 impl ConfiguredSpeechClient {
@@ -33,13 +34,15 @@ impl ConfiguredSpeechClient {
             .google
             .as_ref()
             .map(|cfg| GoogleSpeechClient::new(cfg.clone()))
-            .transpose()?;
+            .transpose()?
+            .map(|client| Box::new(client) as Box<dyn TtsProvider>);
 
         let elevenlabs = config
             .elevenlabs
             .as_ref()
             .map(|cfg| ElevenLabsSpeechClient::new(cfg.clone()))
-            .transpose()?;
+            .transpose()?
+            .map(|client| Box::new(client) as Box<dyn TtsProvider>);
 
         let speech_prep = config
             .speech_prep
@@ -106,40 +109,37 @@ impl ConfiguredSpeechClient {
         &self.config
     }
 
+    /// Look up the configured provider client for `kind`, if any.
+    fn provider_opt(&self, kind: ProviderKind) -> Option<&dyn TtsProvider> {
+        match kind {
+            ProviderKind::Google => self.google.as_deref(),
+            ProviderKind::ElevenLabs => self.elevenlabs.as_deref(),
+        }
+    }
+
+    /// Look up the configured provider client for `kind`, erroring with the
+    /// backend-specific "not configured" message when it is absent.
+    fn provider(&self, kind: ProviderKind) -> SpeechResult<&dyn TtsProvider> {
+        self.provider_opt(kind).ok_or_else(|| {
+            // Debug renders the variant name ("Google"/"ElevenLabs"), preserving
+            // the exact per-provider "not configured" messages verbatim.
+            SpeechError::Unavailable(format!("{kind:?} TTS not configured"))
+        })
+    }
+
     fn provider_supports_inline_audio_tags(
         &self,
         provider: ProviderKind,
         request: &SpeechRequest,
     ) -> bool {
-        match provider {
-            ProviderKind::Google => self
-                .google
-                .as_ref()
-                .is_some_and(|client| client.supports_inline_audio_tags(request)),
-            ProviderKind::ElevenLabs => self
-                .elevenlabs
-                .as_ref()
-                .is_some_and(|client| client.supports_inline_audio_tags(request)),
-        }
+        self.provider_opt(provider)
+            .is_some_and(|client| client.supports_inline_audio_tags(request))
     }
 
-    fn provider_model_id<'a>(
-        &'a self,
-        provider: ProviderKind,
-        request: &'a SpeechRequest,
-    ) -> String {
-        match provider {
-            ProviderKind::Google => self
-                .google
-                .as_ref()
-                .map(|client| client.resolved_model_id(request).to_string())
-                .unwrap_or_else(|| request.model_hint.clone()),
-            ProviderKind::ElevenLabs => self
-                .elevenlabs
-                .as_ref()
-                .and_then(|client| client.resolved_model_id(request).ok())
-                .unwrap_or_else(|| request.model_hint.clone()),
-        }
+    fn provider_model_id(&self, provider: ProviderKind, request: &SpeechRequest) -> String {
+        self.provider_opt(provider)
+            .and_then(|client| client.resolved_model_id(request).ok())
+            .unwrap_or_else(|| request.model_hint.clone())
     }
 
     fn provider_speech_prep_strategy(
@@ -160,18 +160,9 @@ impl ConfiguredSpeechClient {
     }
 
     fn provider_max_text_length(&self, provider: ProviderKind) -> usize {
-        match provider {
-            ProviderKind::Google => self
-                .google
-                .as_ref()
-                .map(|client| client.max_text_length())
-                .unwrap_or(self.config.max_text_length),
-            ProviderKind::ElevenLabs => self
-                .elevenlabs
-                .as_ref()
-                .map(|client| client.max_text_length())
-                .unwrap_or(self.config.max_text_length),
-        }
+        self.provider_opt(provider)
+            .map(|client| client.max_text_length())
+            .unwrap_or(self.config.max_text_length)
     }
 
     async fn prepare_request_for_provider(
@@ -351,24 +342,9 @@ impl ConfiguredSpeechClient {
         persona: Option<&ResolvedPersona>,
         native_voice: Option<&str>,
     ) -> SpeechResult<SynthesizedSpeech> {
-        match provider {
-            ProviderKind::Google => {
-                if let Some(client) = &self.google {
-                    client.synthesize(request, persona, native_voice).await
-                } else {
-                    Err(SpeechError::Unavailable("Google TTS not configured".into()))
-                }
-            }
-            ProviderKind::ElevenLabs => {
-                if let Some(client) = &self.elevenlabs {
-                    client.synthesize(request, persona, native_voice).await
-                } else {
-                    Err(SpeechError::Unavailable(
-                        "ElevenLabs TTS not configured".into(),
-                    ))
-                }
-            }
-        }
+        self.provider(provider)?
+            .synthesize(request, persona, native_voice)
+            .await
     }
 
     /// Dispatch synthesis to the requested provider, chunking long WAV requests so providers do not
@@ -618,10 +594,59 @@ impl SpeechClient for ConfiguredSpeechClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{split_index_at_or_before, split_tts_text, synthesize_ordered};
+    use super::{
+        split_index_at_or_before, split_tts_text, synthesize_ordered, ConfiguredSpeechClient,
+    };
+    use crate::config::{GoogleRuntimeConfig, ProviderKind, ResolvedTtsConfig};
+    use codex_voice_core::SpeechError;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    fn google_only_config() -> ResolvedTtsConfig {
+        ResolvedTtsConfig {
+            default_provider: ProviderKind::Google,
+            default_persona: None,
+            max_text_length: 1_000,
+            timeout: Duration::from_secs(120),
+            speech_prep: None,
+            google: Some(GoogleRuntimeConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://example.invalid".to_string(),
+                voice: "Sulafat".to_string(),
+                model: "gemini-2.5-flash-preview-tts".to_string(),
+                fallback_models: vec![],
+                inline_audio_tags: None,
+                max_text_length: 1_000,
+                timeout: Duration::from_secs(120),
+                scene: None,
+                sample_context: None,
+                style: None,
+                pace: None,
+                constraints: vec![],
+            }),
+            elevenlabs: None,
+            personas: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn provider_lookup_returns_not_configured_error_for_missing_provider() {
+        let client = ConfiguredSpeechClient::try_new(google_only_config())
+            .expect("configured client should build with only Google present");
+
+        // The configured provider resolves; the absent one yields the exact
+        // pre-refactor "not configured" message.
+        assert!(client.provider(ProviderKind::Google).is_ok());
+
+        match client.provider(ProviderKind::ElevenLabs) {
+            Err(SpeechError::Unavailable(message)) => {
+                assert_eq!(message, "ElevenLabs TTS not configured");
+            }
+            Err(other) => panic!("expected Unavailable not-configured error, got {other:?}"),
+            Ok(_) => panic!("expected an error for the unconfigured provider"),
+        }
+    }
 
     #[tokio::test]
     async fn synthesize_ordered_preserves_order_with_reversed_latencies() {

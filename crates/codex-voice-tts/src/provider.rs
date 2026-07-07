@@ -1,6 +1,6 @@
 use codex_voice_core::{SpeechRequest, SpeechResult, SynthesizedSpeech};
 
-use crate::config::{ProviderKind, ResolvedPersona};
+use crate::config::ResolvedPersona;
 
 /// Uniform synthesis surface shared by the concrete TTS backends.
 ///
@@ -10,7 +10,6 @@ use crate::config::{ProviderKind, ResolvedPersona};
 /// several dispatch sites in lockstep.
 #[async_trait::async_trait]
 pub(crate) trait TtsProvider: Send + Sync {
-    fn kind(&self) -> ProviderKind;
     fn supports_inline_audio_tags(&self, request: &SpeechRequest) -> bool;
     fn resolved_model_id(&self, request: &SpeechRequest) -> SpeechResult<String>;
     fn max_text_length(&self) -> usize;

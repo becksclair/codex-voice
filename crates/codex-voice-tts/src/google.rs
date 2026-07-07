@@ -1,7 +1,7 @@
 use codex_voice_core::{SpeechError, SpeechFormat, SpeechRequest, SpeechResult, SynthesizedSpeech};
 use reqwest::Client;
 
-use crate::config::{GoogleRuntimeConfig, ProviderKind, ResolvedPersona};
+use crate::config::{GoogleRuntimeConfig, ResolvedPersona};
 use crate::convert::convert_speech;
 use crate::provider::TtsProvider;
 use crate::provider_timeout::tts_timeout_for_input;
@@ -192,10 +192,6 @@ impl GoogleSpeechClient {
 
 #[async_trait::async_trait]
 impl TtsProvider for GoogleSpeechClient {
-    fn kind(&self) -> ProviderKind {
-        ProviderKind::Google
-    }
-
     fn supports_inline_audio_tags(&self, request: &SpeechRequest) -> bool {
         GoogleSpeechClient::supports_inline_audio_tags(self, request)
     }
