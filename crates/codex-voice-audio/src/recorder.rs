@@ -40,7 +40,7 @@ impl AudioRecorder for CpalWavRecorder {
         let config = device.default_input_config().map_err(|error| {
             AudioError::Message(format!("failed to read input config: {error}"))
         })?;
-        let sample_rate = config.sample_rate().0;
+        let sample_rate = config.sample_rate();
         let channels = config.channels() as usize;
         let path = tempfile::Builder::new()
             .prefix("codex-voice-")
