@@ -183,6 +183,12 @@ impl WindowState {
         if let Some(id) = self.speak_win {
             return window::gain_focus(id);
         }
+        // Minting a fresh window: always start from an empty draft. This is a
+        // fire-and-forget "speak this now" utility, so stale text from a prior
+        // session would be surprising. Close bookkeeping is unreliable on some
+        // compositors (see the iced #3229 note above), so resetting here at
+        // open time is the one point we can rely on.
+        self.content = text_editor::Content::new();
         let (id, task) = window::open(window_settings(520.0, 360.0));
         self.speak_win = Some(id);
         task.map(Message::SpeakOpened)
