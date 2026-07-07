@@ -93,7 +93,7 @@ enum Message {
 struct WindowState {
     settings_win: Option<window::Id>,
     speak_win: Option<window::Id>,
-    status: UiStatus,
+    status: String,
     content: text_editor::Content,
     command_tx: std::sync::mpsc::Sender<UiCommand>,
     info: SettingsInfo,
@@ -104,7 +104,7 @@ impl WindowState {
         Self {
             settings_win: None,
             speak_win: None,
-            status: UiStatus::idle(),
+            status: UiStatus::idle().message,
             content: text_editor::Content::new(),
             command_tx,
             info,
@@ -199,7 +199,7 @@ impl WindowState {
     fn settings_view(&self) -> Element<'_, Message> {
         let mut col = column![
             text("Codex Voice").size(20),
-            text(format!("Status: {}", self.status.message)),
+            text(format!("Status: {}", self.status)),
         ]
         .spacing(8)
         .padding(18);

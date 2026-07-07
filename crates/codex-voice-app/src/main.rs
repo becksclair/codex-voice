@@ -226,18 +226,30 @@ fn run() -> Result<()> {
 
     let settings_info = SettingsInfo::new(log_path.clone());
 
+    // Releases the daemon even if the driven future panics: a panic unwinds
+    // through block_on and would skip a plain send, leaving the daemon (and
+    // the process) alive forever instead of surfacing the panic via join().
+    struct ExitGuard(tokio::sync::mpsc::UnboundedSender<WindowEvent>);
+    impl Drop for ExitGuard {
+        fn drop(&mut self) {
+            let _ = self.0.send(WindowEvent::Exit);
+        }
+    }
+
     // Background thread: owns a multi-threaded tokio runtime that runs the
     // engine and the shared select loop, exactly as the other platforms do on
     // their main thread.
     let background = std::thread::Builder::new()
         .name("codex-voice-run".to_string())
         .spawn(move || -> Result<()> {
+            // First thing in the thread, so even a runtime-build failure or a
+            // panic anywhere below still releases the daemon on unwind.
+            let _exit_guard = ExitGuard(exit_window_tx);
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             let outcome = runtime.block_on(async move {
                 let tray = start_tray(LinuxUiConfig {
-                    log_path,
                     window_tx: config_window_tx,
                     command_tx,
                     command_rx,
@@ -258,9 +270,8 @@ fn run() -> Result<()> {
                 })
                 .await
             });
-            // However the run-loop finished (Quit, closed channels, or error),
-            // release the daemon so the main thread can join and exit.
-            let _ = exit_window_tx.send(WindowEvent::Exit);
+            // The ExitGuard drop releases the daemon however the run-loop
+            // finished (Quit, closed channels, error, or panic).
             outcome
         })?;
 

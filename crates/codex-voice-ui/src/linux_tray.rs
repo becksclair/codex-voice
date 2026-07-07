@@ -18,7 +18,6 @@
 use codex_voice_core::DictationState;
 use std::{
     collections::HashMap,
-    path::PathBuf,
     process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -37,8 +36,8 @@ pub enum WindowEvent {
     OpenSettings,
     /// Open (or focus, if already open) the Speak Text window.
     OpenSpeakText,
-    /// Refresh the live status shown by an open Settings window.
-    Status(UiStatus),
+    /// Refresh the live status message shown by an open Settings window.
+    Status(String),
     /// Shut the daemon down; the process is exiting.
     Exit,
 }
@@ -47,7 +46,6 @@ pub enum WindowEvent {
 /// surface, so it carries the Linux-specific channel wiring the tray and the
 /// iced window daemon share.
 pub struct LinuxUiConfig {
-    pub log_path: PathBuf,
     /// Signals to the iced window daemon (open/focus windows, live status).
     pub window_tx: UnboundedSender<WindowEvent>,
     /// Sender the ksni menu closures use to enqueue [`UiCommand`]s.
@@ -68,7 +66,6 @@ impl StatusTray {
         let (ready_tx, ready_rx) = mpsc::channel();
 
         let LinuxUiConfig {
-            log_path: _,
             window_tx,
             command_tx,
             command_rx,
@@ -273,10 +270,17 @@ fn run_tray(
     // mirrors live status into an open Settings window.
     while let Ok(status) = status_rx.recv() {
         hud.update(&status);
-        let _ = window_tx.send(WindowEvent::Status(status.clone()));
-        runtime.block_on(handle.update(|tray: &mut KsniTray| {
+        let _ = window_tx.send(WindowEvent::Status(status.message.clone()));
+        let updated = runtime.block_on(handle.update(|tray: &mut KsniTray| {
             tray.status = status.clone();
         }));
+        if updated.is_none() {
+            // The ksni service ended (D-Bus gone, watcher shut down for good).
+            // Surface it once and stop forwarding instead of silently eating
+            // every future status update.
+            eprintln!("codex-voice tray service ended; tray status updates stopped");
+            break;
+        }
     }
 
     // The app dropped the status sender: it is shutting down. Tear the service

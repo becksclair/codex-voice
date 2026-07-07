@@ -159,7 +159,7 @@ macOS has a complete desktop surface with global hotkeys, Accessibility text inj
 All three platforms now have native UI surfaces using `tray-icon` for the system tray. Slint was planned in the original ExecPlan but was never adopted.
 
 - [x] **Decision made:** Keep per-platform native UI
-  - Linux: GTK tray + `notify-send` HUD + GTK settings window
+  - Linux: ksni (StatusNotifierItem/D-Bus) tray + `notify-send` HUD + iced settings/Speak-Text windows
   - Windows: `tray-icon` tray + Win32 settings window
   - macOS: `tray-icon` tray + `osascript` dialog settings + `osascript` notification HUD
   - All platforms share the same `UiStatus`, `UiCommand`, and event loop pattern
@@ -185,7 +185,7 @@ No packaging exists. No `cargo-packager` config, no `resources/`, no icons.
   - Category: `Productivity`
 - [ ] Configure macOS packaging: `.app` + `.dmg`, background app, unsigned
 - [ ] Configure Linux packaging: AppImage, `.deb`, Pacman
-  - Document GTK/appindicator/portal package dependencies
+  - Document portal/D-Bus package dependencies
 - [ ] Configure Windows packaging: NSIS `.exe` (WiX `.msi` optional)
 - [ ] Add `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` for Windows release builds
 - [ ] Add packaging commands to `README.md`
@@ -233,7 +233,7 @@ crates/codex-voice-codex   → Codex auth, private transcription HTTP
 crates/codex-voice-tts     → Google Gemini + ElevenLabs TTS backends
 crates/codex-voice-platform → Linux/Wayland portal adapters, Windows adapters
 crates/codex-voice-transcriber → Local OpenAI-compatible audio service + embedded web PWA
-crates/codex-voice-ui      → Linux GTK tray, notifications, settings window
+crates/codex-voice-ui      → Linux ksni tray + iced windows, notifications, per-platform tray shims
 web/                       → Standalone React TTS PWA (Vite/TypeScript/Tailwind), embedded into the transcriber crate at build time
 ```
 
