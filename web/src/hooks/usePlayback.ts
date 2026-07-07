@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { audioDownloadExtension, formatTime } from "../format.ts";
-import { type StreamingPlayback, type StreamState } from "../lib/index.ts";
+import type { StreamingPlayback, StreamState } from "../lib/audio/streaming.ts";
 import { reloadForWorkerUpdateWhenIdle } from "../pwa.ts";
 import type { WaveformRef } from "./useWaveform.ts";
 

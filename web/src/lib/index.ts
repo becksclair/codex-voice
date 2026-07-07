@@ -14,17 +14,11 @@ export * from "./theme.ts";
 export * from "./audio/wav.ts";
 export * from "./audio/pcm.ts";
 export * from "./audio/waveform.ts";
-export * from "./audio/streaming.ts";
-export * from "./synth/chunking.ts";
-export * from "./synth/pool.ts";
-export * from "./synth/common.ts";
-export * from "./synth/google.ts";
-export * from "./synth/elevenlabs.ts";
-export * from "./synth/serverJobs.ts";
-export * from "./prep/index.ts";
 export * from "./personas.ts";
-// NOTE: `./generation.ts` is intentionally NOT re-exported here. It is the entry
-// point of the speech-prep/synthesis/streaming pipeline and is loaded lazily via
-// dynamic `import()` in `useGeneration`; re-exporting it from this shell-wide
-// barrel would pull the whole pipeline back into the initial chunk. Import from
-// `./generation.ts` directly (tests) or dynamically (the generation hook).
+// NOTE: the generation pipeline (`./generation.ts`, `./audio/streaming.ts`,
+// `./synth/*`, `./prep/*`) is intentionally NOT re-exported here. It is loaded
+// lazily via dynamic `import()` in `useGeneration`; re-exporting any of it from
+// this shell-wide barrel would make the pipeline statically reachable from the
+// entry chunk and undo the code split (the 80 kB budget only catches a full
+// re-inline, not a partial one). Import those modules by path: tests and
+// `generation.ts` already do, and type-only imports are safe anywhere.

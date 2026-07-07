@@ -5,9 +5,9 @@ import {
   fallbackProvider,
   GenerationController,
   isRetryable,
-  resolveProvider,
   settingsMatchServerDefaults,
 } from "./generation.ts";
+import { resolveProvider } from "./personas.ts";
 import type { WebSettings } from "./settings.ts";
 import { DEFAULT_SETTINGS } from "./settings.ts";
 import {

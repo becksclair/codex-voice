@@ -44,15 +44,7 @@ import { synthesizeElevenLabs } from "./synth/elevenlabs.ts";
 import { canStreamGoogle, resolveGoogleModel } from "./synth/google.ts";
 import { synthesizeGoogle } from "./synth/google.ts";
 import { createWebSpeechJob, waitForWebSpeechJob } from "./synth/serverJobs.ts";
-
-// Re-exported for API compatibility; the canonical home is `./personas.ts`.
-export {
-  firstPersonaForProvider,
-  personaSupportsProvider,
-  resolvePersona,
-  resolveProvider,
-  selectedPersonaName,
-} from "./personas.ts";
+import { clamp } from "./util.ts";
 
 /** Error carrying an HTTP-ish status, as thrown across the pipeline. */
 interface StatusError extends Error {
@@ -221,7 +213,7 @@ export class GenerationController {
   }
 
   private status(fraction: number, label = "Generate"): void {
-    this.callbacks.onStatus?.(label, Math.max(0, Math.min(1, Number(fraction) || 0)));
+    this.callbacks.onStatus?.(label, clamp(Number(fraction) || 0, 0, 1));
   }
 
   private prepSettings(): PrepSettings {
