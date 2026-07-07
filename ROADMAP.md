@@ -109,6 +109,8 @@ Windows has a full desktop surface with system tray, settings window, and engine
 
 ## Phase 5 — macOS Implementation
 
+**ON HOLD (2026-07-07): no macOS hardware is available.** The macOS code compiles only in theory — it is maintained mechanically alongside Linux/Windows changes but has not been compiled, linted, or tested on a real target since the cross-platform refactors landed. Do not treat macOS as shipped or verified until hardware is available and this hold is lifted.
+
 macOS has a complete desktop surface with global hotkeys, Accessibility text injection, clipboard fallback, tray, and notifications.
 
 - [x] Implement `MacOSHotkeyService` using `global-hotkey` crate
