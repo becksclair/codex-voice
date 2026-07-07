@@ -41,18 +41,22 @@ systemctl --user is-enabled codex-voice.service
 
 [tasks.fmt]
 description = "Check formatting"
+dir = "{{cwd}}"
 run = "cargo fmt --check"
 
 [tasks.check]
 description = "Type-check the workspace"
+dir = "{{cwd}}"
 run = "cargo check --workspace"
 
 [tasks.test]
 description = "Run the workspace test suite"
+dir = "{{cwd}}"
 run = "cargo test --workspace"
 
 [tasks.lint]
 description = "Clippy with warnings denied"
+dir = "{{cwd}}"
 run = "cargo clippy --workspace --all-targets -- -D warnings"
 
 [tasks.verify]
