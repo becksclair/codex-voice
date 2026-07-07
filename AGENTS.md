@@ -29,9 +29,13 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"
 - Keep crates small and boundary-focused; shared contracts live in `crates/codex-voice-core`.
 - Prefer typed errors in library crates and `anyhow::Result` only at app/CLI boundaries.
 - Keep generated/runtime artifacts out of git; `target/` is ignored.
-- For PWA/web assets, never reference immutable assets through bare stable URLs. If an asset route uses long-lived or `immutable` caching, every HTML, manifest, and service-worker precache reference must include the current build revision or another cache-busting content version.
+- For PWA/web assets, never reference immutable assets through bare stable URLs. This is now enforced structurally: only content-hashed `/web/assets/*` paths are served with immutable caching, and the app shell, service worker, manifests, and icons are served `no-cache`. Workbox content-hash revisions handle service-worker precache versioning, so keep new long-lived assets under the hashed `assets/` directory rather than reintroducing a build-revision query string.
 - Update `README.md` and `ROADMAP.md` when command contracts change.
 - Preserve Linux-first scope until portal hotkey/paste proof is complete.
+
+## JS/Web Tooling Conventions
+
+The standalone web frontend lives at `web/` (see `web/README.md`). Use `bun` as the package manager — never `npm` or `npx`; use `bunx` for one-off executables. Lint and format with oxlint and oxfmt, run unit tests with vitest, and keep TypeScript in strict mode. `mise run verify` includes the web gates (`web-check` = oxlint + oxfmt + tsc, and `web-test` = vitest), so a green `verify` covers the frontend as well as the Rust workspace.
 
 ## Security & Secrets
 
@@ -75,6 +79,7 @@ find crates -name '*test*' -o -name '*.rs'
 
 - Relevant crate-level checks pass, then root `cargo fmt --check`, `cargo check --workspace`, and `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings` after non-trivial Rust changes.
+- After web frontend changes, run the web gates (`mise run web-check` and `mise run web-test`); `mise run verify` runs the full Rust + web gate set.
 - After modifying any installed/runtime service behavior, rebuild and restart the affected user services before marking the task complete, then verify the restarted service is healthy.
 - For Linux runtime changes, run `doctor linux-portals` and the 1-second `doctor audio` smoke when relevant.
 - For TTS changes, run `doctor tts` with a short test phrase.

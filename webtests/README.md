@@ -1,8 +1,8 @@
 # Web PWA behavioral tests
 
-Playwright suite exercising the embedded Codex Voice web PWA
-(`crates/codex-voice-transcriber/assets/web/app.html`, served at `GET /web` by
-`codex-voice server`).
+Playwright suite exercising the Codex Voice web PWA — the standalone React app
+built from `web/` (see `web/README.md`) and served at `GET /web/` by
+`codex-voice server` from the dist embedded in the binary.
 
 These tests drive real browser behavior (localStorage persistence, character
 counting, clipboard paste focus handling, manifest/service-worker routes). The
@@ -12,12 +12,18 @@ disabled unless `~/.codex/read-aloud-defaults.json` exists.
 
 ## Running
 
+`mise run test-web` builds the web frontend first (`web-build`) so the server
+embeds the real React app rather than the stub page, then runs the suite. When
+invoking Playwright directly, build the frontend yourself with
+`mise run web-build` (or `cd web && bun run build`) before running the tests.
+
 The Playwright `webServer` config compiles and launches the server binary
 automatically, but the first `cargo` build is slow. Prebuild it first so the run
 does not block past the server startup timeout:
 
 ```sh
 # From the repo root:
+mise run web-build
 cargo build -p codex-voice-app
 
 cd webtests

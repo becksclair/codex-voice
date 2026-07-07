@@ -5,11 +5,12 @@
 
 .DESCRIPTION
     Run from the repository root on Windows. This script:
-      1. Builds the release binary (codex-voice-app / codex-voice.exe).
-      2. Stages dist/codex-voice-windows-x64/ with the exe plus a generated
+      1. Builds the web frontend (web/dist) so it is embedded in the binary.
+      2. Builds the release binary (codex-voice-app / codex-voice.exe).
+      3. Stages dist/codex-voice-windows-x64/ with the exe plus a generated
          README.txt and install-autostart.ps1 helper.
-      3. Zips the staging directory to dist/codex-voice-windows-x64.zip.
-      4. Prints the zip path and its SHA256.
+      4. Zips the staging directory to dist/codex-voice-windows-x64.zip.
+      5. Prints the zip path and its SHA256.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File packaging\windows\build-dist.ps1
@@ -30,7 +31,31 @@ $distDir = Join-Path $repoRoot "dist"
 $stageDir = Join-Path $distDir $distName
 $zipPath = Join-Path $distDir "$distName.zip"
 
-# --- 1. Build --------------------------------------------------------------
+# --- 1. Build web frontend -------------------------------------------------
+# web/dist is embedded into the binary by the transcriber crate's build.rs.
+# Build it first so the packaged exe ships the real PWA and not the stub page.
+$webDir = Join-Path $repoRoot "web"
+if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
+    throw "bun not found on PATH. Install bun to build the web frontend: scoop install bun"
+}
+
+Write-Host "Building web frontend (bun install --frozen-lockfile; bun run build)..."
+Push-Location $webDir
+try {
+    bun install --frozen-lockfile
+    if ($LASTEXITCODE -ne 0) {
+        throw "bun install failed with exit code $LASTEXITCODE"
+    }
+    bun run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "bun run build failed with exit code $LASTEXITCODE"
+    }
+}
+finally {
+    Pop-Location
+}
+
+# --- 2. Build binary -------------------------------------------------------
 Write-Host "Building release binary (cargo build --release -p codex-voice-app --bin codex-voice)..."
 cargo build --release -p codex-voice-app --bin codex-voice
 if ($LASTEXITCODE -ne 0) {
@@ -42,7 +67,7 @@ if (-not (Test-Path $exeSource)) {
     throw "Expected build output not found: $exeSource"
 }
 
-# --- 2. Stage --------------------------------------------------------------
+# --- 3. Stage --------------------------------------------------------------
 if (Test-Path $stageDir) {
     Remove-Item -Recurse -Force $stageDir
 }
@@ -122,7 +147,7 @@ Write-Host "Autostart shortcut created: $shortcutPath"
 '@
 Set-Content -Path (Join-Path $stageDir "install-autostart.ps1") -Value $autostart -Encoding UTF8
 
-# --- 3. Zip ----------------------------------------------------------------
+# --- 4. Zip ----------------------------------------------------------------
 if (Test-Path $zipPath) {
     Remove-Item -Force $zipPath
 }
@@ -131,7 +156,7 @@ if (-not (Test-Path $zipPath)) {
     throw "Zip was not produced: $zipPath"
 }
 
-# --- 4. Report -------------------------------------------------------------
+# --- 5. Report -------------------------------------------------------------
 $hash = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash
 $size = (Get-Item $zipPath).Length
 

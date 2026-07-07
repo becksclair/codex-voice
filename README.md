@@ -83,19 +83,59 @@ use, or the Tailscale/homelab address from `mise run setup` and the
 Homelab Reverse-Proxy Setup above — can generate and play speech without a
 native client.
 
-Routes: `GET /web` (app shell), `GET /web/config` (browser-facing TTS
-config), `GET /web/manifest.webmanifest` and
-`GET /web/manifest-light.webmanifest` (dark/light install manifests),
-`GET /web-sw.js` (service worker), `GET /web/icon-192.png`,
-`GET /web/icon-512.png`, `GET /web/icon-maskable-512.png`, and
-`GET /web/apple-touch-icon.png` (install icons), `POST /web/speech`
-(synchronous synthesis), `POST /web/speech-jobs` and
-`GET /web/speech-jobs/{id}` (async speech jobs for longer input).
+The app is a standalone React frontend that lives at `web/` in the repo root
+(Vite + React + TypeScript + Tailwind, built with `bun`). `bun run build` in
+`web/` produces `web/dist`; the transcriber crate's `build.rs` copies that
+directory into the build output and embeds it in the binary, so the app ships
+inside `codex-voice`. Cargo builds never require `bun`: when `web/dist` is
+absent the build embeds a stub page and prints a cargo warning. See
+[`web/README.md`](web/README.md) for the stack, dev workflow, PWA/manifest
+details, and the route-shadowing constraint.
 
 The app lets you paste or type text and generate speech (including
 generate-on-paste), scrub playback on a touch-friendly waveform, and install
 itself to a phone or desktop homescreen via the web manifest and service
 worker.
+
+Routes: `GET /web/` (app shell), `GET /web/assets/*` (content-hashed,
+immutable JS/CSS/icons), `GET /web/config` (browser-facing TTS config),
+`GET /web/sw.js` (service worker), `POST /web/speech` (synchronous synthesis),
+`POST /web/speech-jobs` and `GET /web/speech-jobs/{id}` (async speech jobs for
+longer input). The manifests (`manifest.webmanifest`,
+`manifest-light.webmanifest`) and install icons are static files under
+`web/public/`. Only `/web/assets/*` is served with immutable caching; the app
+shell, service worker, manifests, and icons are served `no-cache`, and Workbox
+content-hash revisions handle service-worker precache versioning. The legacy
+`/web-sw.js` route now serves a small self-destructing worker so previously
+installed PWAs unregister and adopt the new `/web/sw.js`; it can be removed
+after a couple of releases.
+
+### Serving a dist from disk
+
+`server --web-dist <dir>` serves a built dist directory from disk instead of
+the embedded copy (a full shadow, not a per-file fallback). This lets web
+deploys ship independently of the Rust binary — rebuild `web/dist` and point
+the running service at it without recompiling `codex-voice`.
+
+### Development
+
+Run the backend and the Vite dev server side by side:
+
+```bash
+# terminal 1 — backend (default 127.0.0.1:3845)
+cargo run -p codex-voice-app --bin codex-voice -- server
+
+# terminal 2 — frontend (Vite dev server on :5173, proxies /web/config and
+# /web/speech* to the backend; override with CODEX_VOICE_BACKEND)
+cd web && bun run dev
+```
+
+Then browse http://localhost:5173/web/. From the repo root, the mise tasks
+`web-install`, `web-build`, `web-check` (oxlint + oxfmt + tsc), and `web-test`
+(vitest) wrap the frontend toolchain; `mise run verify` includes `web-check`
+and `web-test`, `mise run test-web` runs the Playwright suite against a freshly
+built frontend, and `mise run setup` builds the frontend before the release
+binary.
 
 `/web/config` and the `/web/speech*` routes are deliberately unauthenticated
 so the PWA can call them without a bearer token; the trust boundary is

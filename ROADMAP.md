@@ -52,6 +52,12 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
 - [x] Add `tts bench` speech-prep benchmark (replaces `scripts/tts_prep_benchmark.py`)
 - [x] Add `transcriber probe-limits` for backend stress testing
 - [x] Add `mise run setup` for Linux systemd user service install
+- [x] Serve an installable TTS web app (PWA) from the same listener
+  - **Migrated 2026-07-07:** the embedded single-file `app.html` was replaced by
+    a standalone React frontend at `web/` (Vite, React, TypeScript, Tailwind,
+    built with `bun`). `web/dist` is embedded at build time; `server --web-dist
+    <dir>` serves a dist from disk for binary-independent web deploys. Only
+    content-hashed `/web/assets/*` is immutable-cached. See `web/README.md`.
 
 **Validation:** `cargo test --workspace`, `cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"`, `cargo run -p codex-voice-app --bin codex-voice -- server`
 
@@ -224,8 +230,9 @@ crates/codex-voice-audio   → CPAL capture, WAV writer
 crates/codex-voice-codex   → Codex auth, private transcription HTTP
 crates/codex-voice-tts     → Google Gemini + ElevenLabs TTS backends
 crates/codex-voice-platform → Linux/Wayland portal adapters, Windows adapters
-crates/codex-voice-transcriber → Local OpenAI-compatible audio service
+crates/codex-voice-transcriber → Local OpenAI-compatible audio service + embedded web PWA
 crates/codex-voice-ui      → Linux GTK tray, notifications, settings window
+web/                       → Standalone React TTS PWA (Vite/TypeScript/Tailwind), embedded into the transcriber crate at build time
 ```
 
 For crate-specific conventions, build commands, and common gotchas, see each crate's `@AGENTS.md`.
