@@ -314,10 +314,11 @@ Ctrl+V through a RemoteDesktop keyboard portal session. The first run may ask fo
 desktop portal approval; subsequent runs reuse the persisted restore token when
 the portal returns one.
 
-The Linux desktop surface depends on GTK 3 plus AppIndicator/Ayatana
-AppIndicator runtime libraries. It mirrors dictation state in the tray and uses
-the desktop notification service for the HUD so it does not steal focus from the
-target app. Logs are written to
+The Linux desktop surface uses a pure-Rust tray via the StatusNotifierItem
+D-Bus protocol (ksni) — the native tray protocol on KDE Plasma — and renders its
+on-demand Settings and Speak Text windows with iced, so it has no GTK dependency.
+It mirrors dictation state in the tray and uses the desktop notification service
+for the HUD so it does not steal focus from the target app. Logs are written to
 `${XDG_STATE_HOME:-~/.local/state}/codex-voice/codex-voice.log`, and the tray
 provides menu actions for test recording, settings/status, logs, portal
 diagnostics, and quitting the background app.

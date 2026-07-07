@@ -157,3 +157,82 @@ main thread                     background thread                tray thread
 - The daemon inversion breaks a non-Linux build (cfg leakage into shared main.rs paths).
 - `iced` with `tiny-skia`-only refuses to create windows on the dev machine's Plasma/Wayland session (renderer gap) — enabling `wgpu` as fallback is allowed but report the dependency-count delta first.
 - Any change would require touching the frozen `StatusTray` contract or `FakeTray` app tests.
+
+## Execution notes (2026-07-08)
+
+Implemented on a worktree branch. Functional migration complete and green
+(`mise run verify` + `mise run deny` pass); operator desktop smoke still owed.
+
+### What landed as specified
+- `tray_common.rs`: extracted `icon_rgba_for_state` (pure RGBA); gated the
+  `tray_icon::Icon` helpers and the `MENU_*` id constants to non-Linux; added the
+  center/corner pixel unit test.
+- `linux_tray.rs`: full rewrite as `KsniTray` (ksni `Tray` impl, `MENU_ON_ACTIVATE
+  = true`, `watcher_offline -> true`, ARGB `rotate_right(1)` icon conversion with a
+  byte-reorder unit test). `HudWindow` (notify-send) kept verbatim. `WindowEvent`
+  enum added. Frozen `StatusTray` 4-method surface unchanged; contract test passes
+  unmodified.
+- `linux_windows.rs`: new iced 0.14 daemon (Settings + Speak Text windows,
+  `text_editor`, `close_events` pruning, `OnceLock` receiver handoff into
+  `Subscription::run`). Content is a parity port.
+- `main.rs`: Linux `run()` inverted — engine + `run_app` on a background thread
+  with its own runtime; iced daemon blocks the main thread; degrade path on daemon
+  start failure. `server`/macOS/Windows paths untouched.
+- Cargo: `tray-icon` gated to macOS/Windows; `ksni` + `iced` (no wgpu) added under
+  Linux; `gtk` deleted. CI `libgtk-3-dev` removed from both workflows. Docs updated.
+
+### Deviation 1 — tray thread uses a multi-threaded runtime, not `current_thread`
+The plan specified a `current_thread` runtime inside `StatusTray::start`. That is
+incorrect for responsiveness: ksni spawns its D-Bus service loop with
+`tokio::spawn`, and a `current_thread` runtime only polls spawned tasks while a
+`block_on` is active. With the plan's blocking `status_rx.recv()` loop the service
+would be starved between status updates and the menu would freeze. Fixed
+mechanically by building a 1-worker multi-threaded runtime so the service task
+stays live independently of status updates. Public contract unchanged.
+
+### Deviation 2 (STOP-level) — `ignore = []` is NOT achievable; the ignore list GREW
+This is the plan's central premise and it does not hold as scoped. Details:
+
+- `tray-icon` 0.22 (retained for the macOS/Windows trays, exactly as the plan
+  requires) declares `libappindicator` -> the gtk-rs GTK3 stack as a **hard,
+  non-optional** `cfg(target_os = "linux")` dependency of its own, plus `muda` on
+  all platforms. Cargo records every platform's deps in `Cargo.lock` regardless of
+  host, so the entire GTK3 stack **remains in the lockfile** as long as `tray-icon`
+  is a dependency for any platform.
+- `cargo tree -e normal | grep gtk` is empty on every real target (the plan's
+  done-criterion) because the resolved path `tray-icon (macOS/Windows only)` ->
+  `libappindicator (Linux only)` never activates for a single target — this is the
+  check that misled the plan author.
+- `cargo deny` filters the graph **per-edge, not per-path**: it keeps
+  `libappindicator` because its incoming edge is `cfg(linux)`, ignoring that its
+  parent `tray-icon` is unreachable on Linux. So all 8 GTK advisories still fire.
+  A `[graph] targets = [...]` restriction to real triples does NOT prune them
+  (verified with cargo-deny 0.19.8).
+- Separately, iced/ksni introduce **new** advisories that did not exist at baseline:
+  `RUSTSEC-2026-0192` (ttf-parser, unmaintained, no safe upgrade — iced font stack)
+  and `RUSTSEC-2026-0194` / `RUSTSEC-2026-0195` (quick-xml DoS vulnerabilities via
+  `wayland-scanner`, a build-time proc-macro parsing trusted bundled Wayland XML;
+  wayland-scanner pins `quick-xml = "0.39"` and no in-range fix exists). `ksni`
+  itself is `Unlicense`-licensed (added to the allow list).
+
+Net effect: the migration removed zero GTK ignores and added three more, so the
+advisory-hygiene payoff is **negative** as scoped. To reach `ignore = []` the
+macOS/Windows trays must also leave `tray-icon` (out of this plan's scope), and the
+iced-introduced advisories (ttf-parser unmaintained; quick-xml build-time-only)
+would still need a decision. `deny.toml` was left green with a fully documented,
+honest ignore set (in its own commit for easy revert) rather than faking
+`ignore = []`. **This requires a human decision** — accept the ignore set, expand
+scope to migrate mac/win off tray-icon, or reconsider iced.
+
+### Operator smoke checklist (requires the human at the KDE desktop)
+- `mise run setup` + relogin/restart `codex-voice.service`; tray icon appears in
+  the Plasma systray with the correct idle color.
+- State colors change during a test recording (menu -> Start Test Recording).
+- Menu: all seven items act; "Speak text..." opens the iced window; Generate speaks;
+  Play replays; window close/reopen x5 works (Wayland reopen check).
+- Open Settings shows live status while recording.
+- `systemctl --user restart plasma-plasmashell` -> icon reappears within seconds
+  (watcher_offline=true path).
+- Quit exits the app cleanly (iced daemon returns, background thread joins).
+- Confirm ARGB tray icons render correctly (no channel-swapped colors) — the
+  `rotate_right(1)` conversion is unit-tested but not visually verified.

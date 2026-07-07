@@ -74,10 +74,12 @@ KDE6/Wayland portal-based hotkeys, text injection, and desktop UI surface.
   - Sets clipboard, sends Ctrl+V through portal keyboard session, restores clipboard
   - Persists restore tokens for reuse across process restarts
 - [x] Implement `LinuxPermissionService` with portal diagnostics
-- [x] Implement GTK tray with `tray-icon`
+- [x] Implement Linux tray
   - Status updates, Start Test Recording, Speak text..., Open Settings, Open Logs, Run Diagnostics, Quit
+  - Originally GTK3 via `tray-icon`; migrated to ksni (StatusNotifierItem over
+    D-Bus) to drop the unmaintained GTK3 stack (plan 023)
 - [x] Implement desktop notification HUD (`notify-send`) for focus-safe status
-- [x] Implement GTK settings/status window
+- [x] Implement settings/status window (iced; formerly GTK3)
 - [x] Add `doctor linux-portals`, `doctor paste`
 - [x] Wire `codex-voice run` with full Linux engine + tray + HUD
 

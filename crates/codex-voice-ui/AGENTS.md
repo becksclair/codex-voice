@@ -2,7 +2,7 @@
 
 ## Package Identity
 
-`codex-voice-ui` owns presentation-facing status mapping plus the native tray, notification HUD, and settings/status window for Linux, macOS, and Windows (`src/linux_tray.rs`, `src/macos_tray.rs`, `src/windows_tray.rs`). Keep UI state here instead of leaking it into core or app wiring.
+`codex-voice-ui` owns presentation-facing status mapping plus the native tray, notification HUD, and settings/status window for Linux, macOS, and Windows (`src/linux_tray.rs`, `src/linux_windows.rs`, `src/macos_tray.rs`, `src/windows_tray.rs`). Keep UI state here instead of leaking it into core or app wiring.
 
 ## Setup & Run
 
@@ -41,9 +41,10 @@ rg -n "AppEvent|StateChanged" ../codex-voice-core/src/engine.rs ../codex-voice-a
 
 ## Common Gotchas
 
-- This crate has no Slint dependency: per `ROADMAP.md` Phase 6, Slint was evaluated and not adopted; the Linux surface uses GTK plus `tray-icon` and `notify-send` for focus-safe HUD notifications, and macOS/Windows use `tray-icon` with platform-native dialogs and notifications.
-- Keep GTK/AppIndicator dependencies target-scoped to Linux.
-- Do not put runtime side effects behind GTK callbacks; send `UiCommand` to the app crate.
+- This crate has no Slint dependency: per `ROADMAP.md` Phase 6, Slint was evaluated and not adopted. The Linux surface uses `ksni` (StatusNotifierItem over D-Bus) for the tray, `iced` for the Settings/Speak Text windows, and `notify-send` for focus-safe HUD notifications — no GTK. macOS/Windows use `tray-icon` with platform-native dialogs and notifications.
+- Keep `ksni`/`iced` dependencies target-scoped to Linux and `tray-icon` target-scoped to macOS/Windows.
+- The Linux iced window daemon must own the process main thread (winit constraint); the engine/run-loop run on a background thread. See `src/linux_tray.rs` and `src/linux_windows.rs`.
+- Do not put runtime side effects in ksni menu closures or iced update handlers; send `UiCommand` to the app crate (or `WindowEvent` to the daemon).
 
 ## Pre-PR Checks
 

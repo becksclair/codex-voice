@@ -68,7 +68,7 @@ Replacing the embedded single-file PWA (`crates/codex-voice-transcriber/assets/w
 
 | Plan | Title | Priority | Effort | Status |
 |------|-------|----------|--------|--------|
-| 023 | Replace the GTK3 tray stack with ksni + iced on Linux | P3 | M | TODO — plan written 2026-07-08 at `3ddc31f`; kills all 8 deny advisory ignores + libgtk-3-dev CI dep; requires operator desktop smoke |
+| 023 | Replace the GTK3 tray stack with ksni + iced on Linux | P3 | M | DONE (pending operator desktop smoke + human review of deny deviation) — tray on ksni, windows on iced, zero GTK compiled anywhere; libgtk-3-dev dropped from CI. DEVIATION: `ignore = []` NOT achieved — `tray-icon` (kept for macOS/Windows) hard-deps libappindicator→GTK3, so GTK stays in Cargo.lock and cargo-deny (per-edge filtering) still flags all 8; iced/ksni add 3 new advisories (ttf-parser, quick-xml×2). See plan "Execution notes". |
 
 ## Findings considered and rejected (do not re-audit)
 
