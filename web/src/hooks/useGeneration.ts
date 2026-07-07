@@ -1,0 +1,232 @@
+import { useEffect, useRef, useState, type RefObject } from "react";
+import {
+  clamp,
+  GenerationController,
+  getLastGeneratedAudio,
+  loadPendingGeneration,
+  loadText,
+  saveText,
+  shouldApplyGeneratedText,
+  type BrowserTtsConfig,
+  type GenerationMeta,
+  type WebSettings,
+} from "../lib/index.ts";
+import { reloadForWorkerUpdateWhenIdle, setBusyPredicate } from "../pwa.ts";
+import type { SetText } from "./usePersistedText.ts";
+import type { PlaybackApi } from "./usePlayback.ts";
+import type { WaveformRef } from "./useWaveform.ts";
+
+interface UseGenerationOptions {
+  config: BrowserTtsConfig | null;
+  settings: WebSettings;
+  textRef: RefObject<HTMLTextAreaElement | null>;
+  setText: SetText;
+  playback: PlaybackApi;
+  waveformRef: WaveformRef;
+  showError: (message: string) => void;
+  clearError: () => void;
+}
+
+/** The public surface of {@link useGeneration}. */
+export interface GenerationState {
+  /** Whether the generate button is busy (disabled) — mirrors `generate.disabled`. */
+  busy: boolean;
+  /** Whether the spinner/`.generating` treatment is showing. */
+  generating: boolean;
+  /** Progress fraction (0..1) for the generate button's progress bar. */
+  progress: number;
+  /** The generate button's label text. */
+  label: string;
+  /** Generate the current draft text; returns false when there was nothing to do. */
+  generate: () => Promise<boolean>;
+  /** Cancel any active run (used by the clear button). */
+  cancelActive: () => void;
+}
+
+/**
+ * Owns the {@link GenerationController} lifecycle and translates its callbacks
+ * into React state + playback/waveform side effects.
+ *
+ * Replaces the legacy controller construction, the `setGenerating`/`showError`
+ * button wiring, the pagehide/pageshow/visibilitychange lifecycle handlers, and
+ * the stored-state restore/resume bootstrap.
+ */
+export function useGeneration(options: UseGenerationOptions): GenerationState {
+  const { config, settings, textRef, setText, playback, waveformRef, showError, clearError } =
+    options;
+
+  const [busy, setBusy] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [label, setLabel] = useState("Generate");
+
+  const controllerRef = useRef<GenerationController | null>(null);
+  const activeRef = useRef(false);
+  const configRef = useRef(config);
+  const settingsRef = useRef(settings);
+  configRef.current = config;
+  settingsRef.current = settings;
+
+  // Keep the controller's config/settings in sync (mirrors `controller.update`).
+  useEffect(() => {
+    controllerRef.current?.update({ config, settings });
+  }, [config, settings]);
+
+  useEffect(() => {
+    const getDraftText = (): string => textRef.current?.value || loadText() || "";
+
+    const setGeneratingClass = (active: boolean, text: string, fraction: number): void => {
+      setGenerating(active);
+      setLabel(text);
+      setProgress(clamp(fraction, 0, 1));
+    };
+
+    const controller = new GenerationController({
+      config: configRef.current,
+      settings: settingsRef.current,
+      getDraftText,
+      callbacks: {
+        onStatus: (statusLabel, fraction) => {
+          setProgress(clamp(fraction, 0, 1));
+          setLabel(statusLabel);
+        },
+        onGeneratingChange: (active) => {
+          if (active) {
+            activeRef.current = true;
+            setBusy(true);
+            playback.setPlayDisabled(true);
+            setGeneratingClass(true, "Starting", 0.08);
+          } else {
+            activeRef.current = false;
+            setBusy(false);
+            setTimeout(() => {
+              if (!activeRef.current) setGeneratingClass(false, "Generate", 0);
+            }, 350);
+            reloadForWorkerUpdateWhenIdle();
+          }
+        },
+        onError: (message) => {
+          playback.setPlayDisabled(!playback.audioHasSrc());
+          if (!playback.audioHasSrc() && !playback.hasStream()) waveformRef.current?.reset();
+          showError(message);
+        },
+        onClearError: clearError,
+        onTextReplace: (value) => setText(value, { persist: false }),
+        onAudioReady: (blob, meta: GenerationMeta) => {
+          if (meta.streamed && meta.playback) {
+            playback.onStreamAudioReady(blob, meta.playback.stopped ? null : meta.playback);
+          } else {
+            playback.loadAudioBlob(blob);
+          }
+        },
+        playbackCallbacks: {
+          onPlayingChange: (playing) => playback.onPlayingChange(playing),
+          onProgress: (current, estimated, finished) =>
+            playback.onStreamProgress(current, estimated, finished),
+          onPeaks: (peaks, durationDelta) =>
+            waveformRef.current?.appendStreamingPeaks(peaks, durationDelta),
+          onFinished: () => waveformRef.current?.markStreamFinished(),
+          onReplayReady: (blob) => playback.onReplayReady(blob),
+        },
+        onStreamState: (state) => playback.onStreamState(state),
+      },
+    });
+    controllerRef.current = controller;
+    activeRef.current = false;
+
+    setBusyPredicate(() => activeRef.current || playback.hasStream());
+
+    const restoreLastGeneratedAudio = async (): Promise<void> => {
+      try {
+        const record = await getLastGeneratedAudio();
+        if (!record?.blob) return;
+        if (
+          typeof record.text === "string" &&
+          shouldApplyGeneratedText(getDraftText(), record.text, record.text)
+        ) {
+          setText(record.text);
+        }
+        playback.loadAudioBlob(record.blob);
+        clearError();
+      } catch {
+        // Ignored, matching app.html behavior.
+      }
+    };
+
+    void (async () => {
+      await restoreLastGeneratedAudio();
+      await controller.resumePending();
+    })();
+
+    const cleanups: Array<() => void> = [];
+    const on = (target: EventTarget, type: string, handler: EventListener): void => {
+      target.addEventListener(type, handler);
+      cleanups.push(() => target.removeEventListener(type, handler));
+    };
+
+    on(window, "pagehide", () => {
+      if (activeRef.current) controller.markLifecycleInterrupted();
+      saveText(textRef.current?.value || "");
+    });
+    on(window, "pageshow", (event) => {
+      if ((event as PageTransitionEvent).persisted && !playback.audioHasSrc()) {
+        void restoreLastGeneratedAudio();
+      }
+      if (activeRef.current) setGeneratingClass(true, "Generating", 0.45);
+      if (!activeRef.current && loadPendingGeneration()) void controller.resumePending();
+    });
+    on(document, "visibilitychange", () => {
+      if (document.visibilityState !== "visible" && activeRef.current) {
+        controller.markLifecycleInterrupted();
+        return;
+      }
+      if (document.visibilityState === "visible" && activeRef.current) {
+        setGeneratingClass(true, "Generating", 0.45);
+      }
+      if (document.visibilityState === "visible" && !activeRef.current && loadPendingGeneration()) {
+        void controller.resumePending();
+      }
+    });
+
+    return () => {
+      for (const cleanup of cleanups) cleanup();
+      controller.cancel();
+      controllerRef.current = null;
+      setBusyPredicate(() => false);
+    };
+    // Mount-once setup of the generation controller + lifecycle listeners; the
+    // captured callbacks only touch refs and stable setters, so they are stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const generate = async (): Promise<boolean> => {
+    const input = (textRef.current?.value || "").trim();
+    if (!input) {
+      showError("Enter some text first.");
+      return false;
+    }
+    const controller = controllerRef.current;
+    if (!controller) return false;
+    if (controller.isActive) {
+      controller.cancel();
+      activeRef.current = false;
+      setBusy(false);
+    }
+    await controller.generate(input);
+    return true;
+  };
+
+  const cancelActive = (): void => {
+    const controller = controllerRef.current;
+    if (controller?.isActive) {
+      controller.cancel();
+      activeRef.current = false;
+      setBusy(false);
+      setGenerating(false);
+      setLabel("Generate");
+      setProgress(0);
+    }
+  };
+
+  return { busy, generating, progress, label, generate, cancelActive };
+}

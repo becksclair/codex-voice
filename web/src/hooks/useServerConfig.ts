@@ -1,0 +1,34 @@
+import { useEffect, useState } from "react";
+import {
+  fetchConfig,
+  loadCachedConfig,
+  saveCachedConfig,
+  type BrowserTtsConfig,
+} from "../lib/index.ts";
+
+/**
+ * The live browser-TTS config: cached value first, then a background refresh.
+ *
+ * Ports the `directConfig = loadCachedConfig()` seed and the `refreshConfig`
+ * fetch from the legacy mount effect. The fetched config is cached and becomes
+ * the new state; downstream hooks react to the change (settings repopulate, the
+ * generation controller updates).
+ */
+export function useServerConfig(): BrowserTtsConfig | null {
+  const [config, setConfig] = useState<BrowserTtsConfig | null>(loadCachedConfig);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const fresh = await fetchConfig();
+      if (cancelled || !fresh) return;
+      saveCachedConfig(fresh);
+      setConfig(fresh);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return config;
+}

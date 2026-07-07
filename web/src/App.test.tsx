@@ -93,6 +93,30 @@ test("theme select persists to localStorage and sets data-theme", () => {
   expect(JSON.parse(raw as string).theme).toBe("light");
 });
 
+test("generate with empty text surfaces the error banner", () => {
+  render(<App />);
+  const generate = document.getElementById("generate") as HTMLButtonElement;
+  const banner = document.getElementById("error-banner") as HTMLElement;
+  expect(banner.classList.contains("visible")).toBe(false);
+
+  fireEvent.click(generate);
+  expect(banner.textContent).toBe("Enter some text first.");
+  expect(banner.classList.contains("visible")).toBe(true);
+});
+
+test("toggling a settings checkbox persists to localStorage", () => {
+  render(<App />);
+  const emotion = document.getElementById("emotion") as HTMLInputElement;
+  // Default is on; toggling it off must persist.
+  expect(emotion.checked).toBe(true);
+
+  fireEvent.click(emotion);
+  expect(emotion.checked).toBe(false);
+  const raw = localStorage.getItem("codex-voice.web.settings.v1");
+  expect(raw).not.toBeNull();
+  expect(JSON.parse(raw as string).emotionPreprocessing).toBe(false);
+});
+
 test("paste fills the textarea without moving focus", async () => {
   const pasted = "clipboard payload";
   Object.defineProperty(navigator, "clipboard", {
