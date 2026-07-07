@@ -2,7 +2,7 @@
 //!
 //! The platform-specific `run()` entry points in `main.rs` are thin shims that
 //! construct their adapters, start the status tray, and hand a [`PlatformParts`]
-//! to [`run_app`]. All shared orchestration — the `tokio::select!` loop, the
+//! to [`run_app`]. All shared orchestration — the async select loop, the
 //! speak/play/test-recording tasks, and the tray helpers — lives here so it can
 //! be unit-tested and so a fix reaches every platform at once.
 
@@ -454,15 +454,39 @@ fn set_tray_error(
 
 // ---------------------------------------------------------------------------
 // Platform-specific tray actions
+//
+// The bodies below are identical except for the one platform detail that
+// genuinely differs, so only that detail is cfg-gated.
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
+/// Opens the log file with the platform's default file/URL opener. Only the
+/// launcher command differs between platforms.
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn open_logs() -> Result<()> {
     let path = logging::ensure_log_file()?;
     tracing::info!(path = %path.display(), "opening log file");
     let _ = logging::append_log_line(format!("opening log file: {}", path.display()));
-    let mut child = std::process::Command::new("xdg-open")
-        .arg(&path)
+
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(&path);
+        cmd
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg(&path);
+        cmd
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/c", "start", "", &path.to_string_lossy()]);
+        cmd
+    };
+
+    let mut child = command
         .spawn()
         .with_context(|| format!("failed to open {}", path.display()))?;
     std::thread::spawn(move || {
@@ -471,19 +495,9 @@ fn open_logs() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn open_logs() -> Result<()> {
-    let path = logging::ensure_log_file()?;
-    tracing::info!(path = %path.display(), "opening log file");
-    let _ = logging::append_log_line(format!("opening log file: {}", path.display()));
-    let mut child = std::process::Command::new("cmd")
-        .args(["/c", "start", "", &path.to_string_lossy()])
-        .spawn()
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    anyhow::bail!("open_logs is not implemented for this platform")
 }
 
 #[cfg(target_os = "linux")]
@@ -509,18 +523,24 @@ async fn run_tray_diagnostics(status_tx: std::sync::mpsc::Sender<UiStatus>) {
     }
 }
 
-#[cfg(target_os = "windows")]
+/// Windows and macOS tray diagnostics are non-interactive in v1: the main
+/// hotkey service is already running and interactive tests are Linux-only
+/// (portal-based). Full diagnostics remain available via the CLI. The only
+/// per-platform difference is the log label.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 async fn run_tray_diagnostics(status_tx: std::sync::mpsc::Sender<UiStatus>) {
-    let _ = logging::append_log_line("running windows diagnostics");
+    #[cfg(target_os = "windows")]
+    const PLATFORM: &str = "windows";
+    #[cfg(target_os = "macos")]
+    const PLATFORM: &str = "macos";
+
+    let _ = logging::append_log_line(format!("running {PLATFORM} diagnostics"));
     set_tray_status(
         &status_tx,
         UiStatus::new(DictationState::Transcribing, "Running diagnostics..."),
     );
-    // Windows tray diagnostics are non-interactive in v1 because the main hotkey
-    // service is already running and an interactive test would conflict with it.
-    // Full diagnostics are available via CLI: doctor hotkey, doctor paste, doctor audio, etc.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let _ = logging::append_log_line("windows diagnostics complete");
+    let _ = logging::append_log_line(format!("{PLATFORM} diagnostics complete"));
     set_tray_status(
         &status_tx,
         UiStatus::new(
@@ -528,46 +548,6 @@ async fn run_tray_diagnostics(status_tx: std::sync::mpsc::Sender<UiStatus>) {
             "Diagnostics complete — use CLI for full tests",
         ),
     );
-}
-
-#[cfg(target_os = "macos")]
-fn open_logs() -> Result<()> {
-    let path = logging::ensure_log_file()?;
-    tracing::info!(path = %path.display(), "opening log file");
-    let _ = logging::append_log_line(format!("opening log file: {}", path.display()));
-    let mut child = std::process::Command::new("open")
-        .arg(&path)
-        .spawn()
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-async fn run_tray_diagnostics(status_tx: std::sync::mpsc::Sender<UiStatus>) {
-    let _ = logging::append_log_line("running macos diagnostics");
-    set_tray_status(
-        &status_tx,
-        UiStatus::new(DictationState::Transcribing, "Running diagnostics..."),
-    );
-    // macOS tray diagnostics are non-interactive in v1 because portal-based
-    // diagnostics are Linux-only. Full diagnostics are available via CLI.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let _ = logging::append_log_line("macos diagnostics complete");
-    set_tray_status(
-        &status_tx,
-        UiStatus::new(
-            DictationState::Idle,
-            "Diagnostics complete — use CLI for full tests",
-        ),
-    );
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-fn open_logs() -> Result<()> {
-    anyhow::bail!("open_logs is not implemented for this platform")
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
