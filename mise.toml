@@ -66,13 +66,22 @@ run = "cargo clippy --workspace --all-targets -- -D warnings"
 description = "Run the Playwright web PWA behavioral suite (requires bun + chromium)"
 dir = "{{cwd}}"
 depends = ["web-build"]
-run = "cd webtests && bunx playwright test"
+run = [
+  # Prebuild outside Playwright's webServer timeout: a refreshed web/dist
+  # retriggers the transcriber build script, and a cold compile inside the
+  # 180s server-start window would fail the suite opaquely.
+  "cargo build -q -p codex-voice-app --bin codex-voice",
+  "cd webtests && bunx playwright test",
+]
 
 [tasks.test-web-live]
 description = "Run the single-run live TTS smoke (paid; requires real ~/.codex/read-aloud-defaults.json)"
 dir = "{{cwd}}"
 depends = ["web-build"]
-run = "cd webtests && LIVE_TTS=1 bunx playwright test tests/live.spec.ts"
+run = [
+  "cargo build -q -p codex-voice-app --bin codex-voice",
+  "cd webtests && LIVE_TTS=1 bunx playwright test tests/live.spec.ts",
+]
 
 [tasks.serve]
 description = "Run the audio server in the foreground (default bind 127.0.0.1:3845)"

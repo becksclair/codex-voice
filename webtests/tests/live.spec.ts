@@ -33,7 +33,12 @@ const LIVE_SMOKE_INPUT = [
   'The clock on the town hall struck eight with a deep and resonant chime, and the whole scene seemed to lean forward, ready at last to begin the real work of the day.',
 ].join(' ');
 
-/** Expected chunk count for LIVE_SMOKE_INPUT, recomputed live from splitTtsText. */
+/**
+ * Pinned chunk-count fixture for LIVE_SMOKE_INPUT. Stage 0 re-validates it
+ * against the real splitTtsText before any money is spent, so a change to the
+ * chunking constants (TTS_CHUNK_MIN_CHARS/TTS_CHUNK_MAX_CHARS) fails fast with
+ * an actionable message: re-derive this fixture, don't weaken the assertion.
+ */
 const EXPECTED_CHUNKS = 3;
 
 /** Parse an `m:ss` timecode (as rendered by formatTime) to seconds; null if not a plain time. */
@@ -71,7 +76,13 @@ test.describe.serial('live TTS smoke', () => {
     // --- Stage 0: chunking expectation, validated against the real algorithm ---
     // Free assertion (no API cost): confirms the crafted input still splits the
     // way this smoke assumes before we spend anything.
-    expect(splitTtsText(LIVE_SMOKE_INPUT).length).toBe(EXPECTED_CHUNKS);
+    const chunks = splitTtsText(LIVE_SMOKE_INPUT);
+    expect(
+      chunks.length,
+      `LIVE_SMOKE_INPUT no longer splits into ${EXPECTED_CHUNKS} chunks (got ${chunks.length}). ` +
+        'The chunking constants likely changed — re-derive the EXPECTED_CHUNKS fixture in this spec.',
+    ).toBe(EXPECTED_CHUNKS);
+    expect(chunks.length, 'input must actually exercise chunking').toBeGreaterThan(1);
 
     // --- Stage 1: shell loads ---
     await loadCleanShell(page);
@@ -105,11 +116,32 @@ test.describe.serial('live TTS smoke', () => {
 
     // --- Stage 5: wait for completion via a real DOM signal ---
     // On success the audio blob is loaded, which enables #download and #play.
-    // Generous timeout: three sequential Google requests + stitching.
-    await expect(page.locator('#download')).toBeEnabled({ timeout: 120_000 });
+    // On failure the app shows #error-banner instead — race both so a real
+    // synthesis failure reports the banner text (the diagnostic this paid run
+    // exists to surface) rather than an opaque 120s timeout on #download.
+    const outcome = await Promise.race([
+      page
+        .locator('#download')
+        .waitFor({ state: 'attached', timeout: 120_000 })
+        .then(() => page.waitForFunction(
+          () => !(document.getElementById('download') as HTMLButtonElement | null)?.disabled,
+          undefined,
+          { timeout: 120_000 },
+        ))
+        .then(() => 'complete' as const),
+      page
+        .locator('#error-banner')
+        .waitFor({ state: 'visible', timeout: 120_000 })
+        .then(() => 'error' as const),
+    ]);
+    if (outcome === 'error') {
+      const message = (await page.locator('#error-banner').textContent())?.trim();
+      throw new Error(`generation failed: ${message || '(empty error banner)'}`);
+    }
+    await expect(page.locator('#download')).toBeEnabled();
     await expect(page.locator('#play')).toBeEnabled();
 
-    // --- Stage 6: no error surfaced ---
+    // --- Stage 6: no error surfaced after completion ---
     await expect(page.locator('#error-banner')).toBeHidden();
     expect((await page.locator('#error-banner').textContent())?.trim() || '').toBe('');
 
@@ -126,6 +158,10 @@ test.describe.serial('live TTS smoke', () => {
       const ctx = canvas.getContext('2d');
       if (!ctx || !canvas.width || !canvas.height) return false;
       const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      // Count pixels differing from the first pixel: a real waveform paints
+      // hundreds of bars, while a background-only canvas (gradient/frame) has
+      // few or none. Threshold well below a real draw, well above noise.
+      let differing = 0;
       for (let i = 4; i < data.length; i += 4) {
         if (
           data[i] !== data[0] ||
@@ -133,7 +169,8 @@ test.describe.serial('live TTS smoke', () => {
           data[i + 2] !== data[2] ||
           data[i + 3] !== data[3]
         ) {
-          return true;
+          differing += 1;
+          if (differing >= 200) return true;
         }
       }
       return false;
