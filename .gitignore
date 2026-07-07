@@ -4,3 +4,6 @@ __pycache__/
 *.py[cod]
 web/node_modules/
 web/dist/
+
+# Claude Code session state (worktrees etc.)
+/.claude/
