@@ -6,39 +6,28 @@
 # `cargo deny check advisories` fails on any active vulnerability or unmaintained
 # advisory unless explicitly ignored below.
 ignore = [
-    # --- Phantom GTK3 stack (never compiled) ---------------------------------
-    # The Linux tray migrated to ksni + iced, so GTK3 is no longer compiled on
-    # ANY target: `cargo tree -e normal | grep gtk` is empty on Linux, Windows,
-    # and macOS. However `tray-icon` (retained for the macOS/Windows trays)
-    # declares `libappindicator` -> gtk-rs as a hard `cfg(target_os = "linux")`
-    # dependency of its own, so those crates remain in Cargo.lock. cargo-deny
-    # filters the graph per-edge rather than per-path, so it still reports them
-    # even though the path `tray-icon (macOS/Windows only)` -> `libappindicator
-    # (Linux only)` never resolves for any single target. Unmaintained-only —
-    # not vulnerabilities. These disappear only if tray-icon also leaves the
-    # workspace (i.e. the macOS/Windows trays move off it too).
-    "RUSTSEC-2024-0412", # gdk
-    "RUSTSEC-2024-0413", # atk
-    "RUSTSEC-2024-0415", # gtk
-    "RUSTSEC-2024-0416", # atk-sys
-    "RUSTSEC-2024-0418", # gdkx11
-    "RUSTSEC-2024-0419", # gdkx11-sys
-    "RUSTSEC-2024-0420", # gtk3-macros
-    "RUSTSEC-2024-0370", # proc-macro-error (via gtk3-macros)
+    # Tauri 2.11/Wry currently uses the archived gtk-rs GTK3 bindings on Linux.
+    # These advisories are unmaintained notices, not reported vulnerabilities,
+    # and have no safe in-range upgrade. Keep them individually enumerated so
+    # any new GTK or non-GTK advisory still fails this gate.
+    { id = "RUSTSEC-2024-0370", reason = "unmaintained proc-macro-error via Tauri GTK3 macros; no safe upgrade" },
+    { id = "RUSTSEC-2024-0411", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
+    { id = "RUSTSEC-2024-0412", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
+    { id = "RUSTSEC-2024-0413", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
+    { id = "RUSTSEC-2024-0414", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
+    { id = "RUSTSEC-2024-0415", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
+    { id = "RUSTSEC-2024-0416", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
+    { id = "RUSTSEC-2024-0417", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
+    { id = "RUSTSEC-2024-0418", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
+    { id = "RUSTSEC-2024-0419", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
+    { id = "RUSTSEC-2024-0420", reason = "unmaintained GTK3 binding via Tauri/Wry; no safe upgrade" },
 
-    # --- Introduced by the iced GUI stack ------------------------------------
-    # ttf-parser is unmaintained with no safe upgrade available. It reaches us
-    # through iced's text engine (cosmic-text -> fontdb) and only parses the
-    # bundled, trusted Fira Sans font. Unmaintained-only, not a vulnerability.
-    "RUSTSEC-2026-0192", # ttf-parser
-    # quick-xml 0.39 DoS advisories (quadratic attribute scan; unbounded
-    # namespace allocation). Reached only through `wayland-scanner`, a
-    # build-time proc-macro that parses the trusted Wayland protocol XML files
-    # bundled with the crate — never runtime, never attacker-controlled input.
-    # wayland-scanner pins `quick-xml = "0.39"`, and the fixes landed in a later
-    # minor, so no in-range upgrade exists without patching upstream.
-    "RUSTSEC-2026-0194", # quick-xml quadratic attribute-name check
-    "RUSTSEC-2026-0195", # quick-xml unbounded namespace allocation
+    # Tauri utilities reach the archived rust-unic crates through urlpattern.
+    { id = "RUSTSEC-2025-0075", reason = "unmaintained rust-unic crate via Tauri urlpattern; no safe upgrade" },
+    { id = "RUSTSEC-2025-0080", reason = "unmaintained rust-unic crate via Tauri urlpattern; no safe upgrade" },
+    { id = "RUSTSEC-2025-0081", reason = "unmaintained rust-unic crate via Tauri urlpattern; no safe upgrade" },
+    { id = "RUSTSEC-2025-0098", reason = "unmaintained rust-unic crate via Tauri urlpattern; no safe upgrade" },
+    { id = "RUSTSEC-2025-0100", reason = "unmaintained rust-unic crate via Tauri urlpattern; no safe upgrade" },
 ]
 
 [licenses]
