@@ -78,15 +78,15 @@ pub enum TranscriberCommand {
 pub struct ServerArgs {
     #[arg(long, default_value = "127.0.0.1:3845")]
     pub bind: SocketAddr,
-    #[arg(long, default_value_t = 24)]
+    #[arg(long, default_value_t = codex_voice_transcriber::DEFAULT_CODEX_UPLOAD_LIMIT_MIB)]
     pub codex_upload_limit_mib: u64,
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, default_value_t = codex_voice_transcriber::DEFAULT_CLIENT_UPLOAD_LIMIT_MIB)]
     pub client_upload_limit_mib: u64,
-    #[arg(long, default_value_t = 600)]
+    #[arg(long, default_value_t = codex_voice_transcriber::DEFAULT_CHUNK_SECONDS)]
     pub chunk_seconds: u64,
-    #[arg(long, default_value = "CODEX_VOICE_TRANSCRIBER_TOKEN")]
+    #[arg(long, default_value = codex_voice_transcriber::DEFAULT_TOKEN_ENV)]
     pub token_env: String,
-    #[arg(long, default_value = "ffmpeg")]
+    #[arg(long, default_value = codex_voice_transcriber::DEFAULT_FFMPEG_BINARY)]
     pub ffmpeg_binary: String,
     #[arg(
         long,
@@ -191,11 +191,11 @@ mod tests {
     fn server_args(bind: SocketAddr) -> ServerArgs {
         ServerArgs {
             bind,
-            codex_upload_limit_mib: 24,
-            client_upload_limit_mib: 512,
-            chunk_seconds: 600,
-            token_env: "CODEX_VOICE_TRANSCRIBER_TOKEN".to_string(),
-            ffmpeg_binary: "ffmpeg".to_string(),
+            codex_upload_limit_mib: codex_voice_transcriber::DEFAULT_CODEX_UPLOAD_LIMIT_MIB,
+            client_upload_limit_mib: codex_voice_transcriber::DEFAULT_CLIENT_UPLOAD_LIMIT_MIB,
+            chunk_seconds: codex_voice_transcriber::DEFAULT_CHUNK_SECONDS,
+            token_env: codex_voice_transcriber::DEFAULT_TOKEN_ENV.to_string(),
+            ffmpeg_binary: codex_voice_transcriber::DEFAULT_FFMPEG_BINARY.to_string(),
             require_auth: false,
             web_dist: None,
         }

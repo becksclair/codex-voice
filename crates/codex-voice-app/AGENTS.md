@@ -2,7 +2,7 @@
 
 ## Package Identity
 
-`codex-voice-app` is the CLI/runtime wiring crate. It exposes the `codex-voice` binary, diagnostic subcommands, platform run loops, logging setup, and top-level error handling.
+`codex-voice-app` is the CLI/runtime wiring crate. It exposes the `codex-voice` binary, diagnostic subcommands, the Tauri-backed desktop shell, logging setup, and top-level error handling. There is no separate UI crate: `run()` in `main.rs` enters the Tauri event loop directly on all platforms (Linux, macOS, Windows) and spawns a background `codex-voice-run` thread that owns its own Tokio runtime running the dictation engine and the shared `run_app` select loop from `app.rs`. The desktop windows are plain webviews pointed at external URLs served by the local audio server (the same React PWA used standalone) — there are no Tauri capabilities/IPC. Plain cargo builds remain supported; release packaging uses Tauri 2.
 
 ## Setup & Run
 
@@ -39,6 +39,11 @@ cargo check -p codex-voice-app
 ## Touch Points / Key Files
 
 - CLI and diagnostics: `src/main.rs`
+- Cross-platform run loop and Tauri wiring: `src/app.rs` (background `codex-voice-run` thread, shared `run_app` select loop)
+- Tray contract and window opening: `src/tray.rs` (`TauriTray`, `DesktopWindows`/`AppWindows`)
+- Tray/status state: `src/status.rs` (`UiStatus`)
+- Status HUD notifications: `src/hud.rs` (`notify-send` on Linux, `osascript` on macOS)
+- Tauri app manifest and stub frontend: `tauri.conf.json`, `tauri-frontend/`, `icons/`
 - Local transcriber service/client/discovery: `crates/codex-voice-transcriber/`
 - TTS diagnostic wiring: `src/tts.rs`
 - Binary name: `Cargo.toml`
@@ -62,11 +67,13 @@ rg -n "redact|access_token|preview|transcript_chars" src/main.rs
 - `doctor paste` requires `--text`; this is intentionally documented in the ExecPlan.
 - `server` writes `${XDG_STATE_HOME:-~/.local/state}/codex-voice/transcriber.json`; keep it private and do not log the bearer token.
 - `server` runs without bearer token authentication by default. Use `--require-auth` to enforce bearer token authentication on every request.
-- The GUI probes the discovery file or `CODEX_VOICE_TRANSCRIBER_URL` once at startup, then uses direct Codex transcription if the service is stale, unhealthy, or unauthorized.
+- The GUI probes the discovery file or `CODEX_VOICE_TRANSCRIBER_URL` once at startup. If neither is healthy it starts and owns an embedded loopback service; embedded instances never write discovery state.
 - Oversized service uploads require `ffmpeg` for chunking; without it, return a clear `413` instead of sending an unsafe oversized Codex request.
 - Linux `run` binds Control-M plus the keyboard dictation key through the GlobalShortcuts portal; approval may be prompted by the desktop.
 - Windows `run` currently uses Control-M polling and clipboard plus SendInput paste.
 - Keep platform-only commands behind the matching `#[cfg(target_os = "...")]`.
+- The main and settings windows are dumb external-URL webviews (`{base}/web?app=1`, `{base}/web?app=1&view=settings`) with no Tauri capabilities and no IPC. Selected text is stored as a short-lived one-shot server intent and the URL carries only `#intent=<id>`; never place selected text itself in the URL.
+- `run` reuses an already-running service only when `/healthz` reports desktop readiness and its root is the stable `http://localhost:3846` origin; otherwise it self-hosts there. This keeps PWA storage origin-stable. Do not assume `run` always owns the server lifecycle.
 ## Pre-PR Checks
 
 ```bash

@@ -12,7 +12,7 @@ use codex_voice_core::fs::{set_owner_only_directory_permissions, write_private_f
 use crate::TranscriberError;
 
 const TOKEN_ENV: &str = "CODEX_VOICE_TRANSCRIBER_TOKEN";
-const URL_ENV: &str = "CODEX_VOICE_TRANSCRIBER_URL";
+pub(super) const URL_ENV: &str = "CODEX_VOICE_TRANSCRIBER_URL";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriberDiscoveryFile {
@@ -28,6 +28,8 @@ pub struct TranscriberDiscoveryFile {
 pub struct ServiceCapabilities {
     pub transcriptions: bool,
     pub speech: bool,
+    #[serde(default)]
+    pub desktop: bool,
 }
 
 impl TranscriberDiscoveryFile {
@@ -200,6 +202,7 @@ pub(super) fn service_root_url(addr: SocketAddr) -> String {
         IpAddr::V4(ip) if ip == Ipv4Addr::UNSPECIFIED => "127.0.0.1".to_string(),
         IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_string(),
         IpAddr::V6(ip) => format!("[{ip}]"),
+        IpAddr::V4(ip) if ip == Ipv4Addr::LOCALHOST => "localhost".to_string(),
         IpAddr::V4(ip) => ip.to_string(),
     };
     format!("http://{host}:{}", addr.port())

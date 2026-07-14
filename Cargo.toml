@@ -7,7 +7,6 @@ members = [
     "crates/codex-voice-platform",
     "crates/codex-voice-tts",
     "crates/codex-voice-transcriber",
-    "crates/codex-voice-ui",
 ]
 resolver = "2"
 

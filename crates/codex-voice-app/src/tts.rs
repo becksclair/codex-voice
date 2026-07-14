@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Args;
 use codex_voice_core::{SpeechClient, SpeechFormat, SpeechRequest};
 use codex_voice_tts::config::{SpeechPrepConfig, SpeechPrepMode, SpeechPrepProviderKind};
 use codex_voice_tts::{
-    collect_bracket_tags, ConfiguredSpeechClient, ReadAloudConfigLoader, SpeechPrepClient,
+    collect_bracket_tags, ConfiguredSpeechClient, ReadAloudConfigLoader, ResolvedTtsConfig,
+    SpeechPrepClient,
 };
 
 #[derive(Debug, Args)]
@@ -50,6 +52,39 @@ pub fn load_speech_client(path: Option<PathBuf>) -> Result<ConfiguredSpeechClien
 pub fn default_read_aloud_config_path() -> Result<PathBuf> {
     ReadAloudConfigLoader::default_path()
         .context("failed to resolve default read-aloud config path")
+}
+
+/// Resolves the default read-aloud config path and loads a speech client from
+/// it, logging and degrading gracefully (no client, no config) on failure.
+/// Shared by the `server` subcommand and the self-hosted server path started
+/// from `run()`.
+pub(crate) fn load_tts() -> (
+    Option<Arc<dyn SpeechClient>>,
+    Option<ResolvedTtsConfig>,
+    Option<PathBuf>,
+) {
+    let tts_config_path = match default_read_aloud_config_path() {
+        Ok(path) => Some(path),
+        Err(error) => {
+            tracing::warn!(%error, "TTS config path not available; live reload disabled");
+            None
+        }
+    };
+    let (speech, tts_config) = match load_speech_client(tts_config_path.clone()) {
+        Ok(client) => {
+            tracing::info!("TTS client loaded successfully");
+            let config = client.config().clone();
+            (
+                Some(Arc::new(client) as Arc<dyn SpeechClient>),
+                Some(config),
+            )
+        }
+        Err(error) => {
+            tracing::warn!(%error, "TTS client not available; speech endpoint will return 503");
+            (None, None)
+        }
+    };
+    (speech, tts_config, tts_config_path)
 }
 
 pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {

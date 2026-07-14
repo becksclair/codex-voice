@@ -1,43 +1,31 @@
 //! Cross-platform application orchestration.
 //!
-//! The platform-specific `run()` entry points in `main.rs` are thin shims that
-//! construct their adapters, start the status tray, and hand a [`PlatformParts`]
-//! to [`run_app`]. All shared orchestration — the async select loop, the
-//! speak/play/test-recording tasks, and the tray helpers — lives here so it can
-//! be unit-tested and so a fix reaches every platform at once.
+//! The shared select loop, tray helpers, and status plumbing live here so they
+//! can be unit-tested independent of the platform tray/window layer. `run()`
+//! in `main.rs` builds the Tauri app, wires [`crate::tray::TauriTray`] into
+//! [`TrayHandle`] and [`crate::windows::DesktopWindows`] into
+//! [`crate::tray::AppWindows`], and calls into [`run_app`] the way the old
+//! per-platform shims did.
 
 use anyhow::{Context, Result};
 use codex_voice_core::DictationState;
 use codex_voice_core::{AppEvent, HotkeyEvent, SelectedTextReader};
-use codex_voice_ui::{StatusTray, UiCommand, UiStatus};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
 
 use crate::doctor;
 use crate::logging;
+use crate::status::UiStatus;
+use crate::tray::{AppWindows, UiCommand};
 
-/// Abstraction over the concrete platform [`StatusTray`] so the run loop can be
-/// driven by a test double. Production code uses the [`StatusTray`] impl below;
-/// tests provide their own command source and status sink.
+/// Abstraction over the platform tray so the run loop can be driven by a test
+/// double. [`crate::tray::TauriTray`] is the concrete Tauri-backed
+/// implementation.
 pub trait TrayHandle: Send {
     fn try_recv_command(&self) -> Option<UiCommand>;
     fn update(&self, status: UiStatus);
     fn status_sender(&self) -> std::sync::mpsc::Sender<UiStatus>;
-}
-
-impl TrayHandle for StatusTray {
-    fn try_recv_command(&self) -> Option<UiCommand> {
-        StatusTray::try_recv_command(self)
-    }
-    fn update(&self, status: UiStatus) {
-        StatusTray::update(self, status)
-    }
-    fn status_sender(&self) -> std::sync::mpsc::Sender<UiStatus> {
-        StatusTray::status_sender(self)
-    }
 }
 
 /// Everything a platform shim must supply to run the shared application loop.
@@ -54,6 +42,7 @@ where
     pub engine_tx: mpsc::Sender<HotkeyEvent>,
     pub tray: Option<Box<dyn TrayHandle>>,
     pub reader: Arc<R>,
+    pub windows: Option<Arc<dyn AppWindows>>,
     pub banner: String,
 }
 
@@ -70,10 +59,10 @@ where
         engine_tx,
         tray,
         reader,
+        windows,
         banner,
     } = parts;
 
-    let speech_state = Arc::new(SpeechState::default());
     println!("{banner}");
 
     let tray_busy = Arc::new(AtomicBool::new(false));
@@ -84,9 +73,9 @@ where
                 match event {
                     HotkeyEvent::SpeakSelection => {
                         let reader = reader.clone();
-                        let speech_state = speech_state.clone();
+                        let windows = windows.clone();
                         spawn_status_task(status_sender_for_tray(tray.as_deref()), &tray_busy, move |status_tx| {
-                            run_speak_selection(status_tx, reader, speech_state)
+                            run_speak_selection(status_tx, reader, windows)
                         });
                     }
                     other => { let _ = engine_tx.try_send(other); }
@@ -110,18 +99,6 @@ where
                             UiCommand::OpenLogs => open_tray_logs(tray),
                             UiCommand::RunDiagnostics => {
                                 spawn_tray_task(tray, &tray_busy, run_tray_diagnostics);
-                            }
-                            UiCommand::SpeakText(text) => {
-                                let speech_state = speech_state.clone();
-                                spawn_tray_task(tray, &tray_busy, move |status_tx| {
-                                    run_speak_text(status_tx, text, speech_state)
-                                });
-                            }
-                            UiCommand::PlayLastSpeech => {
-                                let speech_state = speech_state.clone();
-                                spawn_tray_task(tray, &tray_busy, move |status_tx| {
-                                    run_play_last_speech(status_tx, speech_state)
-                                });
                             }
                             UiCommand::Quit => return Ok(()),
                         }
@@ -208,15 +185,14 @@ impl Drop for TrayBusyGuard {
     }
 }
 
-#[derive(Default)]
-struct SpeechState {
-    last_path: Mutex<Option<PathBuf>>,
-}
-
+/// Reads the current selection and reports it back via the tray status
+/// channel. On success, stores the selection as a one-shot server intent and
+/// opens the main window with its `#intent` identifier; speech synthesis and
+/// playback happen behind that window.
 async fn run_speak_selection<R>(
     status_tx: std::sync::mpsc::Sender<UiStatus>,
     reader: Arc<R>,
-    speech_state: Arc<SpeechState>,
+    windows: Option<Arc<dyn AppWindows>>,
 ) where
     R: SelectedTextReader + Send + Sync + 'static,
 {
@@ -225,6 +201,17 @@ async fn run_speak_selection<R>(
         UiStatus::new(DictationState::Transcribing, "Reading selected text..."),
     );
     match reader.selected_text().await {
+        Ok(selection) if selection.text.trim().is_empty() => {
+            tracing::info!("selected text is empty or whitespace-only; nothing to speak");
+            let _ = logging::append_log_line("selected text was whitespace-only; ignored");
+            set_tray_status(
+                &status_tx,
+                UiStatus::new(
+                    DictationState::Error("selection is empty".into()),
+                    "No selected text",
+                ),
+            );
+        }
         Ok(selection) => {
             tracing::info!(
                 chars = selection.chars,
@@ -235,7 +222,42 @@ async fn run_speak_selection<R>(
                 "selected text captured for speech: {} chars restored_clipboard={}",
                 selection.chars, selection.restored_clipboard
             ));
-            run_speak_text(status_tx, selection.text, speech_state).await;
+            match windows.as_deref() {
+                Some(windows) => match windows.open_main_with_speak(selection.text).await {
+                    Ok(()) => {
+                        let message = format!("Selected text captured: {} chars", selection.chars);
+                        set_tray_status(&status_tx, UiStatus::new(DictationState::Idle, message));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to hand selected text to the speak window");
+                        set_tray_status(
+                            &status_tx,
+                            UiStatus::new(
+                                DictationState::Error("speak window unavailable".into()),
+                                "Could not open selected text",
+                            ),
+                        );
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        "no window layer available; cannot open Speak Text with the captured selection"
+                    );
+                    let _ = logging::append_log_line(
+                        "selected text captured but no window layer is available",
+                    );
+                    set_tray_status(
+                        &status_tx,
+                        UiStatus::new(
+                            DictationState::Idle,
+                            format!(
+                                "Selected text captured: {} chars (no window available)",
+                                selection.chars
+                            ),
+                        ),
+                    );
+                }
+            }
         }
         Err(error) => {
             tracing::warn!(%error, "selected text capture failed");
@@ -246,155 +268,6 @@ async fn run_speak_selection<R>(
             );
         }
     }
-}
-
-async fn run_speak_text(
-    status_tx: std::sync::mpsc::Sender<UiStatus>,
-    text: String,
-    speech_state: Arc<SpeechState>,
-) {
-    if text.trim().is_empty() {
-        set_tray_status(
-            &status_tx,
-            UiStatus::new(
-                DictationState::Error("empty speech text".into()),
-                "No text to speak",
-            ),
-        );
-        return;
-    }
-
-    set_tray_status(
-        &status_tx,
-        UiStatus::new(DictationState::Transcribing, "Generating speech..."),
-    );
-    match synthesize_save_and_play(&text, speech_state.clone()).await {
-        Ok(report) => {
-            let message = format!("Played speech: {} chars", report.chars);
-            set_tray_status(&status_tx, UiStatus::new(DictationState::Idle, message));
-        }
-        Err(error) => {
-            tracing::warn!(%error, "speech generation/playback failed");
-            let _ =
-                logging::append_log_line(format!("speech generation/playback failed: {error:#}"));
-            set_tray_error(&status_tx, "Speech failed", &error);
-        }
-    }
-}
-
-async fn run_play_last_speech(
-    status_tx: std::sync::mpsc::Sender<UiStatus>,
-    speech_state: Arc<SpeechState>,
-) {
-    let path = {
-        let last_path = speech_state.last_path.lock().await;
-        last_path.clone()
-    }
-    .unwrap_or_else(speech_output_path);
-
-    if tokio::fs::metadata(&path).await.is_err() {
-        set_tray_status(
-            &status_tx,
-            UiStatus::new(
-                DictationState::Error("no generated speech".into()),
-                "No generated speech to play",
-            ),
-        );
-        return;
-    }
-
-    set_tray_status(
-        &status_tx,
-        UiStatus::new(DictationState::Inserting, "Playing speech..."),
-    );
-    match play_audio_file(path.clone()).await {
-        Ok(()) => {
-            let _ = logging::append_log_line(format!("replayed speech audio: {}", path.display()));
-            set_tray_status(
-                &status_tx,
-                UiStatus::new(DictationState::Idle, "Speech replay complete"),
-            );
-        }
-        Err(error) => {
-            tracing::warn!(%error, path = %path.display(), "speech replay failed");
-            let _ = logging::append_log_line(format!("speech replay failed: {error:#}"));
-            set_tray_error(&status_tx, "Playback failed", &error);
-        }
-    }
-}
-
-struct SpeechRunReport {
-    chars: usize,
-}
-
-async fn synthesize_save_and_play(
-    text: &str,
-    speech_state: Arc<SpeechState>,
-) -> Result<SpeechRunReport> {
-    let chars = text.chars().count();
-    let client = codex_voice_transcriber::client::LocalTranscriberClient::discover(
-        Duration::from_millis(500),
-        Duration::from_secs(60),
-    )
-    .await
-    .context("local speech service is not healthy or not discoverable")?;
-    let speech = client
-        .synthesize_speech(text)
-        .await
-        .map_err(anyhow::Error::from)
-        .context("local speech synthesis failed")?;
-    let path = speech_output_path();
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    tokio::fs::write(&path, &speech.bytes)
-        .await
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    {
-        let mut last_path = speech_state.last_path.lock().await;
-        *last_path = Some(path.clone());
-    }
-    tracing::info!(
-        chars,
-        bytes = speech.bytes.len(),
-        path = %path.display(),
-        content_type = %speech.mime_type,
-        "generated speech audio"
-    );
-    let _ = logging::append_log_line(format!(
-        "generated speech audio: chars={chars} bytes={} path={}",
-        speech.bytes.len(),
-        path.display()
-    ));
-    play_audio_file(path).await?;
-    Ok(SpeechRunReport { chars })
-}
-
-fn speech_output_path() -> PathBuf {
-    dirs::state_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("codex-voice")
-        .join("last-speech.wav")
-}
-
-async fn play_audio_file(path: PathBuf) -> Result<()> {
-    tokio::task::spawn_blocking(move || play_audio_file_blocking(&path))
-        .await
-        .context("audio playback task failed")?
-}
-
-fn play_audio_file_blocking(path: &Path) -> Result<()> {
-    let sink_handle = rodio::DeviceSinkBuilder::open_default_sink()
-        .context("failed to open default audio output")?;
-    let file =
-        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let player = rodio::play(sink_handle.mixer(), std::io::BufReader::new(file))
-        .context("failed to decode or start audio playback")?;
-    player.sleep_until_end();
-    Ok(())
 }
 
 async fn run_tray_test_recording(status_tx: std::sync::mpsc::Sender<UiStatus>) {
@@ -581,6 +454,23 @@ mod tests {
         }
     }
 
+    /// Test double for [`AppWindows`] that records the last `open_main_with_speak`
+    /// call instead of touching a real window.
+    #[derive(Default)]
+    struct FakeWindows {
+        speak_text: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AppWindows for FakeWindows {
+        fn open_main(&self) {}
+        async fn open_main_with_speak(&self, text: String) -> Result<(), String> {
+            *self.speak_text.lock().unwrap() = Some(text);
+            Ok(())
+        }
+        fn open_settings(&self) {}
+    }
+
     /// Test double for [`SelectedTextReader`] returning a fixed result.
     struct FakeReader {
         result: PlatformResult<SelectedText>,
@@ -631,6 +521,7 @@ mod tests {
                 status_tx,
             })),
             reader,
+            windows: None,
             banner: "test".into(),
         };
 
@@ -642,31 +533,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn speak_text_reports_error_status_on_empty_text() {
-        let (status_tx, status_rx) = std_mpsc::channel::<UiStatus>();
-        let speech_state = Arc::new(SpeechState::default());
-
-        run_speak_text(status_tx, "   ".into(), speech_state).await;
-
-        let statuses: Vec<UiStatus> = status_rx.try_iter().collect();
-        assert_eq!(statuses.len(), 1, "expected exactly one status update");
-        assert!(
-            matches!(statuses[0].state, DictationState::Error(_)),
-            "expected an error state, got {:?}",
-            statuses[0].state
-        );
-        assert_eq!(statuses[0].message, "No text to speak");
-    }
-
-    #[tokio::test]
     async fn speak_selection_reports_status_sequence_on_reader_failure() {
         let (status_tx, status_rx) = std_mpsc::channel::<UiStatus>();
-        let speech_state = Arc::new(SpeechState::default());
         let reader = Arc::new(FakeReader {
             result: Err(PlatformError::Unavailable("no selection".into())),
         });
 
-        run_speak_selection(status_tx, reader, speech_state).await;
+        run_speak_selection(status_tx, reader, None).await;
 
         let statuses: Vec<UiStatus> = status_rx.try_iter().collect();
         assert_eq!(statuses.len(), 2, "expected two status updates");
@@ -681,28 +554,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn play_last_speech_reports_status_without_generated_file() {
+    async fn speak_selection_reports_status_sequence_on_success() {
         let (status_tx, status_rx) = std_mpsc::channel::<UiStatus>();
-        // A fresh SpeechState has no recorded last_path, so run_play_last_speech
-        // falls back to the default output path. In a clean test environment that
-        // file does not exist, yielding a single "nothing to play" error status.
-        let speech_state = Arc::new(SpeechState::default());
+        let reader = Arc::new(FakeReader {
+            result: Ok(SelectedText {
+                text: "hello".into(),
+                chars: 5,
+                restored_clipboard: true,
+            }),
+        });
+        let windows = Arc::new(FakeWindows::default());
 
-        // Guard against a stray pre-existing file at the fallback location.
-        if tokio::fs::metadata(speech_output_path()).await.is_ok() {
-            eprintln!("skipping: fallback speech file exists in this environment");
-            return;
-        }
-
-        run_play_last_speech(status_tx, speech_state).await;
+        run_speak_selection(status_tx, reader, Some(windows.clone())).await;
 
         let statuses: Vec<UiStatus> = status_rx.try_iter().collect();
-        assert_eq!(statuses.len(), 1, "expected exactly one status update");
+        assert_eq!(statuses.len(), 2, "expected two status updates");
+        assert_eq!(statuses[0].state, DictationState::Transcribing);
+        assert_eq!(statuses[0].message, "Reading selected text...");
+        assert_eq!(statuses[1].state, DictationState::Idle);
+        assert_eq!(statuses[1].message, "Selected text captured: 5 chars");
+        assert_eq!(windows.speak_text.lock().unwrap().as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn speak_selection_ignores_whitespace_only_selection() {
+        let (status_tx, status_rx) = std_mpsc::channel::<UiStatus>();
+        let reader = Arc::new(FakeReader {
+            result: Ok(SelectedText {
+                text: "  \n\t".into(),
+                chars: 4,
+                restored_clipboard: false,
+            }),
+        });
+        let windows = Arc::new(FakeWindows::default());
+
+        run_speak_selection(status_tx, reader, Some(windows.clone())).await;
+
+        let statuses: Vec<UiStatus> = status_rx.try_iter().collect();
+        assert_eq!(statuses.len(), 2, "expected two status updates");
+        assert_eq!(statuses[0].state, DictationState::Transcribing);
         assert!(
-            matches!(statuses[0].state, DictationState::Error(_)),
+            matches!(statuses[1].state, DictationState::Error(_)),
             "expected an error state, got {:?}",
-            statuses[0].state
+            statuses[1].state
         );
-        assert_eq!(statuses[0].message, "No generated speech to play");
+        assert_eq!(statuses[1].message, "No selected text");
+        assert!(
+            windows.speak_text.lock().unwrap().is_none(),
+            "whitespace-only selection must not open the speak window"
+        );
+    }
+
+    #[tokio::test]
+    async fn speak_selection_degrades_gracefully_without_a_window_layer() {
+        let (status_tx, status_rx) = std_mpsc::channel::<UiStatus>();
+        let reader = Arc::new(FakeReader {
+            result: Ok(SelectedText {
+                text: "hello".into(),
+                chars: 5,
+                restored_clipboard: true,
+            }),
+        });
+
+        run_speak_selection(status_tx, reader, None).await;
+
+        let statuses: Vec<UiStatus> = status_rx.try_iter().collect();
+        assert_eq!(statuses.len(), 2, "expected two status updates");
+        assert_eq!(statuses[1].state, DictationState::Idle);
+        assert!(statuses[1].message.contains("no window available"));
     }
 }

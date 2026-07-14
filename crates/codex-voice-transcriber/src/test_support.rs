@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::server::{ServiceAuth, ServiceState, TtsServiceState};
+use crate::server::{web::WebSpeechJobManager, ServiceAuth, ServiceState, TtsServiceState};
 
 #[derive(Default)]
 pub struct FakeBackend {
@@ -149,7 +149,8 @@ pub(crate) fn test_state_with_speech_backend_and_config(
             speech,
             tts_config.as_ref(),
         ))),
-        web_speech_jobs: Arc::new(Mutex::new(HashMap::new())),
+        web_speech_jobs: Arc::new(WebSpeechJobManager::new()),
+        desktop_intents: Arc::new(Mutex::new(HashMap::new())),
         web_dist_override: None,
         auth: ServiceAuth {
             token: "test-token".into(),

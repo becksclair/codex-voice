@@ -93,6 +93,129 @@ async fn web_app_sets_no_cache_and_html_content_type() {
 }
 
 #[tokio::test]
+async fn desktop_intent_requires_token_and_is_consumed_once() {
+    let app = service_router(test_state_with_speech(1024));
+    let unauthenticated = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/web/desktop-intents")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body::Body::from(r#"{"text":"Привет мир"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    let created = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/web/desktop-intents")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(body::Body::from(r#"{"text":"Привет мир"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_body = body::to_bytes(created.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+    let id = created_json["id"].as_str().unwrap();
+    assert_eq!(id.len(), 32);
+
+    let consume = || {
+        axum::http::Request::builder()
+            .uri(format!("/web/desktop-intents/{id}"))
+            .body(body::Body::empty())
+            .unwrap()
+    };
+    let consumed = app.clone().oneshot(consume()).await.unwrap();
+    assert_eq!(consumed.status(), StatusCode::OK);
+    assert_eq!(consumed.headers()[header::CACHE_CONTROL], "no-store");
+    let consumed_body = body::to_bytes(consumed.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let consumed_json: serde_json::Value = serde_json::from_slice(&consumed_body).unwrap();
+    assert_eq!(consumed_json["text"], "Привет мир");
+
+    let second = app.oneshot(consume()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn desktop_intent_honors_explicit_no_auth_mode() {
+    let mut state = test_state_with_speech(1024);
+    state.auth.no_auth = true;
+    let app = service_router(state);
+    let created = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/web/desktop-intents")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body::Body::from(r#"{"text":"hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn desktop_intent_delete_reclaims_an_unconsumed_intent() {
+    let app = service_router(test_state_with_speech(1024));
+    let created = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/web/desktop-intents")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(body::Body::from(r#"{"text":"hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body::to_bytes(created.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let id = json["id"].as_str().unwrap();
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("/web/desktop-intents/{id}"))
+                .body(body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+    let consumed = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/web/desktop-intents/{id}"))
+                .body(body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(consumed.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn web_app_serves_gzip_when_requested() {
     let identity_len = {
         let app = service_router(test_state_with_speech(1024));
@@ -708,21 +831,23 @@ fn web_speech_job_pruning_removes_expired_audio_results() {
     jobs.insert(
         "old".to_string(),
         WebSpeechJobRecord {
-            state: WebSpeechJobState::Complete(WebSpeechResponse {
+            state: WebSpeechJobState::Complete(Arc::new(WebSpeechResponse {
                 input: "old".to_string(),
                 input_changed: false,
                 audio_base64: "audio".to_string(),
                 mime_type: "audio/wav".to_string(),
                 format: "wav".to_string(),
-            }),
+            })),
             updated_at: old_updated_at,
+            abort: None,
         },
     );
     jobs.insert(
         "fresh".to_string(),
         WebSpeechJobRecord {
-            state: WebSpeechJobState::Pending,
+            state: WebSpeechJobState::Pending { phase: "queued" },
             updated_at: prune_at,
+            abort: None,
         },
     );
 
@@ -985,6 +1110,7 @@ async fn health_includes_capabilities() {
     assert_eq!(value["ok"], true);
     assert_eq!(value["capabilities"]["transcriptions"], true);
     assert_eq!(value["capabilities"]["speech"], true);
+    assert_eq!(value["capabilities"]["desktop"], true);
 }
 
 #[tokio::test]
@@ -1006,6 +1132,70 @@ async fn health_shows_speech_false_when_no_tts() {
         .expect("body reads");
     let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(value["capabilities"]["speech"], false);
+}
+
+#[tokio::test]
+async fn health_shows_desktop_false_when_web_ui_is_unavailable() {
+    let mut state = test_state_with_speech(1024);
+    let override_dir = tempfile::tempdir().expect("temp override");
+    state.web_dist_override = Some(override_dir.path().to_path_buf());
+    let app = service_router(state);
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/healthz")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+    let bytes = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(value["capabilities"]["speech"], true);
+    assert_eq!(value["capabilities"]["desktop"], false);
+}
+
+#[tokio::test]
+async fn health_recomputes_override_readiness_and_checks_referenced_assets() {
+    let override_dir = tempfile::tempdir().expect("temp override");
+    let assets = override_dir.path().join("assets");
+    std::fs::create_dir_all(&assets).expect("assets dir");
+    std::fs::write(
+        override_dir.path().join("index.html"),
+        r#"<link href="/web/assets/app.css"><script src="/web/assets/app.js"></script>"#,
+    )
+    .expect("index");
+    std::fs::write(assets.join("app.css"), "body{}").expect("css");
+    std::fs::write(assets.join("app.js"), "export{}").expect("js");
+
+    let mut state = test_state_with_speech(1024);
+    state.web_dist_override = Some(override_dir.path().to_path_buf());
+    let app = service_router(state);
+    let health_request = || {
+        axum::http::Request::builder()
+            .uri("/healthz")
+            .header(header::AUTHORIZATION, "Bearer test-token")
+            .body(body::Body::empty())
+            .expect("request builds")
+    };
+
+    let ready = app.clone().oneshot(health_request()).await.expect("health");
+    let body = body::to_bytes(ready.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["capabilities"]["desktop"], true);
+
+    std::fs::remove_file(assets.join("app.js")).expect("remove referenced asset");
+    let stale = app.oneshot(health_request()).await.expect("health");
+    let body = body::to_bytes(stale.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["capabilities"]["desktop"], false);
 }
 
 #[tokio::test]

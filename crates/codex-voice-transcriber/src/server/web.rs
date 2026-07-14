@@ -14,14 +14,20 @@ use codex_voice_tts::config::{
     ResolvedTtsConfig, SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies,
     SpeechPrepStrategy,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::sync::Semaphore;
+use tokio::task::AbortHandle;
 
 pub(crate) const WEB_SPEECH_JOB_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const WEB_SPEECH_MAX_TERMINAL_JOBS: usize = 16;
+const WEB_SPEECH_MAX_TERMINAL_BYTES: usize = 128 * 1024 * 1024;
+const WEB_SPEECH_ADMISSION_LIMIT: usize = 3;
+const WEB_SPEECH_WORKER_LIMIT: usize = 1;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -380,12 +386,29 @@ fn duration_millis(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-pub(crate) type WebSpeechJobStore = Arc<Mutex<HashMap<String, WebSpeechJobRecord>>>;
+pub(crate) type WebSpeechJobStore = Arc<WebSpeechJobManager>;
+
+pub(crate) struct WebSpeechJobManager {
+    records: Mutex<HashMap<String, WebSpeechJobRecord>>,
+    admission: Arc<Semaphore>,
+    workers: Arc<Semaphore>,
+}
+
+impl WebSpeechJobManager {
+    pub(crate) fn new() -> Self {
+        Self {
+            records: Mutex::new(HashMap::new()),
+            admission: Arc::new(Semaphore::new(WEB_SPEECH_ADMISSION_LIMIT)),
+            workers: Arc::new(Semaphore::new(WEB_SPEECH_WORKER_LIMIT)),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct WebSpeechJobRecord {
     pub(crate) state: WebSpeechJobState,
     pub(crate) updated_at: Instant,
+    pub(crate) abort: Option<AbortHandle>,
 }
 
 impl WebSpeechJobRecord {
@@ -393,19 +416,50 @@ impl WebSpeechJobRecord {
         Self {
             state,
             updated_at: Instant::now(),
+            abort: None,
         }
     }
 }
 
 #[derive(Clone)]
 pub(crate) enum WebSpeechJobState {
-    Pending,
-    Complete(WebSpeechResponse),
+    Pending { phase: &'static str },
+    Complete(Arc<WebSpeechResponse>),
     Failed(WebSpeechJobError),
 }
 
 pub(crate) fn prune_web_speech_jobs(jobs: &mut HashMap<String, WebSpeechJobRecord>) {
     prune_web_speech_jobs_at(Instant::now(), jobs);
+}
+
+fn enforce_web_speech_terminal_budget(jobs: &mut HashMap<String, WebSpeechJobRecord>) {
+    loop {
+        let terminal_count = jobs
+            .values()
+            .filter(|record| !matches!(record.state, WebSpeechJobState::Pending { .. }))
+            .count();
+        let terminal_bytes = jobs
+            .values()
+            .map(|record| match &record.state {
+                WebSpeechJobState::Complete(result) => result.audio_base64.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        if terminal_count <= WEB_SPEECH_MAX_TERMINAL_JOBS
+            && terminal_bytes <= WEB_SPEECH_MAX_TERMINAL_BYTES
+        {
+            break;
+        }
+        let Some(oldest) = jobs
+            .iter()
+            .filter(|(_, record)| !matches!(record.state, WebSpeechJobState::Pending { .. }))
+            .min_by_key(|(_, record)| record.updated_at)
+            .map(|(id, _)| id.clone())
+        else {
+            break;
+        };
+        jobs.remove(&oldest);
+    }
 }
 
 pub(crate) fn prune_web_speech_jobs_at(
@@ -461,9 +515,23 @@ pub(crate) struct WebSpeechJobStatusResponse {
     id: String,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<WebSpeechResponse>,
+    phase: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<SharedWebSpeechResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<WebSpeechJobError>,
+}
+
+#[derive(Debug, Clone)]
+struct SharedWebSpeechResponse(Arc<WebSpeechResponse>);
+
+impl Serialize for SharedWebSpeechResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -478,6 +546,12 @@ pub(crate) async fn web_speech(
     Json(body): Json<WebSpeechRequest>,
 ) -> Result<Json<WebSpeechResponse>, ApiError> {
     let speech_client = web_speech_client(&state)?;
+    let _worker = state
+        .web_speech_jobs
+        .workers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::too_many_requests("TTS service is busy; try again shortly"))?;
     synthesize_web_speech(speech_client, body.input)
         .await
         .map(Json)
@@ -493,30 +567,73 @@ pub(crate) async fn web_speech_job_create(
         return Err(ApiError::bad_request("input is required"));
     }
 
+    let admission = state
+        .web_speech_jobs
+        .admission
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::too_many_requests("TTS queue is full; try again shortly"))?;
+
     let id = web_speech_job_id();
     let mut jobs = state
         .web_speech_jobs
+        .records
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     prune_web_speech_jobs(&mut jobs);
     jobs.insert(
         id.clone(),
-        WebSpeechJobRecord::new(WebSpeechJobState::Pending),
+        WebSpeechJobRecord::new(WebSpeechJobState::Pending { phase: "queued" }),
     );
     drop(jobs);
 
     let jobs = state.web_speech_jobs.clone();
     let job_id = id.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
+        let worker = match jobs.workers.clone().acquire_owned().await {
+            Ok(worker) => worker,
+            Err(_) => return,
+        };
+        {
+            let mut records = jobs
+                .records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(record) = records.get_mut(&job_id) else {
+                return;
+            };
+            record.state = WebSpeechJobState::Pending { phase: "running" };
+            record.updated_at = Instant::now();
+        }
         let result = synthesize_web_speech(speech_client, input).await;
-        let state = match result {
-            Ok(response) => WebSpeechJobState::Complete(response),
+        let next_state = match result {
+            Ok(response) => WebSpeechJobState::Complete(Arc::new(response)),
             Err(error) => WebSpeechJobState::Failed(WebSpeechJobError::from(error)),
         };
-        jobs.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(job_id, WebSpeechJobRecord::new(state));
+        let mut records = jobs
+            .records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(record) = records.get_mut(&job_id) {
+            record.state = next_state;
+            record.updated_at = Instant::now();
+            record.abort = None;
+            enforce_web_speech_terminal_budget(&mut records);
+        }
+        drop(worker);
+        drop(admission);
     });
+    let abort = task.abort_handle();
+    drop(task);
+    if let Some(record) = state
+        .web_speech_jobs
+        .records
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_mut(&id)
+    {
+        record.abort = Some(abort);
+    }
 
     Ok((
         StatusCode::ACCEPTED,
@@ -534,37 +651,57 @@ pub(crate) async fn web_speech_job_status(
     let job = {
         let mut jobs = state
             .web_speech_jobs
+            .records
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         prune_web_speech_jobs(&mut jobs);
         jobs.get(&id)
             .cloned()
-            .ok_or_else(|| ApiError::bad_request("speech job was not found"))?
+            .ok_or_else(|| ApiError::not_found("speech job was not found"))?
             .state
     };
 
     let response = match job {
-        WebSpeechJobState::Pending => WebSpeechJobStatusResponse {
+        WebSpeechJobState::Pending { phase } => WebSpeechJobStatusResponse {
             id,
             status: "pending",
+            phase: Some(phase),
             result: None,
             error: None,
         },
         WebSpeechJobState::Complete(result) => WebSpeechJobStatusResponse {
             id,
             status: "complete",
-            result: Some(result),
+            phase: None,
+            result: Some(SharedWebSpeechResponse(result)),
             error: None,
         },
         WebSpeechJobState::Failed(error) => WebSpeechJobStatusResponse {
             id,
             status: "failed",
+            phase: None,
             result: None,
             error: Some(error),
         },
     };
 
     Ok(Json(response))
+}
+
+pub(crate) async fn web_speech_job_delete(
+    State(state): State<ServiceState>,
+    Path(id): Path<String>,
+) -> StatusCode {
+    let record = state
+        .web_speech_jobs
+        .records
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&id);
+    if let Some(abort) = record.and_then(|record| record.abort) {
+        abort.abort();
+    }
+    StatusCode::NO_CONTENT
 }
 
 async fn synthesize_web_speech(
@@ -616,5 +753,22 @@ impl From<ApiError> for WebSpeechJobError {
             kind: error.kind,
             message: error.message,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speech_job_manager_enforces_admission_and_worker_limits() {
+        let manager = WebSpeechJobManager::new();
+        let _admitted: Vec<_> = (0..WEB_SPEECH_ADMISSION_LIMIT)
+            .map(|_| manager.admission.clone().try_acquire_owned().unwrap())
+            .collect();
+        assert!(manager.admission.clone().try_acquire_owned().is_err());
+
+        let _worker = manager.workers.clone().try_acquire_owned().unwrap();
+        assert!(manager.workers.clone().try_acquire_owned().is_err());
     }
 }

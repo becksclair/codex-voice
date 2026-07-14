@@ -23,9 +23,73 @@ const INDEX_PATH: &str = "index.html";
 
 /// Whether the embedded web dist is the build-time placeholder rather than a
 /// real build. Content-dependent tests skip themselves when this is true.
-#[cfg(test)]
 pub(crate) fn web_dist_is_stub() -> bool {
     env!("CODEX_VOICE_WEB_DIST_KIND").as_bytes() == b"stub"
+}
+
+pub(crate) fn web_ui_available(override_dir: Option<&Path>) -> bool {
+    match override_dir {
+        Some(path) => override_web_ui_available(path),
+        None => embedded_web_ui_available(),
+    }
+}
+
+pub(crate) async fn web_ui_available_async(override_dir: Option<std::path::PathBuf>) -> bool {
+    match override_dir {
+        Some(path) => tokio::task::spawn_blocking(move || override_web_ui_available(&path))
+            .await
+            .unwrap_or(false),
+        None => embedded_web_ui_available(),
+    }
+}
+
+fn embedded_web_ui_available() -> bool {
+    if web_dist_is_stub() {
+        return false;
+    }
+    let Some(index) = WEB_DIST
+        .get_file(INDEX_PATH)
+        .and_then(|file| file.contents_utf8())
+    else {
+        return false;
+    };
+    referenced_web_assets_available(index, |relative| WEB_DIST.get_file(relative).is_some())
+}
+
+fn override_web_ui_available(root: &Path) -> bool {
+    let Ok(index) = std::fs::read_to_string(root.join(INDEX_PATH)) else {
+        return false;
+    };
+    referenced_web_assets_available(&index, |relative| root.join(relative).is_file())
+}
+
+fn referenced_web_assets_available(index: &str, mut exists: impl FnMut(&Path) -> bool) -> bool {
+    let mut saw_script = false;
+    for token in index.split(['"', '\'']) {
+        let Some(relative) = token.strip_prefix("/web/") else {
+            continue;
+        };
+        let relative = relative
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        if relative.is_empty() {
+            continue;
+        }
+        let path = Path::new(relative);
+        if path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            || !exists(path)
+        {
+            return false;
+        }
+        if relative.starts_with("assets/") && relative.ends_with(".js") {
+            saw_script = true;
+        }
+    }
+    saw_script
 }
 
 /// Self-destructing service worker served at the legacy `/web-sw.js` URL.
@@ -113,13 +177,12 @@ async fn load_asset(state: &ServiceState, rel: &str) -> Option<Vec<u8>> {
 /// Read an asset from the override directory, refusing to escape the root.
 ///
 /// The relative path is already sanitized, but the override directory may
-/// contain symlinks, so both the root and the resolved target are canonicalized
-/// and the target is required to remain within the root.
+/// contain symlinks, so the resolved target is canonicalized and required to
+/// remain within the root, which was canonicalized once when the server bound.
 async fn read_override_asset(root: &Path, rel: &str) -> Option<Vec<u8>> {
-    let canonical_root = tokio::fs::canonicalize(root).await.ok()?;
-    let target = canonical_root.join(rel);
+    let target = root.join(rel);
     let canonical_target = tokio::fs::canonicalize(&target).await.ok()?;
-    if !canonical_target.starts_with(&canonical_root) {
+    if !canonical_target.starts_with(root) {
         return None;
     }
     tokio::fs::read(&canonical_target).await.ok()
@@ -213,4 +276,25 @@ fn sanitize_asset_path(raw: &str) -> Option<String> {
         segments.push(segment);
     }
     Some(segments.join("/"))
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn referenced_asset_graph_requires_every_file_and_a_script() {
+        let index =
+            r#"<link href="/web/assets/app.css"><script src="/web/assets/app.js"></script>"#;
+        assert!(referenced_web_assets_available(index, |path| {
+            matches!(path.to_str(), Some("assets/app.css" | "assets/app.js"))
+        }));
+        assert!(!referenced_web_assets_available(index, |path| {
+            path == Path::new("assets/app.css")
+        }));
+        assert!(!referenced_web_assets_available(
+            r#"<link href="/web/assets/app.css">"#,
+            |_| true
+        ));
+    }
 }

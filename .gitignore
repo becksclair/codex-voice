@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 web/node_modules/
 web/dist/
+crates/codex-voice-app/gen/
 
 # Claude Code session state (worktrees etc.)
 /.claude/

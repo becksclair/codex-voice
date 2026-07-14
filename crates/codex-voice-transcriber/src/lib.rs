@@ -49,11 +49,16 @@ pub mod server;
 pub mod test_support;
 pub mod upload;
 
-pub use server::serve;
+pub use server::{embedded_web_dist_is_stub, serve, start_embedded, EmbeddedServiceHandle};
 
 const DEFAULT_SERVICE_TIMEOUT: Duration = Duration::from_secs(600);
-const DEFAULT_RUNTIME_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DEFAULT_RUNTIME_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+pub const DEFAULT_CODEX_UPLOAD_LIMIT_MIB: u64 = 24;
+pub const DEFAULT_CLIENT_UPLOAD_LIMIT_MIB: u64 = 512;
+pub const DEFAULT_CHUNK_SECONDS: u64 = 600;
+pub const DEFAULT_TOKEN_ENV: &str = "CODEX_VOICE_TRANSCRIBER_TOKEN";
+pub const DEFAULT_FFMPEG_BINARY: &str = "ffmpeg";
 
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
@@ -121,23 +126,21 @@ impl TranscriptionClient for RuntimeTranscriptionClient {
 
 pub async fn resolve_transcription_backend(
 ) -> Result<ResolvedTranscriptionBackend, TranscriberError> {
-    if let Some(local) =
+    let mut local =
         client::LocalTranscriberClient::discover(DEFAULT_PROBE_TIMEOUT, DEFAULT_RUNTIME_TIMEOUT)
-            .await
-    {
-        let fallback = CodexAuthService::new()
-            .and_then(|auth| CodexTranscriptionClient::with_timeout(auth, DEFAULT_RUNTIME_TIMEOUT))
-            .map_err(|error| {
-                tracing::warn!(%error, "failed to create direct fallback client; local-only mode");
-            })
-            .ok();
-        return Ok(ResolvedTranscriptionBackend {
-            label: "local-service",
-            client: RuntimeTranscriptionClient::Local {
-                client: local,
-                fallback,
-            },
-        });
+            .await;
+    // A stale CODEX_VOICE_TRANSCRIBER_URL shadows the discovery file in
+    // `discover`; fall back to the file so a healthy local service (possibly
+    // self-hosted by this very process) still wins over direct Codex.
+    if local.is_none() && std::env::var_os(discovery::URL_ENV).is_some() {
+        local = client::LocalTranscriberClient::discover_from_file(
+            DEFAULT_PROBE_TIMEOUT,
+            DEFAULT_RUNTIME_TIMEOUT,
+        )
+        .await;
+    }
+    if let Some(local) = local {
+        return Ok(transcription_backend_from_local(local));
     }
 
     Ok(ResolvedTranscriptionBackend {
@@ -147,6 +150,24 @@ pub async fn resolve_transcription_backend(
             DEFAULT_RUNTIME_TIMEOUT,
         )?),
     })
+}
+
+pub fn transcription_backend_from_local(
+    local: client::LocalTranscriberClient,
+) -> ResolvedTranscriptionBackend {
+    let fallback = CodexAuthService::new()
+        .and_then(|auth| CodexTranscriptionClient::with_timeout(auth, DEFAULT_RUNTIME_TIMEOUT))
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to create direct fallback client; local-only mode");
+        })
+        .ok();
+    ResolvedTranscriptionBackend {
+        label: "local-service",
+        client: RuntimeTranscriptionClient::Local {
+            client: local,
+            fallback,
+        },
+    }
 }
 
 pub async fn probe_limits(config: ProbeLimitsConfig) -> Result<(), TranscriberError> {
@@ -243,10 +264,7 @@ async fn probe_one(
         Err(error) => {
             let redacted = codex_voice_core::redact_diagnostics(&error.to_string());
             let truncated = if redacted.len() > 1500 {
-                let mut t = redacted;
-                t.truncate(1500);
-                t.push_str("...");
-                t
+                format!("{}...", codex_voice_core::truncate_utf8(&redacted, 1500))
             } else {
                 redacted
             };

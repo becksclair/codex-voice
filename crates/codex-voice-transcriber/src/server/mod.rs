@@ -16,24 +16,30 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 use super::discovery::{
     discovery_path, remove_discovery_file_if_current, resolve_or_generate_token, service_root_url,
     write_discovery_file, ServiceCapabilities, TranscriberDiscoveryFile,
 };
 
+pub(crate) mod intents;
 mod speech;
 #[cfg(test)]
 mod tests;
 mod transcribe;
-mod web;
+pub(crate) mod web;
 mod web_assets;
 
+use intents::{
+    consume_desktop_intent, create_desktop_intent, delete_desktop_intent, DesktopIntentStore,
+};
 pub(crate) use speech::TtsServiceState;
 use speech::{speech, watch_tts_config};
 use transcribe::transcribe;
 use web::{
-    web_config, web_speech, web_speech_job_create, web_speech_job_status, WebSpeechJobStore,
+    web_config, web_speech, web_speech_job_create, web_speech_job_delete, web_speech_job_status,
+    WebSpeechJobManager, WebSpeechJobStore,
 };
 use web_assets::{legacy_service_worker, serve_web_asset, serve_web_index};
 
@@ -45,6 +51,7 @@ pub(crate) struct ServiceState {
     pub(crate) backend: Arc<dyn TranscriptionClient>,
     pub(crate) tts: Arc<RwLock<TtsServiceState>>,
     pub(crate) web_speech_jobs: WebSpeechJobStore,
+    pub(crate) desktop_intents: DesktopIntentStore,
     /// Optional directory whose contents shadow the embedded web dist, for
     /// local development against an unbundled `web/dist` without a rebuild.
     pub(crate) web_dist_override: Option<PathBuf>,
@@ -67,6 +74,47 @@ pub async fn serve(
     tts_config: Option<ResolvedTtsConfig>,
     tts_config_path: Option<PathBuf>,
 ) -> Result<()> {
+    let bound = bind_service(config, speech, tts_config, tts_config_path).await?;
+    write_discovery_file(&bound.discovery)?;
+
+    println!(
+        "Codex Voice audio service listening on {}",
+        bound.discovery.url
+    );
+    println!(
+        "OpenAI-compatible base URL: {}",
+        bound.discovery.openai_base_url
+    );
+    println!(
+        "Capabilities: transcriptions={} speech={}",
+        bound.discovery.capabilities.transcriptions, bound.discovery.capabilities.speech
+    );
+    println!("Discovery file: {}", discovery_path().display());
+
+    let result = axum::serve(bound.listener, bound.app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+    if let Some(watcher) = bound.tts_watcher {
+        watcher.abort();
+        let _ = watcher.await;
+    }
+    remove_discovery_file_if_current(&bound.discovery);
+    result.context("audio service failed")
+}
+
+struct BoundService {
+    listener: TcpListener,
+    app: Router,
+    discovery: TranscriberDiscoveryFile,
+    tts_watcher: Option<tokio::task::JoinHandle<()>>,
+}
+
+async fn bind_service(
+    config: super::ServeConfig,
+    speech: Option<Arc<dyn SpeechClient>>,
+    tts_config: Option<ResolvedTtsConfig>,
+    tts_config_path: Option<PathBuf>,
+) -> Result<BoundService> {
     let listener = TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("failed to bind audio service on {}", config.bind))?;
@@ -77,27 +125,34 @@ pub async fn serve(
     )?);
     let root_url = service_root_url(local_addr);
     let token = resolve_or_generate_token(&config.token_env);
+    let web_dist_override =
+        match config.web_dist_override.as_ref() {
+            Some(path) => Some(tokio::fs::canonicalize(path).await.with_context(|| {
+                format!("failed to resolve web dist override {}", path.display())
+            })?),
+            None => None,
+        };
 
+    let desktop_ready = web_assets::web_ui_available(web_dist_override.as_deref());
     let capabilities = ServiceCapabilities {
         transcriptions: true,
         speech: speech.is_some(),
+        desktop: desktop_ready,
     };
-    let discovery = TranscriberDiscoveryFile::new(root_url, token, capabilities.clone());
-    write_discovery_file(&discovery)?;
+    let discovery = TranscriberDiscoveryFile::new(root_url, token, capabilities);
 
     let tts = Arc::new(RwLock::new(TtsServiceState::from_parts(
         speech,
         tts_config.as_ref(),
     )));
-    if let Some(path) = tts_config_path {
-        tokio::spawn(watch_tts_config(tts.clone(), path));
-    }
+    let tts_watcher = tts_config_path.map(|path| tokio::spawn(watch_tts_config(tts.clone(), path)));
 
     let app = service_router(ServiceState {
         backend,
         tts,
-        web_speech_jobs: Arc::new(Mutex::new(HashMap::new())),
-        web_dist_override: config.web_dist_override,
+        web_speech_jobs: Arc::new(WebSpeechJobManager::new()),
+        desktop_intents: Arc::new(Mutex::new(HashMap::new())),
+        web_dist_override,
         auth: ServiceAuth {
             token: discovery.token.clone(),
             no_auth: config.no_auth,
@@ -108,19 +163,82 @@ pub async fn serve(
         ffmpeg_binary: config.ffmpeg_binary,
     });
 
-    println!("Codex Voice audio service listening on {}", discovery.url);
-    println!("OpenAI-compatible base URL: {}", discovery.openai_base_url);
-    println!(
-        "Capabilities: transcriptions={} speech={}",
-        capabilities.transcriptions, capabilities.speech
-    );
-    println!("Discovery file: {}", discovery_path().display());
+    Ok(BoundService {
+        listener,
+        app,
+        discovery,
+        tts_watcher,
+    })
+}
 
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
-    remove_discovery_file_if_current(&discovery);
-    result.context("audio service failed")
+pub struct EmbeddedServiceHandle {
+    client: crate::client::LocalTranscriberClient,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+/// Whether this binary contains the build-time placeholder instead of the
+/// production web application.
+pub fn embedded_web_dist_is_stub() -> bool {
+    web_assets::web_dist_is_stub()
+}
+
+impl EmbeddedServiceHandle {
+    pub fn client(&self) -> &crate::client::LocalTranscriberClient {
+        &self.client
+    }
+
+    pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            task.await
+                .context("embedded audio service task panicked")??;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for EmbeddedServiceHandle {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+}
+
+pub async fn start_embedded(
+    config: super::ServeConfig,
+    speech: Option<Arc<dyn SpeechClient>>,
+    tts_config: Option<ResolvedTtsConfig>,
+    tts_config_path: Option<PathBuf>,
+) -> Result<EmbeddedServiceHandle> {
+    let bound = bind_service(config, speech, tts_config, tts_config_path).await?;
+    let client = crate::client::LocalTranscriberClient::from_service(
+        bound.discovery.openai_base_url.clone(),
+        bound.discovery.token.clone(),
+        super::DEFAULT_RUNTIME_TIMEOUT,
+    )?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let result = axum::serve(bound.listener, bound.app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .context("embedded audio service failed");
+        if let Some(watcher) = bound.tts_watcher {
+            watcher.abort();
+            let _ = watcher.await;
+        }
+        result
+    });
+    Ok(EmbeddedServiceHandle {
+        client,
+        shutdown: Some(shutdown_tx),
+        task: Some(task),
+    })
 }
 
 fn service_router(state: ServiceState) -> Router {
@@ -134,7 +252,7 @@ fn service_router(state: ServiceState) -> Router {
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())
-        .allow_methods([Method::POST, Method::GET])
+        .allow_methods([Method::POST, Method::GET, Method::DELETE])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
 
     let health_routes = get(health);
@@ -149,10 +267,18 @@ fn service_router(state: ServiceState) -> Router {
         .route("/v1/healthz", health_routes)
         .route("/web", get(serve_web_index))
         .route("/web/config", get(web_config))
+        .route("/web/desktop-intents", post(create_desktop_intent))
+        .route(
+            "/web/desktop-intents/{id}",
+            get(consume_desktop_intent).delete(delete_desktop_intent),
+        )
         .route("/web-sw.js", get(legacy_service_worker))
         .route("/web/speech", web_speech_routes)
         .route("/web/speech-jobs", web_speech_job_routes)
-        .route("/web/speech-jobs/{id}", get(web_speech_job_status))
+        .route(
+            "/web/speech-jobs/{id}",
+            get(web_speech_job_status).delete(web_speech_job_delete),
+        )
         .route("/web/{*path}", get(serve_web_asset))
         .route("/audio/transcriptions", transcribe_routes.clone())
         .route("/v1/audio/transcriptions", transcribe_routes)
@@ -174,13 +300,16 @@ async fn health(
     // invariant, so a panic while another thread held the lock leaves the data
     // valid. Recovering keeps one failure from turning into a persistent panic
     // loop on this endpoint. Applied uniformly at every lock site below.
-    let tts = state
+    let speech = state
         .tts
         .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .speech
+        .is_some();
     let capabilities = ServiceCapabilities {
         transcriptions: true,
-        speech: tts.speech.is_some(),
+        speech,
+        desktop: web_assets::web_ui_available_async(state.web_dist_override.clone()).await,
     };
     Ok(Json(Health {
         ok: true,
@@ -226,14 +355,27 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            kind: "not_found",
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            kind: "too_many_requests",
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn backend(message: impl Into<String>) -> Self {
         let message = message.into();
         let redacted = codex_voice_core::redact_diagnostics(&message);
         let message = if redacted.len() > 1500 {
-            let mut t = redacted;
-            t.truncate(1500);
-            t.push_str("...");
-            t
+            format!("{}...", codex_voice_core::truncate_utf8(&redacted, 1500))
         } else {
             redacted
         };
@@ -292,7 +434,13 @@ impl IntoResponse for ApiError {
                 "message": self.message,
             }
         }));
-        (self.status, body).into_response()
+        let mut response = (self.status, body).into_response();
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+        }
+        response
     }
 }
 

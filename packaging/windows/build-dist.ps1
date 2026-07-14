@@ -6,11 +6,17 @@
 .DESCRIPTION
     Run from the repository root on Windows. This script:
       1. Builds the web frontend (web/dist) so it is embedded in the binary.
-      2. Builds the release binary (codex-voice-app / codex-voice.exe).
+      2. Builds the release binary and NSIS installer with Tauri 2.
       3. Stages dist/codex-voice-windows-x64/ with the exe plus a generated
          README.txt and install-autostart.ps1 helper.
       4. Zips the staging directory to dist/codex-voice-windows-x64.zip.
-      5. Prints the zip path and its SHA256.
+      5. Copies the NSIS installer to a stable dist path.
+      6. Prints both paths and SHA256 values.
+
+    The app's tray/window shell is Tauri 2, which renders its windows with
+    WebView2 on Windows. The NSIS installer downloads the Evergreen bootstrapper
+    when the runtime is missing. Portable-ZIP users should use the installer if
+    their machine does not already have WebView2.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File packaging\windows\build-dist.ps1
@@ -30,6 +36,7 @@ $distName = "codex-voice-windows-x64"
 $distDir = Join-Path $repoRoot "dist"
 $stageDir = Join-Path $distDir $distName
 $zipPath = Join-Path $distDir "$distName.zip"
+$installerPath = Join-Path $distDir "$distName-setup.exe"
 
 # --- 1. Build web frontend -------------------------------------------------
 # web/dist is embedded into the binary by the transcriber crate's build.rs.
@@ -55,17 +62,27 @@ finally {
     Pop-Location
 }
 
-# --- 2. Build binary -------------------------------------------------------
-Write-Host "Building release binary (cargo build --release -p codex-voice-app --bin codex-voice)..."
-cargo build --release -p codex-voice-app --bin codex-voice
+# --- 2. Build binary + NSIS installer -------------------------------------
+if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
+    throw "cargo-tauri not found on PATH. Install tauri-cli 2.11.4: cargo install tauri-cli --version 2.11.4 --locked"
+}
+Write-Host "Building release binary and NSIS installer (cargo tauri build --bundles nsis)..."
+cargo tauri build --bundles nsis
 if ($LASTEXITCODE -ne 0) {
-    throw "cargo build failed with exit code $LASTEXITCODE"
+    throw "cargo tauri build failed with exit code $LASTEXITCODE"
 }
 
 $exeSource = Join-Path $repoRoot "target\release\codex-voice.exe"
 if (-not (Test-Path $exeSource)) {
     throw "Expected build output not found: $exeSource"
 }
+
+$generatedInstallers = @(Get-ChildItem -Path (Join-Path $repoRoot "target\release\bundle\nsis") -Filter "*-setup.exe" -File)
+if ($generatedInstallers.Count -ne 1) {
+    throw "Expected exactly one NSIS installer, found $($generatedInstallers.Count)"
+}
+New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+Copy-Item -Path $generatedInstallers[0].FullName -Destination $installerPath -Force
 
 # --- 3. Stage --------------------------------------------------------------
 if (Test-Path $stageDir) {
@@ -113,6 +130,9 @@ To remove autostart, delete the shortcut:
 
 Notes
 -----
+If Windows reports that WebView2 is missing, use the sibling NSIS setup
+executable instead of this portable ZIP; the installer provisions WebView2.
+
 Pasting uses SendInput. Windows User Interface Privilege Isolation (UIPI) can
 block synthetic input into elevated (Administrator) windows. If a paste does
 not land, make sure the target application is running without elevation, or
@@ -157,11 +177,22 @@ if (-not (Test-Path $zipPath)) {
 }
 
 # --- 5. Report -------------------------------------------------------------
-$hash = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash
-$size = (Get-Item $zipPath).Length
+$zipHash = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash
+$zipSize = (Get-Item $zipPath).Length
+$installerHash = (Get-FileHash -Algorithm SHA256 -Path $installerPath).Hash
+$installerSize = (Get-Item $installerPath).Length
+$installerHashPath = "$installerPath.sha256"
+$zipHashPath = "$zipPath.sha256"
+Set-Content -Path $installerHashPath -Value "$installerHash  $([IO.Path]::GetFileName($installerPath))" -Encoding ASCII
+Set-Content -Path $zipHashPath -Value "$zipHash  $([IO.Path]::GetFileName($zipPath))" -Encoding ASCII
 
 Write-Host ""
 Write-Host "Distribution built successfully."
-Write-Host "  Zip:    $zipPath"
-Write-Host "  Size:   $size bytes"
-Write-Host "  SHA256: $hash"
+Write-Host "  Installer:        $installerPath"
+Write-Host "  Installer size:   $installerSize bytes"
+Write-Host "  Installer SHA256: $installerHash"
+Write-Host "  Installer hash:   $installerHashPath"
+Write-Host "  Zip:              $zipPath"
+Write-Host "  Zip size:         $zipSize bytes"
+Write-Host "  Zip SHA256:       $zipHash"
+Write-Host "  Zip hash:         $zipHashPath"
