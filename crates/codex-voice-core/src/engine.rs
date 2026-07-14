@@ -4,8 +4,31 @@ use crate::{
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::fs as tokio_fs;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 const MIN_RECORDING: Duration = Duration::from_millis(120);
+
+struct RecordingCleanup {
+    path: Option<PathBuf>,
+}
+
+impl RecordingCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for RecordingCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DictationState {
@@ -91,6 +114,21 @@ where
         }
     }
 
+    pub async fn shutdown(&mut self) {
+        if let Err(error) = self.audio.cancel().await {
+            let _ = self
+                .events
+                .send(AppEvent::Error {
+                    stage: ErrorStage::AudioStop,
+                    message: error.to_string(),
+                })
+                .await;
+        }
+        if self.state != DictationState::Idle {
+            self.set_state(DictationState::Idle).await;
+        }
+    }
+
     async fn start(&mut self) {
         match self.audio.start().await {
             Ok(()) => self.set_state(DictationState::Recording).await,
@@ -119,11 +157,36 @@ where
     }
 
     async fn process_recording(&mut self, recording: RecordedAudio) {
+        let mut cleanup = RecordingCleanup::new(recording.path.clone());
         self.set_state(DictationState::Transcribing).await;
         let transcript = self.transcription.transcribe(&recording).await;
         let path = recording.path;
-        let _ = tokio_fs::remove_file(&path).await;
-        let _ = self.events.send(AppEvent::RecordingDeleted { path }).await;
+        let cleanup_error = match tokio_fs::remove_file(&path).await {
+            Ok(()) => {
+                cleanup.disarm();
+                None
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                cleanup.disarm();
+                None
+            }
+            Err(error) => Some(error.to_string()),
+        };
+        drop(cleanup);
+        if tokio_fs::metadata(&path).await.is_err() {
+            let _ = self.events.send(AppEvent::RecordingDeleted { path }).await;
+        } else if let Some(message) = cleanup_error {
+            let _ = self
+                .events
+                .send(AppEvent::Error {
+                    stage: ErrorStage::AudioStop,
+                    message: format!(
+                        "failed to delete temporary recording {}: {message}",
+                        path.display()
+                    ),
+                })
+                .await;
+        }
 
         match transcript {
             Ok(text) if text.trim().is_empty() => self.set_state(DictationState::Idle).await,
@@ -166,15 +229,54 @@ where
 pub async fn run_engine_loop<A, T, I>(
     mut engine: DictationEngine<A, T, I>,
     mut hotkeys: mpsc::Receiver<HotkeyEvent>,
+    mut shutdown: oneshot::Receiver<()>,
 ) where
     A: AudioRecorder,
     T: TranscriptionClient,
     I: TextInjector,
 {
-    while let Some(event) = hotkeys.recv().await {
-        engine.handle_hotkey(event).await;
-        while hotkeys.try_recv().is_ok() {}
+    loop {
+        let event = tokio::select! {
+            _ = &mut shutdown => break,
+            event = hotkeys.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+        };
+        let started_idle = engine.state == DictationState::Idle;
+        let stopped_recording = engine.state == DictationState::Recording;
+        let interrupted = {
+            let transition = engine.handle_hotkey(event);
+            tokio::pin!(transition);
+            tokio::select! {
+                _ = &mut shutdown => true,
+                _ = &mut transition => false,
+            }
+        };
+        if interrupted {
+            break;
+        }
+
+        if matches!(event, HotkeyEvent::Pressed)
+            && started_idle
+            && engine.state == DictationState::Recording
+        {
+            let mut saw_release = false;
+            while let Ok(queued) = hotkeys.try_recv() {
+                if matches!(queued, HotkeyEvent::Released) {
+                    saw_release = true;
+                    break;
+                }
+            }
+            if saw_release {
+                engine.handle_hotkey(HotkeyEvent::Released).await;
+                while hotkeys.try_recv().is_ok() {}
+            }
+        } else if matches!(event, HotkeyEvent::Released) && stopped_recording {
+            while hotkeys.try_recv().is_ok() {}
+        }
     }
+    engine.shutdown().await;
 }
 
 #[cfg(test)]
@@ -195,6 +297,7 @@ mod tests {
         recording: Mutex<Option<RecordedAudio>>,
         start_error: bool,
         stop_error: bool,
+        start_delay: Option<Duration>,
     }
 
     impl FakeAudio {
@@ -203,6 +306,7 @@ mod tests {
                 recording: Mutex::new(recording),
                 start_error: false,
                 stop_error: false,
+                start_delay: None,
             }
         }
 
@@ -211,6 +315,7 @@ mod tests {
                 recording: Mutex::new(None),
                 start_error: true,
                 stop_error: false,
+                start_delay: None,
             }
         }
 
@@ -219,13 +324,22 @@ mod tests {
                 recording: Mutex::new(recording),
                 start_error: false,
                 stop_error: true,
+                start_delay: None,
             }
+        }
+
+        fn with_start_delay(mut self, delay: Duration) -> Self {
+            self.start_delay = Some(delay);
+            self
         }
     }
 
     #[async_trait]
     impl AudioRecorder for FakeAudio {
         async fn start(&self) -> AudioResult<()> {
+            if let Some(delay) = self.start_delay {
+                tokio::time::sleep(delay).await;
+            }
             if self.start_error {
                 Err(AudioError::Message("boom".into()))
             } else {
@@ -595,7 +709,8 @@ mod tests {
         let engine = DictationEngine::new(audio, transcription, injector, tx);
         let (hotkey_tx, hotkey_rx) = mpsc::channel(16);
 
-        let handle = tokio::spawn(run_engine_loop(engine, hotkey_rx));
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(run_engine_loop(engine, hotkey_rx, shutdown_rx));
 
         hotkey_tx.send(HotkeyEvent::Pressed).await.unwrap();
         // Let Pressed settle into Recording before Released is queued.
@@ -628,6 +743,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_loop_shutdown_interrupts_transcription_and_deletes_recording() {
+        let (recording, file) = recording_with_duration(Duration::from_millis(500));
+        let path = recording.path.clone();
+        let audio = Arc::new(FakeAudio::ok(Some(recording)));
+        let transcription =
+            Arc::new(FakeTranscription::ok("hello").with_delay(Duration::from_secs(30)));
+        let (tx, _rx) = mpsc::channel(8);
+        let engine = DictationEngine::new(audio, transcription, Arc::new(FakeInjector::ok()), tx);
+        let (hotkey_tx, hotkey_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(run_engine_loop(engine, hotkey_rx, shutdown_rx));
+
+        hotkey_tx.send(HotkeyEvent::Pressed).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        hotkey_tx.send(HotkeyEvent::Released).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("engine shutdown must not wait for transcription")
+            .unwrap();
+
+        assert!(!path.exists(), "cancelled recording must be deleted");
+        drop(file);
+    }
+
+    #[tokio::test]
+    async fn engine_loop_preserves_release_queued_during_slow_start() {
+        let (recording, _file) = recording_with_duration(Duration::from_millis(20));
+        let audio =
+            Arc::new(FakeAudio::ok(Some(recording)).with_start_delay(Duration::from_millis(40)));
+        let (tx, mut rx) = mpsc::channel(8);
+        let engine = DictationEngine::new(
+            audio,
+            Arc::new(FakeTranscription::ok("ignored")),
+            Arc::new(FakeInjector::ok()),
+            tx,
+        );
+        let (hotkey_tx, hotkey_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(run_engine_loop(engine, hotkey_rx, shutdown_rx));
+
+        hotkey_tx.send(HotkeyEvent::Pressed).await.unwrap();
+        hotkey_tx.send(HotkeyEvent::Released).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = shutdown_tx.send(());
+        handle.await.unwrap();
+
+        let events = drain_events(&mut rx);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AppEvent::RecordingDiscarded { .. })));
+        assert_eq!(
+            events.last(),
+            Some(&AppEvent::StateChanged(DictationState::Idle))
+        );
+    }
+
+    #[tokio::test]
     async fn engine_loop_processes_sequential_dictations() {
         let (recording, _file) = recording_with_duration(Duration::from_millis(500));
         let audio = Arc::new(RepeatingAudio { recording });
@@ -637,7 +812,8 @@ mod tests {
         let engine = DictationEngine::new(audio, transcription, injector.clone(), tx);
         let (hotkey_tx, hotkey_rx) = mpsc::channel(16);
 
-        let handle = tokio::spawn(run_engine_loop(engine, hotkey_rx));
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = tokio::spawn(run_engine_loop(engine, hotkey_rx, shutdown_rx));
 
         for _ in 0..2 {
             hotkey_tx.send(HotkeyEvent::Pressed).await.unwrap();

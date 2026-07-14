@@ -13,7 +13,7 @@ pub use platform::{
     PermissionStatus, PlatformError, PlatformResult, SelectedText, SelectedTextReader,
     TextInjector,
 };
-pub use redaction::{redact_bearer_tokens, redact_diagnostics, redact_jwts};
+pub use redaction::{redact_bearer_tokens, redact_diagnostics, redact_jwts, truncate_utf8};
 pub use speech::{
     SpeechClient, SpeechError, SpeechFormat, SpeechRequest, SpeechResult, SynthesizedSpeech,
 };

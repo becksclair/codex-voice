@@ -70,6 +70,18 @@ pub fn redact_diagnostics(text: &str) -> String {
     result
 }
 
+/// Return at most `max_bytes` without splitting a UTF-8 code point.
+pub fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +141,12 @@ mod tests {
     fn redact_diagnostics_redacts_jwt() {
         let input = "token=eyJhbGci.a.b";
         assert_eq!(redact_diagnostics(input), "token=[jwt_redacted]");
+    }
+
+    #[test]
+    fn truncate_utf8_stops_before_multibyte_boundary() {
+        assert_eq!(truncate_utf8("abéz", 3), "ab");
+        assert_eq!(truncate_utf8("abéz", 4), "abé");
+        assert_eq!(truncate_utf8("abc", 99), "abc");
     }
 }

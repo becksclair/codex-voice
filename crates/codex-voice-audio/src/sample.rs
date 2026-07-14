@@ -5,8 +5,9 @@ pub(crate) fn write_f32(
     channels: usize,
     data_tx: &Sender<Vec<i16>>,
     pool_rx: &crossbeam_channel::Receiver<Vec<i16>>,
+    pool_tx: &Sender<Vec<i16>>,
 ) {
-    write_interleaved_mono(data, channels, data_tx, pool_rx, |sample| {
+    write_interleaved_mono(data, channels, data_tx, pool_rx, pool_tx, |sample| {
         (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
     });
 }
@@ -16,8 +17,9 @@ pub(crate) fn write_i16(
     channels: usize,
     data_tx: &Sender<Vec<i16>>,
     pool_rx: &crossbeam_channel::Receiver<Vec<i16>>,
+    pool_tx: &Sender<Vec<i16>>,
 ) {
-    write_interleaved_mono(data, channels, data_tx, pool_rx, |sample| *sample);
+    write_interleaved_mono(data, channels, data_tx, pool_rx, pool_tx, |sample| *sample);
 }
 
 pub(crate) fn write_u16(
@@ -25,8 +27,9 @@ pub(crate) fn write_u16(
     channels: usize,
     data_tx: &Sender<Vec<i16>>,
     pool_rx: &crossbeam_channel::Receiver<Vec<i16>>,
+    pool_tx: &Sender<Vec<i16>>,
 ) {
-    write_interleaved_mono(data, channels, data_tx, pool_rx, |sample| {
+    write_interleaved_mono(data, channels, data_tx, pool_rx, pool_tx, |sample| {
         (*sample as i32 - 32768) as i16
     });
 }
@@ -36,6 +39,7 @@ fn write_interleaved_mono<T>(
     channels: usize,
     data_tx: &Sender<Vec<i16>>,
     pool_rx: &crossbeam_channel::Receiver<Vec<i16>>,
+    pool_tx: &Sender<Vec<i16>>,
     to_i16: impl Fn(&T) -> i16,
 ) {
     let channels = channels.max(1);
@@ -57,9 +61,11 @@ fn write_interleaved_mono<T>(
         }));
     }
 
-    if let Err(crossbeam_channel::TrySendError::Full(_)) = data_tx.try_send(chunk) {
+    if let Err(crossbeam_channel::TrySendError::Full(mut chunk)) = data_tx.try_send(chunk) {
+        chunk.clear();
+        let _ = pool_tx.try_send(chunk);
         tracing::warn!(
-            "audio data channel full ({} chunks); dropping chunk to keep callback real-time",
+            "audio data channel full ({} chunks); dropping samples to keep callback real-time",
             data_tx.len()
         );
     }
@@ -81,9 +87,9 @@ mod tests {
     #[test]
     fn write_i16_mono_roundtrip() {
         let (data_tx, data_rx) = crossbeam_channel::bounded(8);
-        let (_, pool_rx) = crossbeam_channel::bounded(8);
+        let (pool_tx, pool_rx) = crossbeam_channel::bounded(8);
         let data = [1000_i16, -500, 2000, -1000];
-        write_i16(&data, 1, &data_tx, &pool_rx);
+        write_i16(&data, 1, &data_tx, &pool_rx, &pool_tx);
         drop(data_tx);
         assert_eq!(drain_all(&data_rx), vec![1000, -500, 2000, -1000]);
     }
@@ -91,9 +97,9 @@ mod tests {
     #[test]
     fn write_i16_stereo_averages_channels() {
         let (data_tx, data_rx) = crossbeam_channel::bounded(8);
-        let (_, pool_rx) = crossbeam_channel::bounded(8);
+        let (pool_tx, pool_rx) = crossbeam_channel::bounded(8);
         let data = [1000_i16, 2000, -500, 1500];
-        write_i16(&data, 2, &data_tx, &pool_rx);
+        write_i16(&data, 2, &data_tx, &pool_rx, &pool_tx);
         drop(data_tx);
         // Averaged: (1000+2000)/2 = 1500, (-500+1500)/2 = 500
         assert_eq!(drain_all(&data_rx), vec![1500, 500]);
@@ -102,9 +108,9 @@ mod tests {
     #[test]
     fn write_f32_clamps_and_converts() {
         let (data_tx, data_rx) = crossbeam_channel::bounded(8);
-        let (_, pool_rx) = crossbeam_channel::bounded(8);
+        let (pool_tx, pool_rx) = crossbeam_channel::bounded(8);
         let data = [0.5_f32, -0.5, 2.0, -2.0];
-        write_f32(&data, 1, &data_tx, &pool_rx);
+        write_f32(&data, 1, &data_tx, &pool_rx, &pool_tx);
         drop(data_tx);
         let samples = drain_all(&data_rx);
         let expected_05 = (0.5 * i16::MAX as f32) as i16;
@@ -118,10 +124,25 @@ mod tests {
     #[test]
     fn write_u16_offsets_correctly() {
         let (data_tx, data_rx) = crossbeam_channel::bounded(8);
-        let (_, pool_rx) = crossbeam_channel::bounded(8);
+        let (pool_tx, pool_rx) = crossbeam_channel::bounded(8);
         let data = [32768_u16, 32767, 32769, 0];
-        write_u16(&data, 1, &data_tx, &pool_rx);
+        write_u16(&data, 1, &data_tx, &pool_rx, &pool_tx);
         drop(data_tx);
         assert_eq!(drain_all(&data_rx), vec![0, -1, 1, -32768]);
+    }
+
+    #[test]
+    fn full_data_queue_recycles_rejected_buffer() {
+        let (data_tx, _data_rx) = crossbeam_channel::bounded(1);
+        data_tx.try_send(vec![1]).unwrap();
+        let (pool_tx, pool_rx) = crossbeam_channel::bounded(1);
+        let pooled = Vec::with_capacity(32);
+        pool_tx.try_send(pooled).unwrap();
+
+        write_i16(&[1, 2, 3], 1, &data_tx, &pool_rx, &pool_tx);
+
+        let recycled = pool_rx.try_recv().expect("rejected buffer is recycled");
+        assert!(recycled.is_empty());
+        assert!(recycled.capacity() >= 32);
     }
 }

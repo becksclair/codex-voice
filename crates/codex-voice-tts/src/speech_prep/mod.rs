@@ -961,8 +961,8 @@ fn words_without_tags(text: &str) -> Vec<String> {
                 in_tag = false;
             }
             _ if in_tag => {}
-            _ if ch.is_ascii_alphanumeric() || ch == '\'' => {
-                current.push(ch.to_ascii_lowercase());
+            _ if ch.is_alphanumeric() || ch == '\'' => {
+                current.extend(ch.to_lowercase());
             }
             _ if !current.is_empty() => {
                 words.push(std::mem::take(&mut current));
@@ -990,11 +990,11 @@ fn word_spans_without_tags(text: &str) -> Vec<(String, usize, usize)> {
                 in_tag = false;
             }
             _ if in_tag => {}
-            _ if ch.is_ascii_alphanumeric() || ch == '\'' => {
+            _ if ch.is_alphanumeric() || ch == '\'' => {
                 if current.is_empty() {
                     start = index;
                 }
-                current.push(ch.to_ascii_lowercase());
+                current.extend(ch.to_lowercase());
             }
             _ if !current.is_empty() => {
                 words.push((std::mem::take(&mut current), start, index));
@@ -1579,6 +1579,14 @@ mod tests {
             "[softly] I was worried, but it worked.",
         )
         .unwrap_err();
+
+        assert!(error.to_string().contains("changed text too much"));
+    }
+
+    #[test]
+    fn performance_tag_validation_rejects_non_latin_rewrite() {
+        let error = validate_performance_tags_output("Привет мир", "[excited] Совсем другой текст")
+            .unwrap_err();
 
         assert!(error.to_string().contains("changed text too much"));
     }

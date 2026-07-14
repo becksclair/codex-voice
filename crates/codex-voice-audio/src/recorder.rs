@@ -25,6 +25,21 @@ impl CpalWavRecorder {
     }
 }
 
+impl Drop for CpalWavRecorder {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(capture) = state.take() else {
+            return;
+        };
+        let (writer_thread, path, _, _) = close_capture(capture);
+        let _ = writer_thread.join();
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 #[async_trait]
 impl AudioRecorder for CpalWavRecorder {
     async fn start(&self) -> AudioResult<()> {
@@ -69,17 +84,20 @@ impl AudioRecorder for CpalWavRecorder {
 
         let data_tx_f32 = data_tx.clone();
         let pool_rx_f32 = pool_rx.clone();
+        let pool_tx_f32 = pool_tx.clone();
         let data_tx_i16 = data_tx.clone();
         let pool_rx_i16 = pool_rx.clone();
+        let pool_tx_i16 = pool_tx.clone();
         let data_tx_u16 = data_tx.clone();
         let pool_rx_u16 = pool_rx.clone();
+        let pool_tx_u16 = pool_tx.clone();
         let err_fn = |error| tracing::error!("audio input stream error: {error}");
 
         let stream = match config.sample_format() {
             SampleFormat::F32 => device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
-                    write_f32(data, channels, &data_tx_f32, &pool_rx_f32);
+                    write_f32(data, channels, &data_tx_f32, &pool_rx_f32, &pool_tx_f32);
                 },
                 err_fn,
                 None,
@@ -87,7 +105,7 @@ impl AudioRecorder for CpalWavRecorder {
             SampleFormat::I16 => device.build_input_stream(
                 &config.into(),
                 move |data: &[i16], _| {
-                    write_i16(data, channels, &data_tx_i16, &pool_rx_i16);
+                    write_i16(data, channels, &data_tx_i16, &pool_rx_i16, &pool_tx_i16);
                 },
                 err_fn,
                 None,
@@ -95,7 +113,7 @@ impl AudioRecorder for CpalWavRecorder {
             SampleFormat::U16 => device.build_input_stream(
                 &config.into(),
                 move |data: &[u16], _| {
-                    write_u16(data, channels, &data_tx_u16, &pool_rx_u16);
+                    write_u16(data, channels, &data_tx_u16, &pool_rx_u16, &pool_tx_u16);
                 },
                 err_fn,
                 None,

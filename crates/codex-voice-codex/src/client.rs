@@ -105,10 +105,7 @@ impl TranscriptionClient for CodexTranscriptionClient {
         if !status.is_success() {
             let redacted = codex_voice_core::redact_diagnostics(&text);
             let truncated = if redacted.len() > 1200 {
-                let mut t = redacted;
-                t.truncate(1200);
-                t.push_str("...");
-                t
+                format!("{}...", codex_voice_core::truncate_utf8(&redacted, 1200))
             } else {
                 redacted
             };
