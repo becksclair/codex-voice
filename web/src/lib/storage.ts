@@ -70,6 +70,7 @@ export interface PendingGeneration {
   input: string;
   jobId: string | null;
   startedAt: number;
+  owner?: string;
 }
 
 /**
@@ -78,10 +79,14 @@ export interface PendingGeneration {
  * Ports `savePendingGeneration` (app.html line ~1735). `startedAt` is stamped
  * with `Date.now()` at call time.
  */
-export function savePendingGeneration(input: string, jobId: string | null = null): void {
+export function savePendingGeneration(
+  input: string,
+  jobId: string | null = null,
+  owner?: string,
+): void {
   localStorage.setItem(
     GENERATION_STATE_STORAGE_KEY,
-    JSON.stringify({ input, jobId, startedAt: Date.now() }),
+    JSON.stringify({ input, jobId, startedAt: Date.now(), owner }),
   );
 }
 
@@ -119,7 +124,17 @@ export function loadPendingGeneration(): PendingGeneration | null {
  *
  * Ports `clearPendingGeneration` (app.html line ~1762).
  */
-export function clearPendingGeneration(): void {
+export function clearPendingGeneration(expectedOwner?: string): void {
+  if (expectedOwner !== undefined) {
+    try {
+      const pending = JSON.parse(
+        localStorage.getItem(GENERATION_STATE_STORAGE_KEY) || "null",
+      ) as PendingGeneration | null;
+      if (pending?.owner !== expectedOwner) return;
+    } catch {
+      return;
+    }
+  }
   localStorage.removeItem(GENERATION_STATE_STORAGE_KEY);
 }
 
@@ -136,6 +151,8 @@ export interface GeneratedAudioRecord {
   mimeType: string;
   inputChanged: boolean;
   createdAt: string;
+  /** Internal owner used to avoid deleting a newer run's singleton record. */
+  owner?: string;
 }
 
 /**
@@ -197,6 +214,7 @@ export async function saveLastGeneratedAudio(
   blob: Blob,
   generatedText: string,
   inputChanged: boolean,
+  owner?: string,
 ): Promise<void> {
   try {
     await withGeneratedAudioStore("readwrite", (store) =>
@@ -207,6 +225,7 @@ export async function saveLastGeneratedAudio(
         mimeType: blob.type || "audio/wav",
         inputChanged: Boolean(inputChanged),
         createdAt: new Date().toISOString(),
+        owner,
       }),
     );
   } catch {
@@ -239,9 +258,33 @@ export async function getLastGeneratedAudio(): Promise<GeneratedAudioRecord | nu
  *
  * Ports `deleteLastGeneratedAudio` (app.html line ~1729); errors are ignored.
  */
-export async function deleteLastGeneratedAudio(): Promise<void> {
+export async function deleteLastGeneratedAudio(expectedOwner?: string): Promise<void> {
   try {
-    await withGeneratedAudioStore("readwrite", (store) => store.delete(LAST_GENERATED_AUDIO_KEY));
+    if (expectedOwner === undefined) {
+      await withGeneratedAudioStore("readwrite", (store) => store.delete(LAST_GENERATED_AUDIO_KEY));
+      return;
+    }
+    const db = await openGeneratedAudioDb();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = db.transaction(GENERATED_AUDIO_STORE, "readwrite");
+        const store = transaction.objectStore(GENERATED_AUDIO_STORE);
+        const request = store.get(LAST_GENERATED_AUDIO_KEY) as IDBRequest<
+          GeneratedAudioRecord | undefined
+        >;
+        request.onsuccess = () => {
+          if (request.result?.owner === expectedOwner) store.delete(LAST_GENERATED_AUDIO_KEY);
+        };
+        request.onerror = () => reject(request.error || new Error("Audio storage request failed."));
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () =>
+          reject(transaction.error || new Error("Audio storage transaction failed."));
+        transaction.onabort = () =>
+          reject(transaction.error || new Error("Audio storage transaction aborted."));
+      });
+    } finally {
+      db.close();
+    }
   } catch {
     // Ignored, matching app.html behavior.
   }

@@ -6,7 +6,13 @@ import { VitePWA } from "vite-plugin-pwa";
 
 const backend = process.env.CODEX_VOICE_BACKEND ?? "http://127.0.0.1:3845";
 
-const proxyTargets = ["/web/config", "/web/speech", "/web/speech-jobs"];
+export const proxyTargets = [
+  "/web/config",
+  "/web/speech",
+  "/web/speech-jobs",
+  "/web/desktop-intents",
+];
+export const backendNavigationDenylist = [/^\/web\/(config|speech|desktop-intents)/];
 const proxy = Object.fromEntries(
   proxyTargets.map((path) => [path, { target: backend, changeOrigin: true }]),
 );
@@ -39,7 +45,7 @@ export default defineConfig({
         // cached them). Keep in sync with what public/ actually ships.
         globPatterns: ["**/*.{js,css,html,png,webmanifest}"],
         navigateFallback: "/web/index.html",
-        navigateFallbackDenylist: [/^\/web\/(config|speech)/],
+        navigateFallbackDenylist: backendNavigationDenylist,
         // Never cache the JSON API surface served by the Rust backend.
         runtimeCaching: [],
       },

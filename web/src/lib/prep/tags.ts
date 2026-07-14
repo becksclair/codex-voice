@@ -18,7 +18,7 @@ export function textWords(value: string | null | undefined): string[] {
     String(value || "")
       .replace(/\[[^\]]{1,80}\]/g, " ")
       .toLowerCase()
-      .match(/[a-z0-9']+/g) || []
+      .match(/[\p{L}\p{M}\p{N}']+/gu) || []
   );
 }
 
@@ -39,26 +39,33 @@ export function textWordSpans(value: string | null | undefined): WordSpan[] {
   let inTag = false;
   let current = "";
   let start = 0;
-  for (let index = 0; index < text.length; index += 1) {
-    const ch = text[index];
+  let index = 0;
+  for (const ch of text) {
     if (ch === "[" && !current) {
       inTag = true;
+      index += ch.length;
       continue;
     }
     if (ch === "]" && inTag) {
       inTag = false;
+      index += ch.length;
       continue;
     }
-    if (inTag) continue;
-    if (/[a-z0-9']/i.test(ch)) {
+    if (inTag) {
+      index += ch.length;
+      continue;
+    }
+    if (/[\p{L}\p{M}\p{N}']/u.test(ch)) {
       if (!current) start = index;
       current += ch.toLowerCase();
+      index += ch.length;
       continue;
     }
     if (current) {
       spans.push({ word: current, start, end: index });
       current = "";
     }
+    index += ch.length;
   }
   if (current) spans.push({ word: current, start, end: text.length });
   return spans;

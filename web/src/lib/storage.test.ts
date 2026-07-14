@@ -69,6 +69,15 @@ describe("pending generation", () => {
     clearPendingGeneration();
     expect(localStorage.getItem(GENERATION_STATE_STORAGE_KEY)).toBeNull();
   });
+
+  it("only clears pending generation owned by the completed run", () => {
+    savePendingGeneration("replacement", "job-2", "new-owner");
+    clearPendingGeneration("old-owner");
+    expect(loadPendingGeneration()?.jobId).toBe("job-2");
+
+    clearPendingGeneration("new-owner");
+    expect(loadPendingGeneration()).toBeNull();
+  });
 });
 
 describe("generated audio IndexedDB store", () => {
@@ -94,6 +103,17 @@ describe("generated audio IndexedDB store", () => {
   it("returns null when nothing is stored", async () => {
     // Clean any prior record from a shared IndexedDB.
     await deleteLastGeneratedAudio();
+    expect(await getLastGeneratedAudio()).toBeNull();
+  });
+
+  it("only conditionally deletes audio owned by the cancelled run", async () => {
+    const blob = new Blob([new Uint8Array([1])], { type: "audio/wav" });
+    await saveLastGeneratedAudio(blob, "new run", false, "new-owner");
+
+    await deleteLastGeneratedAudio("old-owner");
+    expect((await getLastGeneratedAudio())?.text).toBe("new run");
+
+    await deleteLastGeneratedAudio("new-owner");
     expect(await getLastGeneratedAudio()).toBeNull();
   });
 });

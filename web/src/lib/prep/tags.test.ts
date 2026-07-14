@@ -23,6 +23,14 @@ describe("textWords / bracketTags", () => {
     expect(textWords("[softly] Hello, world!")).toEqual(["hello", "world"]);
     expect(bracketTags("[softly] hi [warmly] there")).toEqual(["[softly]", "[warmly]"]);
   });
+
+  it("tokenizes non-Latin scripts", () => {
+    expect(textWords("Привет мир مرحبا 世界")).toEqual(["привет", "мир", "مرحبا", "世界"]);
+  });
+
+  it("keeps combining marks attached to their words", () => {
+    expect(textWords("कि कु")).toEqual(["कि", "कु"]);
+  });
 });
 
 describe("performanceTagsPreserveText", () => {
@@ -34,6 +42,14 @@ describe("performanceTagsPreserveText", () => {
 
   it("rejects when words are dropped", () => {
     expect(performanceTagsPreserveText("hello there friend", "[softly] hello")).toBe(false);
+  });
+
+  it("rejects a complete non-Latin rewrite", () => {
+    expect(performanceTagsPreserveText("Привет мир", "[excited] Совсем другой текст")).toBe(false);
+  });
+
+  it("rejects rewrites that differ only by combining marks", () => {
+    expect(performanceTagsPreserveText("कि", "[softly] कु")).toBe(false);
   });
 });
 

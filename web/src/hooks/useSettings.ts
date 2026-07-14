@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { useLatest } from "./useLatest.ts";
 import {
   applyTheme,
   firstPersonaForProvider,
   loadSettings,
   personaSupportsProvider,
   saveSettings as persistSettings,
+  SETTINGS_STORAGE_KEY,
   type BrowserTtsConfig,
   type ThemePreference,
   type WebSettings,
@@ -167,8 +169,42 @@ export function useSettings(config: BrowserTtsConfig | null): SettingsState {
     return () => media.removeEventListener("change", onChange);
   }, [settings.theme]);
 
-  // Reconcile the stored selection against the live config; persist the clamp.
+  // Cross-window sync: another window (e.g. a second Tauri webview) may write
+  // SETTINGS_STORAGE_KEY. `storage` fires in other same-origin documents on
+  // every write; WebKitGTK is not reliable about firing it across separate
+  // webviews, so `focus` is a fallback re-read. Both paths compare against the
+  // current in-memory settings before calling `setSettings`, so a no-op
+  // external read never triggers a new persist write (which would otherwise
+  // re-fire `storage` in the other window and ping-pong).
+  const settingsRefForSync = useLatest(settings);
   useEffect(() => {
+    const applyExternal = (): void => {
+      const next = loadSettings();
+      if (JSON.stringify(next) === JSON.stringify(settingsRefForSync.current)) return;
+      setSettings(next);
+    };
+    const onStorage = (event: StorageEvent): void => {
+      if (event.key !== null && event.key !== SETTINGS_STORAGE_KEY) return;
+      applyExternal();
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", applyExternal);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", applyExternal);
+    };
+    // `settingsRefForSync` is a stable ref, so this still mounts exactly once.
+  }, [settingsRefForSync]);
+
+  // Reconcile the stored selection against the live config; persist the clamp.
+  // Skip while config is still null: reconciling against no config would clamp
+  // provider/voice/model down to the neutral defaults and persist that,
+  // destroying the user's real selection and (via cross-window sync) pushing
+  // the downgrade into a sibling window that did load config. The display
+  // `reconciled` above still clamps for show; we just never persist it until
+  // config is known.
+  useEffect(() => {
+    if (!config) return;
     const next = reconcile(settings, config);
     if (
       next.provider !== settings.provider ||

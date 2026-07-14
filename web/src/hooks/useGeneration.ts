@@ -36,8 +36,8 @@ export interface GenerationState {
   progress: number;
   /** The generate button's label text. */
   label: string;
-  /** Generate the current draft text; returns false when there was nothing to do. */
-  generate: () => Promise<boolean>;
+  /** Generate the supplied text, or the current draft when omitted. */
+  generate: (inputOverride?: string) => Promise<boolean>;
   /** Cancel any active run (used by the clear button). */
   cancelActive: () => void;
 }
@@ -240,8 +240,8 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const generate = async (): Promise<boolean> => {
-    const input = (textRef.current?.value || "").trim();
+  const generate = async (inputOverride?: string): Promise<boolean> => {
+    const input = (inputOverride ?? textRef.current?.value ?? "").trim();
     if (!input) {
       showError("Enter some text first.");
       return false;

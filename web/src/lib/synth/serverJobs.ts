@@ -37,8 +37,20 @@ export interface WebSpeechJobError {
 export interface WebSpeechJobStatus {
   id: string;
   status: "pending" | "complete" | "failed";
+  phase?: "queued" | "running";
   result?: WebSpeechResult;
   error?: WebSpeechJobError;
+}
+
+/** Cancel a queued/running job or release a completed server result. */
+export async function cancelWebSpeechJob(jobId: string): Promise<void> {
+  const response = await fetch(`/web/speech-jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    keepalive: true,
+  });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`TTS job cancellation failed (${response.status})`);
+  }
 }
 
 /** Options for {@link waitForWebSpeechJob}. */
@@ -159,7 +171,10 @@ export async function waitForWebSpeechJob(
     const job = await fetchWebSpeechJob(jobId, signal);
     if (job.status === "complete" && job.result) return job.result;
     if (job.status === "failed") throw new Error(job.error?.message || "TTS job failed.");
-    onProgress?.(0.64, "Synthesizing");
+    onProgress?.(
+      job.phase === "queued" ? 0.48 : 0.64,
+      job.phase === "queued" ? "Waiting" : "Synthesizing",
+    );
     await sleep(SERVER_JOB_POLL_MS);
   }
 }

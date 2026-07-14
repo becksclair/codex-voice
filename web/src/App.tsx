@@ -1,10 +1,18 @@
-import { useRef, useState, type ClipboardEvent } from "react";
-import { clearPendingGeneration, deleteLastGeneratedAudio, TEXT_STORAGE_KEY } from "./lib/index.ts";
+import { useEffect, useRef, useState, type ClipboardEvent } from "react";
+import {
+  clearPendingGeneration,
+  consumeDesktopIntent,
+  deleteLastGeneratedAudio,
+  settingsView,
+  speakIntentId,
+  TEXT_STORAGE_KEY,
+} from "./lib/index.ts";
 import { GenerateBar } from "./components/GenerateBar.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { TextEditor } from "./components/TextEditor.tsx";
 import { WaveformPlayer } from "./components/WaveformPlayer.tsx";
 import { useGeneration } from "./hooks/useGeneration.ts";
+import { useLatest } from "./hooks/useLatest.ts";
 import { usePersistedText } from "./hooks/usePersistedText.ts";
 import { usePlayback } from "./hooks/usePlayback.ts";
 import { useSeekGestures } from "./hooks/useSeekGestures.ts";
@@ -23,6 +31,20 @@ import { useWaveform } from "./hooks/useWaveform.ts";
  * UI state (the error banner and the settings drawer).
  */
 export function App() {
+  return settingsView(location.search) ? <SettingsWindowApp /> : <MainWindowApp />;
+}
+
+function SettingsWindowApp() {
+  const config = useServerConfig();
+  const settings = useSettings(config);
+  return (
+    <main className="mx-auto h-dvh max-w-[520px] overflow-y-auto p-4">
+      <SettingsPanel open settings={settings} />
+    </main>
+  );
+}
+
+function MainWindowApp() {
   const textRef = useRef<HTMLTextAreaElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sliderRef = useRef<HTMLDivElement>(null);
@@ -54,6 +76,37 @@ export function App() {
   const seek = useSeekGestures(sliderRef, waveformRef, playback);
   useVisualViewport(textRef, waveformRef);
 
+  // Desktop-app `#intent=<id>` intake: clear the fragment, consume selected
+  // text once from the local service, seed the normal persisted-text path, and
+  // auto-generate. Refs keep hashchange intake current without remounting.
+  const setTextRef = useLatest(setText);
+  const generateRef = useLatest(generation.generate);
+  const showErrorRef = useLatest(errorApi.show);
+  const speakIntakeSequence = useRef(0);
+
+  useEffect(() => {
+    const handleSpeakIntake = async (): Promise<void> => {
+      const intentId = speakIntentId(location.hash);
+      if (intentId === null) return;
+      const sequence = ++speakIntakeSequence.current;
+      history.replaceState(null, "", location.pathname + location.search);
+      try {
+        const text = await consumeDesktopIntent(intentId);
+        if (sequence !== speakIntakeSequence.current) return;
+        setTextRef.current(text);
+        await generateRef.current(text);
+      } catch (error) {
+        if (sequence !== speakIntakeSequence.current) return;
+        showErrorRef.current((error as Error).message || "Selected text handoff failed.");
+      }
+    };
+    const onHashChange = (): void => void handleSpeakIntake();
+    void handleSpeakIntake();
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+    // Refs are stable across renders, so this still mounts exactly once.
+  }, [setTextRef, generateRef, showErrorRef]);
+
   const charCount = Array.from(text).length;
 
   const handleNativePaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
@@ -64,21 +117,17 @@ export function App() {
     setTimeout(() => {
       const current = textRef.current?.value ?? "";
       if (current === valueBeforePaste || !current.trim()) return;
-      generation.generate().catch((e: Error) => errorApi.show(e.message || "TTS failed."));
+      generation.generate(current).catch((e: Error) => errorApi.show(e.message || "TTS failed."));
     }, 0);
   };
 
   const handlePasteClick = async (): Promise<void> => {
     try {
       const value = await navigator.clipboard.readText();
-      if (!value) {
-        setText("", { persist: false });
-        localStorage.removeItem(TEXT_STORAGE_KEY);
-        return;
-      }
+      if (!value) return;
       setText(value);
       errorApi.clear();
-      if (settings.settings.generateOnPaste !== false) await generation.generate();
+      if (settings.settings.generateOnPaste !== false) await generation.generate(value);
     } catch (error) {
       errorApi.show((error as Error).message || "Clipboard paste failed.");
     }
@@ -96,7 +145,9 @@ export function App() {
   };
 
   return (
-    <main className="mx-auto flex h-[var(--visual-viewport-height,100dvh)] min-h-0 max-w-[760px] translate-y-[var(--visual-viewport-offset-top,0px)] flex-col gap-3 overflow-hidden pt-[max(12px,env(safe-area-inset-top))] pr-[18px] pb-[max(18px,env(safe-area-inset-bottom))] pl-[18px] max-[420px]:px-3">
+    <main
+      className={`mx-auto flex h-[var(--visual-viewport-height,100dvh)] min-h-0 max-w-[760px] translate-y-[var(--visual-viewport-offset-top,0px)] flex-col gap-3 pt-[max(12px,env(safe-area-inset-top))] pr-[18px] pb-[max(18px,env(safe-area-inset-bottom))] pl-[18px] max-[420px]:px-3 ${settingsOpen ? "overflow-y-auto overscroll-contain" : "overflow-hidden"}`}
+    >
       <header className="flex items-center justify-between gap-2.5">
         <img
           className="block h-3.5 w-3.5 rounded-[4px] shadow-[var(--icon-shadow)]"
@@ -150,7 +201,7 @@ export function App() {
           settingsOpen={settingsOpen}
           onToggleSettings={() => setSettingsOpen((open) => !open)}
         />
-        <SettingsPanel open={settingsOpen} settings={settings} />
+        <SettingsPanel open={settingsOpen} settings={settings} generationBusy={generation.busy} />
       </section>
     </main>
   );

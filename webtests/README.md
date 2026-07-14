@@ -4,11 +4,12 @@ Playwright suite exercising the Codex Voice web PWA — the standalone React app
 built from `web/` (see `web/README.md`) and served at `GET /web/` by
 `codex-voice server` from the dist embedded in the binary.
 
-These tests drive real browser behavior (localStorage persistence, character
-counting, clipboard paste focus handling, manifest/service-worker routes). The
-web shell and its config endpoints are intentionally unauthenticated, so no
-bearer token is required. Tests deliberately avoid TTS generation, which is
-disabled unless `~/.codex/read-aloud-defaults.json` exists.
+These tests drive real browser behavior: persistence, clipboard handling,
+responsive settings, cancellation/resume, service-worker routes, and the full
+waveform/playback/seek/download path. Routine generation tests intercept the
+speech-job API and return a deterministic in-memory WAV fixture, so they never
+contact a provider or spend API credits. The web shell and its config endpoints
+are intentionally unauthenticated, so no bearer token is required.
 
 ## Running
 
@@ -85,8 +86,8 @@ a valid WAV download (RIFF magic + > 100KB). It then drives the server path
 
 - The server has no flag to override the TTS defaults path
   (`~/.codex/read-aloud-defaults.json`); it only *enables* TTS when present.
-  These tests never trigger generation, so a missing/real config file does not
-  affect results.
+  Routine generation coverage intercepts `/web/config` and `/web/speech-jobs`,
+  so a missing or real config file does not affect results.
 - Clipboard access works because `127.0.0.1` is a secure context and the
   Playwright config grants `clipboard-read`/`clipboard-write` permissions.
 - This suite is intentionally NOT wired into CI yet: downloading a browser is

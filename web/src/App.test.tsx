@@ -16,6 +16,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   delete document.documentElement.dataset.theme;
+  // Restore the URL even when a test failed mid-assertion, so a leftover
+  // ?view=settings or #intent= fragment can't leak into the next render.
+  window.history.pushState(null, "", "/web");
 });
 
 // The frozen test contract: every element ID the Playwright suite and the Rust
@@ -119,6 +122,126 @@ test("toggling a settings checkbox persists to localStorage", () => {
   expect(JSON.parse(raw as string).emotionPreprocessing).toBe(false);
 });
 
+test("?view=settings renders only the settings surface", () => {
+  window.history.pushState(null, "", "/web?view=settings");
+  render(<App />);
+  const panel = document.getElementById("settings-panel") as HTMLElement;
+  expect(panel.hasAttribute("hidden")).toBe(false);
+  expect(document.getElementById("text")).toBeNull();
+  expect(document.getElementById("generate")).toBeNull();
+  expect(document.getElementById("settings-toggle")).toBeNull();
+  expect((document.getElementById("provider") as HTMLSelectElement).disabled).toBe(false);
+  expect((document.getElementById("emotion") as HTMLInputElement).disabled).toBe(false);
+});
+
+test("#intent= intake consumes text, clears the hash, and fires generation once", async () => {
+  const sample = "spoken by the desktop app 🎙️";
+  const intentId = "a".repeat(32);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes(`/web/desktop-intents/${intentId}`)) {
+      return new Response(JSON.stringify({ text: sample }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error("offline");
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  window.history.pushState(null, "", `/web#intent=${intentId}`);
+
+  render(<App />);
+  const text = document.getElementById("text") as HTMLTextAreaElement;
+
+  await waitFor(() => expect(text.value).toBe(sample));
+  await waitFor(() => expect(location.hash).toBe(""));
+
+  // A generation attempt actually fired the server-job pipeline (rather than
+  // just seeding the text): the request hits /web/speech-jobs. The fetch stub
+  // rejects, which the pipeline turns into an error-banner message.
+  const speechJobCalls = (): number =>
+    (global.fetch as ReturnType<typeof vi.fn>).mock.calls.filter((call) =>
+      String(call[0]).includes("/web/speech-jobs"),
+    ).length;
+  await waitFor(() => expect(speechJobCalls()).toBeGreaterThan(0));
+  // Drain any second deferred generate (setTimeout -> dynamic import -> fetch)
+  // before asserting once-ness, so a double-firing intake fails deterministically
+  // instead of racing the count.
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(speechJobCalls()).toBe(1);
+});
+
+test("a slower older desktop intent cannot replace the newest selection", async () => {
+  const firstId = "1".repeat(32);
+  const secondId = "2".repeat(32);
+  let resolveFirst!: (response: Response) => void;
+  let resolveSecond!: (response: Response) => void;
+  const first = new Promise<Response>((resolve) => {
+    resolveFirst = resolve;
+  });
+  const second = new Promise<Response>((resolve) => {
+    resolveSecond = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes(`/web/desktop-intents/${firstId}`)) return await first;
+      if (url.includes(`/web/desktop-intents/${secondId}`)) return await second;
+      throw new Error("offline");
+    }),
+  );
+  render(<App />);
+  const text = document.getElementById("text") as HTMLTextAreaElement;
+
+  window.history.pushState(null, "", `/web#intent=${firstId}`);
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+  window.history.pushState(null, "", `/web#intent=${secondId}`);
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+  resolveSecond(
+    new Response(JSON.stringify({ text: "newest selection" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  await waitFor(() => expect(text.value).toBe("newest selection"));
+
+  resolveFirst(
+    new Response(JSON.stringify({ text: "stale selection" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  expect(text.value).toBe("newest selection");
+});
+
+test("failed #intent= intake clears the hash and surfaces the error", async () => {
+  const intentId = "b".repeat(32);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes(`/web/desktop-intents/${intentId}`)) {
+        return new Response(JSON.stringify({ error: { message: "intent expired" } }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error("offline");
+    }),
+  );
+  window.history.pushState(null, "", `/web#intent=${intentId}`);
+
+  render(<App />);
+
+  await waitFor(() => expect(location.hash).toBe(""));
+  await waitFor(() =>
+    expect(document.getElementById("error-banner")?.textContent).toBe("intent expired"),
+  );
+});
+
 test("paste fills the textarea without moving focus", async () => {
   const pasted = "clipboard payload";
   Object.defineProperty(navigator, "clipboard", {
@@ -145,4 +268,50 @@ test("paste fills the textarea without moving focus", async () => {
 
   // The regression guard: paste must NOT refocus the textarea.
   expect(document.activeElement).not.toBe(text);
+});
+
+test("an empty clipboard paste is a complete no-op", async () => {
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { readText: vi.fn(() => Promise.resolve("")) },
+  });
+  localStorage.setItem("codex-voice.web.text", "keep this draft");
+
+  render(<App />);
+  const paste = document.getElementById("paste") as HTMLButtonElement;
+  const text = document.getElementById("text") as HTMLTextAreaElement;
+  fireEvent.click(paste);
+
+  await waitFor(() => expect(navigator.clipboard.readText).toHaveBeenCalledOnce());
+  expect(text.value).toBe("keep this draft");
+  expect(localStorage.getItem("codex-voice.web.text")).toBe("keep this draft");
+});
+
+test("consecutive clipboard-button pastes generate the newly pasted text", async () => {
+  const clipboard = { readText: vi.fn<() => Promise<string>>() };
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+  const generated: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/web/config") throw new Error("offline");
+      if (String(input) === "/web/speech-jobs" && init?.method === "POST") {
+        generated.push((JSON.parse(String(init.body)) as { input: string }).input);
+      }
+      throw new Error("offline");
+    }),
+  );
+
+  render(<App />);
+  const paste = document.getElementById("paste") as HTMLButtonElement;
+  const text = document.getElementById("text") as HTMLTextAreaElement;
+
+  for (const value of ["first pasted draft", "second pasted draft"]) {
+    clipboard.readText.mockResolvedValueOnce(value);
+    fireEvent.click(paste);
+    await waitFor(() => expect(text.value).toBe(value));
+    await waitFor(() => expect(generated.at(-1)).toBe(value));
+  }
+
+  expect(generated).toEqual(["first pasted draft", "second pasted draft"]);
 });

@@ -7,6 +7,7 @@
  */
 
 export * from "./util.ts";
+export * from "./appMode.ts";
 export * from "./storage.ts";
 export * from "./settings.ts";
 export * from "./config.ts";

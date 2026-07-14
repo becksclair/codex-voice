@@ -4,13 +4,14 @@ import type { ThemePreference } from "../lib/index.ts";
 interface SettingsPanelProps {
   open: boolean;
   settings: SettingsState;
+  generationBusy?: boolean;
 }
 
 const FIELD = "grid gap-1.5 text-[0.9rem] text-[var(--muted)]";
 const SELECT =
-  "min-h-[42px] w-full rounded-2xl border border-[var(--line)] bg-[var(--panel-soft)] px-2.5 text-[var(--text)]";
+  "min-h-[42px] w-full rounded-2xl border border-[var(--line)] bg-[var(--panel-soft)] px-2.5 text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-55";
 const TOGGLE =
-  "flex min-h-[42px] items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--panel-soft)] px-2.5 font-[650] text-[var(--text)]";
+  "grid min-h-[42px] gap-1 rounded-2xl border border-[var(--line)] bg-[var(--panel-soft)] px-2.5 py-2 font-[650] text-[var(--text)] has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-55";
 const CHECKBOX = "h-[18px] w-[18px] [accent-color:var(--mint)]";
 
 function Options({ options }: { options: SelectOption[] }) {
@@ -29,7 +30,7 @@ function Options({ options }: { options: SelectOption[] }) {
  * The settings drawer (`#settings-panel`): provider/voice/model/theme selects and
  * the emotion/summarize/generate-on-paste toggles.
  */
-export function SettingsPanel({ open, settings }: SettingsPanelProps) {
+export function SettingsPanel({ open, settings, generationBusy = false }: SettingsPanelProps) {
   return (
     <div
       id="settings-panel"
@@ -43,6 +44,7 @@ export function SettingsPanel({ open, settings }: SettingsPanelProps) {
             id="provider"
             className={SELECT}
             value={settings.provider}
+            disabled={generationBusy}
             onChange={(event) => settings.setProvider(event.target.value)}
           >
             <Options options={settings.providerOptions} />
@@ -54,6 +56,7 @@ export function SettingsPanel({ open, settings }: SettingsPanelProps) {
             id="voice"
             className={SELECT}
             value={settings.voice}
+            disabled={generationBusy}
             onChange={(event) => settings.setVoice(event.target.value)}
           >
             <Options options={settings.voiceOptions} />
@@ -65,6 +68,7 @@ export function SettingsPanel({ open, settings }: SettingsPanelProps) {
             id="model"
             className={SELECT}
             value={settings.model}
+            disabled={generationBusy}
             onChange={(event) => settings.setModel(event.target.value)}
           >
             <Options options={settings.modelOptions} />
@@ -83,26 +87,46 @@ export function SettingsPanel({ open, settings }: SettingsPanelProps) {
             <option value="light">Light</option>
           </select>
         </label>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-2 max-[420px]:grid-cols-1">
           <label className={TOGGLE}>
-            <input
-              id="emotion"
-              type="checkbox"
-              className={CHECKBOX}
-              checked={settings.settings.emotionPreprocessing}
-              onChange={(event) => settings.setEmotion(event.target.checked)}
-            />
-            Emotion
+            <span className="flex items-center gap-2">
+              <input
+                id="emotion"
+                type="checkbox"
+                className={CHECKBOX}
+                checked={settings.settings.emotionPreprocessing}
+                disabled={generationBusy}
+                aria-describedby="emotion-help"
+                onChange={(event) => settings.setEmotion(event.target.checked)}
+              />
+              Emotion
+            </span>
+            <span
+              id="emotion-help"
+              className="text-[0.76rem] leading-snug font-normal text-[var(--muted)]"
+            >
+              Adds model-supported delivery cues without changing your wording.
+            </span>
           </label>
           <label className={TOGGLE}>
-            <input
-              id="summarize"
-              type="checkbox"
-              className={CHECKBOX}
-              checked={settings.settings.summarization}
-              onChange={(event) => settings.setSummarize(event.target.checked)}
-            />
-            Summarize
+            <span className="flex items-center gap-2">
+              <input
+                id="summarize"
+                type="checkbox"
+                className={CHECKBOX}
+                checked={settings.settings.summarization}
+                disabled={generationBusy}
+                aria-describedby="summarize-help"
+                onChange={(event) => settings.setSummarize(event.target.checked)}
+              />
+              Summarize
+            </span>
+            <span
+              id="summarize-help"
+              className="text-[0.76rem] leading-snug font-normal text-[var(--muted)]"
+            >
+              Shortens only when the text exceeds the selected voice’s limit.
+            </span>
           </label>
           <label className={TOGGLE}>
             <input

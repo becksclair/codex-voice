@@ -2,12 +2,8 @@
 
 Standalone React frontend for the Codex Voice TTS PWA. This app is built with Vite
 and served in production under the `/web/` base path by the Rust transcriber
-service (`crates/codex-voice-transcriber`). It will replace the embedded
-single-file PWA at `crates/codex-voice-transcriber/assets/web/app.html`.
-
-This directory is currently a **scaffold** (Phase A1): tooling, PWA/service-worker
-wiring, theming tokens, and a placeholder page. The actual app port lands in a
-later phase.
+service (`crates/codex-voice-transcriber`). It is also the UI loaded by the
+Tauri desktop windows in app mode.
 
 ## Stack
 
@@ -62,7 +58,8 @@ cargo run -p codex-voice-app --bin codex-voice -- server
 cd web && bun run dev
 ```
 
-The dev server proxies `/web/config`, `/web/speech`, and `/web/speech-jobs` to the
+The dev server proxies `/web/config`, `/web/speech`, `/web/speech-jobs`, and
+`/web/desktop-intents` to the
 backend. Override the backend target with `CODEX_VOICE_BACKEND`:
 
 ```bash
@@ -94,14 +91,29 @@ From the repo root, the mise tasks wrap these: `dev` (full stack), `web-dev`,
   manual via `virtual:pwa-register` in `src/main.tsx`.
 - `navigateFallback: '/web/index.html'` with
   `navigateFallbackDenylist: [/^\/web\/(config|speech)/]` and no runtime caching,
-  so the JSON API surface (`/web/config`, `/web/speech`, `/web/speech-jobs`) is
+  so the JSON API surface (`/web/config`, `/web/speech`, `/web/speech-jobs`,
+  `/web/desktop-intents`) is
   never served from cache or the SPA fallback.
+
+## Runtime behavior
+
+- Opening settings keeps the editor-first layout, but the main surface becomes
+  vertically scrollable on short/mobile viewports so every control remains
+  reachable. The standalone settings window is independently scrollable.
+- Provider, voice, model, Emotion, and Summarize are disabled in the main
+  window during generation. Each run also captures an immutable settings
+  snapshot, so changes made from another window apply only to the next run.
+- An empty clipboard is a no-op. Non-empty button and native pastes replace the
+  draft and, when enabled, generate the newly pasted text.
+- Emotion adds model-supported delivery cues while preserving wording;
+  Summarize only shortens text that exceeds the selected voice's limit.
 
 ## Route-shadowing constraint
 
 The Rust service exposes JSON API routes under `/web/*`
 (`GET /web/config`, `POST /web/speech`, `POST /web/speech-jobs`,
-`GET /web/speech-jobs/{id}`). Because this app is served under the same `/web/`
+`GET|DELETE /web/speech-jobs/{id}`, and the one-shot desktop-intent routes).
+Because this app is served under the same `/web/`
 base, **no file at the `dist/` root may be named `config`, `speech`, or
-`speech-jobs`** — those paths are shadowed by the backend routes. Keep hashed
+`speech-jobs`, or `desktop-intents`** — those paths are shadowed by the backend routes. Keep hashed
 build assets under `dist/assets/`.

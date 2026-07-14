@@ -9,6 +9,7 @@ const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 // Repo root is one level up from this config file.
 const repoRoot = path.resolve(__dirname, '..');
+const testStateHome = path.join(repoRoot, 'target', 'webtests-state');
 
 export default defineConfig({
   testDir: './tests',
@@ -34,12 +35,16 @@ export default defineConfig({
     // Spawn the compiled server binary. Prebuild with
     // `cargo build -p codex-voice-app` so the first test run does not block on a
     // slow compile past the timeout below.
-    command: `cargo run -q -p codex-voice-app --bin codex-voice -- server --bind 127.0.0.1:${PORT}`,
+    command: `cargo run -q -p codex-voice-app --bin codex-voice -- server --bind 127.0.0.1:${PORT} --web-dist web/dist`,
     cwd: repoRoot,
     url: `${BASE_URL}/web`,
     reuseExistingServer: false,
     timeout: 180_000,
     stdout: 'pipe',
     stderr: 'pipe',
+    env: {
+      ...process.env,
+      XDG_STATE_HOME: testStateHome,
+    },
   },
 });

@@ -32,6 +32,7 @@ import { prepareForProvider, type PrepResult, type PrepSettings } from "./prep/i
 import type { WebSettings } from "./settings.ts";
 import {
   clearPendingGeneration,
+  deleteLastGeneratedAudio,
   loadPendingGeneration,
   loadText,
   saveLastGeneratedAudio,
@@ -43,7 +44,7 @@ import { canStreamElevenLabs, resolveElevenLabsModel } from "./synth/elevenlabs.
 import { synthesizeElevenLabs } from "./synth/elevenlabs.ts";
 import { canStreamGoogle, resolveGoogleModel } from "./synth/google.ts";
 import { synthesizeGoogle } from "./synth/google.ts";
-import { createWebSpeechJob, waitForWebSpeechJob } from "./synth/serverJobs.ts";
+import { cancelWebSpeechJob, createWebSpeechJob, waitForWebSpeechJob } from "./synth/serverJobs.ts";
 import { clamp } from "./util.ts";
 
 /** Error carrying an HTTP-ish status, as thrown across the pipeline. */
@@ -118,6 +119,19 @@ interface SynthesisResult {
   jobId?: string;
 }
 
+/** Immutable settings captured at the start of one generation run. */
+type GenerationSettingsSnapshot = Readonly<WebSettings>;
+
+function uniqueControllerId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (typeof globalThis.crypto?.getRandomValues === "function") {
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 /** Whether an error is retryable for provider fallback. Ports `isRetryable`. */
 export function isRetryable(error: StatusError | null | undefined): boolean {
   if (error?.retryable === false) return false;
@@ -167,6 +181,7 @@ export function settingsMatchServerDefaults(settings: WebSettings): boolean {
  * server synthesis, persistence, and cancellation.
  */
 export class GenerationController {
+  private readonly controllerId = uniqueControllerId();
   private config: BrowserTtsConfig | null;
   private settings: WebSettings;
   private callbacks: GenerationCallbacks;
@@ -179,6 +194,7 @@ export class GenerationController {
   private active = false;
   private activeStreamPlayback: StreamingPlayback | null = null;
   private lifecycleInterrupted = false;
+  private activeServerJobId: string | null = null;
 
   constructor(options: GenerationControllerOptions) {
     this.config = options.config;
@@ -216,11 +232,11 @@ export class GenerationController {
     this.callbacks.onStatus?.(label, clamp(Number(fraction) || 0, 0, 1));
   }
 
-  private prepSettings(): PrepSettings {
+  private prepSettings(settings: GenerationSettingsSnapshot): PrepSettings {
     return {
-      model: this.settings.model,
-      emotionPreprocessing: this.settings.emotionPreprocessing,
-      summarization: this.settings.summarization,
+      model: settings.model,
+      emotionPreprocessing: settings.emotionPreprocessing,
+      summarization: settings.summarization,
     };
   }
 
@@ -233,6 +249,11 @@ export class GenerationController {
     const playback = this.activeStreamPlayback;
     this.activeStreamPlayback = null;
     playback.stop();
+  }
+
+  private releaseServerJob(jobId: string): void {
+    if (this.activeServerJobId === jobId) this.activeServerJobId = null;
+    void cancelWebSpeechJob(jobId).catch(() => {});
   }
 
   private shouldKeepPendingGeneration(error: StatusError | null | undefined): boolean {
@@ -248,6 +269,7 @@ export class GenerationController {
    * and stop streaming playback. Ports `cancelActiveGeneration`.
    */
   cancel(): void {
+    const serverJobId = this.activeServerJobId ?? loadPendingGeneration()?.jobId ?? null;
     this.cancelled = true;
     this.runId += 1;
     this.active = false;
@@ -255,6 +277,8 @@ export class GenerationController {
     this.abortController?.abort();
     this.abortController = null;
     this.stopActiveStreamPlayback();
+    this.activeServerJobId = null;
+    if (serverJobId) this.releaseServerJob(serverJobId);
   }
 
   /** Synthesize with one provider (prep → stream or chunked). Ports `synthesizeProvider`. */
@@ -266,28 +290,36 @@ export class GenerationController {
     prepCache: Map<string, PrepResult>,
     signal: AbortSignal | null,
     runId: number,
+    settings: GenerationSettingsSnapshot,
   ): Promise<SynthesisResult> {
     this.status(0.32, "Preparing");
     const throwIfCancelled = (): void => this.ensureNotCancelled(signal, runId);
     const onCodexAuthRefreshed = (): void => {
       if (config) saveCachedConfig(config);
     };
-    const forcePerformanceTags = canStreamProvider(config, provider, persona, this.settings.model);
-    let prep = await prepareForProvider(config, provider, input, persona, this.prepSettings(), {
-      prepCache,
-      forcePerformanceTags,
-      requireBrowserPrep: true,
-      signal,
-      throwIfCancelled,
-      onCodexAuthRefreshed,
-    });
+    const forcePerformanceTags = canStreamProvider(config, provider, persona, settings.model);
+    let prep = await prepareForProvider(
+      config,
+      provider,
+      input,
+      persona,
+      this.prepSettings(settings),
+      {
+        prepCache,
+        forcePerformanceTags,
+        requireBrowserPrep: true,
+        signal,
+        throwIfCancelled,
+        onCodexAuthRefreshed,
+      },
+    );
     if (prep.strategy === "shorten" && prep.input !== input) {
       const performancePrep = await prepareForProvider(
         config,
         provider,
         prep.input,
         persona,
-        this.prepSettings(),
+        this.prepSettings(settings),
         {
           prepCache,
           forcePerformanceTags,
@@ -308,7 +340,7 @@ export class GenerationController {
     this.status(0.44, "Connecting");
     this.ensureNotCancelled(signal, runId);
     const streamOptions = {
-      settingsModel: this.settings.model,
+      settingsModel: settings.model,
       signal,
       throwIfCancelled,
       onProgress: (fraction: number, label: string) => this.status(fraction, label),
@@ -345,8 +377,8 @@ export class GenerationController {
     this.status(0.64, "Synthesizing");
     const model =
       provider === "google"
-        ? resolveGoogleModel(config.providers?.google, this.settings.model)
-        : resolveElevenLabsModel(config.providers?.elevenlabs, this.settings.model);
+        ? resolveGoogleModel(config.providers?.google, settings.model)
+        : resolveElevenLabsModel(config.providers?.elevenlabs, settings.model);
     const blob =
       provider === "google"
         ? await synthesizeGoogle(config, prep.input, persona, prep.instructions, {
@@ -367,14 +399,14 @@ export class GenerationController {
     input: string,
     signal: AbortSignal | null,
     runId: number,
+    settings: GenerationSettingsSnapshot,
   ): Promise<SynthesisResult> {
     const config = this.config as BrowserTtsConfig;
     const prepCache = new Map<string, PrepResult>();
-    const selectedProvider = this.settings.provider !== "auto" ? this.settings.provider : null;
+    const selectedProvider = settings.provider !== "auto" ? settings.provider : null;
     const primary =
-      selectedProvider ||
-      resolveProvider(config, resolvePersona(config, null, this.settings), this.settings);
-    const persona = resolvePersona(config, primary, this.settings);
+      selectedProvider || resolveProvider(config, resolvePersona(config, null, settings), settings);
+    const persona = resolvePersona(config, primary, settings);
     try {
       return await this.synthesizeProvider(
         config,
@@ -384,6 +416,7 @@ export class GenerationController {
         prepCache,
         signal,
         runId,
+        settings,
       );
     } catch (error) {
       if (!isRetryable(error as StatusError) || persona?.fallbackPolicy !== "preserve-persona")
@@ -398,6 +431,7 @@ export class GenerationController {
         prepCache,
         signal,
         runId,
+        settings,
       );
     }
   }
@@ -408,11 +442,13 @@ export class GenerationController {
     jobId: string | null,
     signal: AbortSignal | null,
     runId: number,
+    owner: string,
   ): Promise<SynthesisResult> {
     this.status(0.35, jobId ? "Resuming" : "Preparing");
     this.ensureNotCancelled(signal, runId);
     const activeJobId = jobId || (await createWebSpeechJob(input, signal));
-    savePendingGeneration(input, activeJobId);
+    this.activeServerJobId = activeJobId;
+    savePendingGeneration(input, activeJobId, owner);
     const result = await waitForWebSpeechJob(activeJobId, {
       signal,
       throwIfCancelled: () => this.ensureNotCancelled(signal, runId),
@@ -436,7 +472,9 @@ export class GenerationController {
    * server path.
    */
   async generate(input: string, resumeJobId: string | null = null): Promise<void> {
+    const runSettings: GenerationSettingsSnapshot = Object.freeze({ ...this.settings });
     const runId = this.runId + 1;
+    const runOwner = `${this.controllerId}:${runId}`;
     this.runId = runId;
     this.cancelled = false;
     const controller = new AbortController();
@@ -445,26 +483,32 @@ export class GenerationController {
     this.lifecycleInterrupted = false;
     this.stopActiveStreamPlayback();
     this.callbacks.onGeneratingChange?.(true);
-    if (resumeJobId) savePendingGeneration(input, resumeJobId);
+    if (resumeJobId) savePendingGeneration(input, resumeJobId, runOwner);
     this.callbacks.onClearError?.();
     this.status(0.08, "Starting");
     let resumeAfterLifecycleInterruption = false;
     try {
       let result: SynthesisResult;
       if (resumeJobId) {
-        result = await this.generateViaServer(input, resumeJobId, controller.signal, runId);
+        result = await this.generateViaServer(
+          input,
+          resumeJobId,
+          controller.signal,
+          runId,
+          runOwner,
+        );
       } else if (this.config && canGenerateDirectWithConfiguredPrep(this.config)) {
         this.status(0.25, "Direct");
         try {
-          result = await this.generateDirect(input, controller.signal, runId);
+          result = await this.generateDirect(input, controller.signal, runId, runSettings);
         } catch (error) {
-          if (!settingsMatchServerDefaults(this.settings)) throw error;
+          if (!settingsMatchServerDefaults(runSettings)) throw error;
           this.status(0.25, "Server");
-          result = await this.generateViaServer(input, null, controller.signal, runId);
+          result = await this.generateViaServer(input, null, controller.signal, runId, runOwner);
         }
       } else {
         this.status(0.25, "Server");
-        result = await this.generateViaServer(input, null, controller.signal, runId);
+        result = await this.generateViaServer(input, null, controller.signal, runId, runOwner);
       }
       this.ensureNotCancelled(controller.signal, runId);
       const currentDraft = this.getDraftText();
@@ -477,7 +521,14 @@ export class GenerationController {
         this.callbacks.onTextReplace?.(result.input);
       }
       this.status(0.9, "Saving");
-      await saveLastGeneratedAudio(result.blob, result.input, result.inputChanged);
+      await saveLastGeneratedAudio(result.blob, result.input, result.inputChanged, runOwner);
+      try {
+        this.ensureNotCancelled(controller.signal, runId);
+      } catch (error) {
+        await deleteLastGeneratedAudio(runOwner);
+        throw error;
+      }
+      if (result.jobId) this.releaseServerJob(result.jobId);
       const meta: GenerationMeta = {
         input: result.input,
         inputChanged: result.inputChanged,
@@ -492,14 +543,17 @@ export class GenerationController {
         result.playback.setReplayBlob(result.blob);
       }
       this.callbacks.onAudioReady?.(result.blob, meta);
-      clearPendingGeneration();
+      clearPendingGeneration(runOwner);
       this.callbacks.onClearError?.();
       this.status(1, "Done");
     } catch (error) {
       const typed = error as StatusError;
       const cancelled = this.cancelled || controller.signal.aborted || runId !== this.runId;
       resumeAfterLifecycleInterruption = !cancelled && this.shouldKeepPendingGeneration(typed);
-      if (!resumeAfterLifecycleInterruption) clearPendingGeneration();
+      if (!cancelled && !resumeAfterLifecycleInterruption && this.activeServerJobId) {
+        this.releaseServerJob(this.activeServerJobId);
+      }
+      if (!resumeAfterLifecycleInterruption) clearPendingGeneration(runOwner);
       if (!cancelled && !resumeAfterLifecycleInterruption) {
         this.callbacks.onError?.(typed?.message || "TTS failed.");
       }

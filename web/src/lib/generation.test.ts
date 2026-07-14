@@ -159,6 +159,34 @@ describe("GenerationController — path selection", () => {
     expect(audio[0].streamed).toBeFalsy();
   });
 
+  it("uses one immutable settings snapshot for the entire run", async () => {
+    const config = directConfig();
+    const google = config.providers.google!;
+    google.fallbackModels = ["gemini-next-tts"];
+    let releaseFirst!: () => void;
+    const firstPending = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      if (urls.length === 1) await firstPending;
+      return googleAudioResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new GenerationController({ config, settings });
+
+    const firstRun = controller.generate("First run");
+    await vi.waitFor(() => expect(urls).toHaveLength(1));
+    controller.update({ settings: { ...settings, model: "google:gemini-next-tts" } });
+    releaseFirst();
+    await firstRun;
+
+    expect(urls[0]).toContain("gemini-2.5-flash-tts");
+    await controller.generate("Second run");
+    expect(urls[1]).toContain("gemini-next-tts");
+  });
+
   it("server path: no direct config goes straight to the server job", async () => {
     const wavB64 = btoa("RIFF0000WAVEfmt ");
     const fetchMock = routedFetch([
@@ -197,6 +225,70 @@ describe("GenerationController — path selection", () => {
     // Pending cleared and last audio persisted.
     expect(loadPendingGeneration()).toBeNull();
     expect(await getLastGeneratedAudio()).not.toBeNull();
+  });
+
+  it("does not wait for completed-job cleanup before publishing audio", async () => {
+    const wavB64 = btoa("RIFF0000WAVEfmt ");
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "job-cleanup" }), { status: 200 });
+      }
+      if (init?.method === "DELETE") return await new Promise<Response>(() => {});
+      return new Response(
+        JSON.stringify({
+          status: "complete",
+          result: {
+            input: "Hello",
+            input_changed: false,
+            audio_base64: wavB64,
+            mime_type: "audio/wav",
+            format: "wav",
+          },
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const audio: string[] = [];
+    const controller = new GenerationController({
+      config: null,
+      settings,
+      callbacks: { onAudioReady: (_blob, meta) => audio.push(meta.provider) },
+    });
+
+    await controller.generate("Hello");
+
+    expect(audio).toEqual(["server"]);
+    expect(controller.isActive).toBe(false);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/web/speech-jobs/job-cleanup",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("cancels a server job when polling fails", async () => {
+    const methods: string[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      methods.push(init?.method ?? "GET");
+      if (init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "job-failed" }), { status: 200 });
+      }
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      return new Response("unavailable", { status: 503 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const errors: string[] = [];
+    const controller = new GenerationController({
+      config: null,
+      settings,
+      callbacks: { onError: (message) => errors.push(message) },
+    });
+
+    await controller.generate("Hello");
+    await vi.waitFor(() => expect(methods).toContain("DELETE"));
+
+    expect(errors).toEqual(["TTS job status failed (503)"]);
+    expect(loadPendingGeneration()).toBeNull();
   });
 
   it("server fallback: direct failure with default settings falls back to server", async () => {
@@ -298,6 +390,48 @@ describe("GenerationController — cancellation", () => {
     expect(abortErrors).toEqual(["aborted"]);
     // Cancelled run must not surface audio, error, or a text replacement.
     expect(events).toEqual([]);
+  });
+
+  it("a cancelled run cannot clear its replacement's pending job", async () => {
+    let postCount = 0;
+    let releaseCancelledPoll!: () => void;
+    const cancelledPollReleased = new Promise<void>((resolve) => {
+      releaseCancelledPoll = resolve;
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "POST") {
+        postCount += 1;
+        return new Response(JSON.stringify({ id: postCount === 1 ? "job-a" : "job-b" }), {
+          status: 200,
+        });
+      }
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      if (url.endsWith("/job-a")) {
+        await cancelledPollReleased;
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      }
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new GenerationController({ config: null, settings });
+
+    const first = controller.generate("first");
+    await vi.waitFor(() => expect(loadPendingGeneration()?.jobId).toBe("job-a"));
+    controller.cancel();
+    const second = controller.generate("second");
+    await vi.waitFor(() => expect(loadPendingGeneration()?.jobId).toBe("job-b"));
+
+    releaseCancelledPoll();
+    await first;
+    expect(loadPendingGeneration()?.jobId).toBe("job-b");
+
+    controller.cancel();
+    await second;
   });
 });
 

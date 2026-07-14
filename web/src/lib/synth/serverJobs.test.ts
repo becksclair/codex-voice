@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ServerJobError,
   SERVER_JOB_POLL_MS,
+  cancelWebSpeechJob,
   type WebSpeechJobStatus,
   createWebSpeechJob,
   fetchWebSpeechJob,
@@ -51,6 +52,18 @@ describe("createWebSpeechJob", () => {
       vi.fn(async () => jsonResponse({ status: "pending" })),
     );
     await expect(createWebSpeechJob("x")).rejects.toThrow("TTS job did not return an id.");
+  });
+});
+
+describe("cancelWebSpeechJob", () => {
+  it("deletes the encoded job id with keepalive", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await cancelWebSpeechJob("job/1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/web/speech-jobs/job%2F1",
+      expect.objectContaining({ method: "DELETE", keepalive: true }),
+    );
   });
 });
 
