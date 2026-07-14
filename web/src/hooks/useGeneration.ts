@@ -144,6 +144,8 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
             onFinished: () => waveformRef.current?.markStreamFinished(),
             onReplayReady: (blob) => playback.onReplayReady(blob),
           },
+          onStreamPlaybackChange: (streamPlayback) =>
+            playback.onStreamPlaybackChange(streamPlayback),
           onStreamState: (state) => playback.onStreamState(state),
         },
       });

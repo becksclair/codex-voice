@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserPersonaConfig, BrowserTtsConfig } from "./config.ts";
+import type { StreamingPlayback } from "./audio/streaming.ts";
 import {
   canGenerateDirectWithConfiguredPrep,
   fallbackProvider,
@@ -358,6 +359,30 @@ describe("GenerationController — provider fallback ordering", () => {
 });
 
 describe("GenerationController — cancellation", () => {
+  it("does not let stale cleanup stop a replacement stream", () => {
+    const changes: Array<StreamingPlayback | null> = [];
+    const controller = new GenerationController({
+      config: null,
+      settings,
+      callbacks: { onStreamPlaybackChange: (playback) => changes.push(playback) },
+    });
+    const stale = { stop: vi.fn() } as unknown as StreamingPlayback;
+    const replacement = { stop: vi.fn() } as unknown as StreamingPlayback;
+    const internals = controller as unknown as {
+      activeStreamPlayback: StreamingPlayback | null;
+      stopActiveStreamPlayback(expected?: StreamingPlayback): void;
+    };
+    internals.activeStreamPlayback = replacement;
+
+    internals.stopActiveStreamPlayback(stale);
+    expect(replacement.stop).not.toHaveBeenCalled();
+    expect(changes).toEqual([]);
+
+    internals.stopActiveStreamPlayback(replacement);
+    expect(replacement.stop).toHaveBeenCalledOnce();
+    expect(changes).toEqual([null]);
+  });
+
   it("aborts the in-flight fetch and makes no late state writes", async () => {
     const abortErrors: string[] = [];
     const captured: { signal: AbortSignal | null } = { signal: null };

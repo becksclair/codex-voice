@@ -55,6 +55,22 @@ class FakeAudioContext {
   }
 }
 
+class DeferredSuspendAudioContext extends FakeAudioContext {
+  private releaseSuspendPromise: (() => void) | null = null;
+  private suspendPromise = new Promise<void>((resolve) => {
+    this.releaseSuspendPromise = resolve;
+  });
+
+  override async suspend(): Promise<void> {
+    await this.suspendPromise;
+    this.state = "suspended";
+  }
+
+  releaseSuspend(): void {
+    this.releaseSuspendPromise?.();
+  }
+}
+
 const fakeCtor = (): AudioContextConstructor =>
   FakeAudioContext as unknown as AudioContextConstructor;
 
@@ -134,6 +150,66 @@ describe("StreamingPlayback — scheduling math", () => {
     expect(ctx.sources.length).toBe(0);
   });
 
+  it("pauses playback while continuing to buffer appended chunks", async () => {
+    const states: boolean[] = [];
+    const playback = new StreamingPlayback({
+      audioContextCtor: fakeCtor,
+      callbacks: { onPlayingChange: (playing) => states.push(playing) },
+    });
+    await playback.start();
+    const ctx = playback.context as unknown as FakeAudioContext;
+
+    await playback.toggle();
+    expect(ctx.state).toBe("suspended");
+    for (let index = 0; index < 256; index += 1) {
+      playback.appendPcm(new Uint8Array([0, 0, 0, 0]), 24000, 1);
+    }
+    expect(ctx.sources).toHaveLength(0);
+    expect(playback.estimatedDuration).toBeGreaterThan(0);
+
+    await playback.toggle();
+    expect(ctx.state).toBe("running");
+    expect(ctx.sources).toHaveLength(1);
+    expect(states).toEqual([true, false, true]);
+  });
+
+  it("does not drain a finished stream until paused PCM has played", async () => {
+    let replay: Blob | null = null;
+    const playback = new StreamingPlayback({
+      audioContextCtor: fakeCtor,
+      callbacks: { onReplayReady: (blob) => (replay = blob) },
+    });
+    await playback.start();
+    await playback.toggle();
+    playback.appendPcm(new Uint8Array([0, 0, 0, 0]), 24000, 1);
+    const blob = new Blob(["complete"], { type: "audio/wav" });
+    playback.markFinished();
+    playback.setReplayBlob(blob);
+
+    expect(replay).toBeNull();
+    await playback.toggle();
+    const ctx = playback.context as unknown as FakeAudioContext;
+    expect(ctx.sources).toHaveLength(1);
+    ctx.sources[0].onended?.();
+    expect(replay).toBe(blob);
+  });
+
+  it("serializes rapid pause and resume requests to the latest desired state", async () => {
+    const playback = new StreamingPlayback({
+      audioContextCtor: () => DeferredSuspendAudioContext as unknown as AudioContextConstructor,
+    });
+    await playback.start();
+    const ctx = playback.context as unknown as DeferredSuspendAudioContext;
+
+    const pause = playback.toggle();
+    const resume = playback.toggle();
+    ctx.releaseSuspend();
+    await Promise.all([pause, resume]);
+
+    expect(playback.playing).toBe(true);
+    expect(ctx.state).toBe("running");
+  });
+
   it("delivers a drained replay blob once finished and sources ended", async () => {
     let replay: Blob | null = null;
     const playback = new StreamingPlayback({
@@ -186,6 +262,47 @@ describe("streamElevenLabsHttp", () => {
     expect(Array.from(parsed.data)).toEqual([10, 0, 20, 0, 30, 0, 40, 0]);
     expect(states).toContain("done");
     expect(result.streamingModel).toBe("eleven_flash_v2");
+  });
+
+  it("exposes playback before completion so pause does not stop buffering", async () => {
+    const pending: {
+      bodyController: ReadableStreamDefaultController<Uint8Array> | null;
+      playback: StreamingPlayback | null;
+    } = { bodyController: null, playback: null };
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        pending.bodyController = controller;
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(body, { status: 200 })),
+    );
+    const resultPromise = streamElevenLabsHttp(
+      config,
+      "hello",
+      persona,
+      { outputFormat: "pcm_24000", sampleRate: 24000, channels: 1, modelId: "eleven_flash_v2" },
+      { audioContextCtor: fakeCtor, onPlaybackReady: (playback) => (pending.playback = playback) },
+    );
+
+    await vi.waitFor(() => expect(pending.playback).not.toBeNull());
+    const playback = pending.playback;
+    const bodyController = pending.bodyController;
+    if (!playback || !bodyController) throw new Error("stream did not initialize");
+    await playback.toggle();
+    expect((playback.context as unknown as FakeAudioContext).state).toBe("suspended");
+
+    bodyController?.enqueue(new Uint8Array([1, 0, 2, 0]));
+    bodyController?.enqueue(new Uint8Array([3, 0, 4, 0]));
+    bodyController?.close();
+    const result = await resultPromise;
+
+    expect(result.playback).toBe(playback);
+    expect(playback.estimatedDuration).toBeCloseTo(4 / 24000, 10);
+    expect((playback.context as unknown as FakeAudioContext).sources).toHaveLength(0);
+    await playback.toggle();
+    expect((playback.context as unknown as FakeAudioContext).sources).toHaveLength(1);
   });
 
   it("fails and surfaces a provider error on a non-OK response", async () => {

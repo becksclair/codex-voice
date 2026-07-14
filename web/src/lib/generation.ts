@@ -91,6 +91,8 @@ export interface GenerationCallbacks {
   onTextReplace?: (text: string) => void;
   /** High-level streaming state passthrough. */
   onStreamState?: (state: StreamState) => void;
+  /** Attach or detach the live playback as soon as streaming starts or stops. */
+  onStreamPlaybackChange?: (playback: StreamingPlayback | null) => void;
   /** Forwarded to the streaming playback (position/peaks/replay). */
   playbackCallbacks?: StreamingPlaybackCallbacks;
 }
@@ -244,11 +246,13 @@ export class GenerationController {
     if (signal?.aborted || this.cancelled || runId !== this.runId) throw streamAbortError();
   }
 
-  private stopActiveStreamPlayback(): void {
+  private stopActiveStreamPlayback(expected?: StreamingPlayback): void {
     if (!this.activeStreamPlayback) return;
     const playback = this.activeStreamPlayback;
+    if (expected && playback !== expected) return;
     this.activeStreamPlayback = null;
     playback.stop();
+    this.callbacks.onStreamPlaybackChange?.(null);
   }
 
   private releaseServerJob(jobId: string): void {
@@ -339,6 +343,10 @@ export class GenerationController {
     }
     this.status(0.44, "Connecting");
     this.ensureNotCancelled(signal, runId);
+    let attemptPlayback: StreamingPlayback | null = null;
+    const playbackCallbacks = this.callbacks.playbackCallbacks;
+    const ownsAttemptPlayback = (): boolean =>
+      attemptPlayback !== null && this.activeStreamPlayback === attemptPlayback;
     const streamOptions = {
       settingsModel: settings.model,
       signal,
@@ -346,7 +354,30 @@ export class GenerationController {
       onProgress: (fraction: number, label: string) => this.status(fraction, label),
       onStateChange: (state: StreamState) => this.callbacks.onStreamState?.(state),
       audioContextCtor: this.audioContextCtorOption,
-      playbackCallbacks: this.callbacks.playbackCallbacks,
+      playbackCallbacks: {
+        onProgress: (current: number, estimated: number, finished: boolean) => {
+          if (ownsAttemptPlayback()) playbackCallbacks?.onProgress?.(current, estimated, finished);
+        },
+        onPeaks: (peaks: number[], durationDelta: number) => {
+          if (ownsAttemptPlayback()) playbackCallbacks?.onPeaks?.(peaks, durationDelta);
+        },
+        onPlayingChange: (playing: boolean) => {
+          if (ownsAttemptPlayback()) playbackCallbacks?.onPlayingChange?.(playing);
+        },
+        onFinished: () => {
+          if (ownsAttemptPlayback()) playbackCallbacks?.onFinished?.();
+        },
+        onReplayReady: (blob: Blob) => {
+          if (ownsAttemptPlayback()) playbackCallbacks?.onReplayReady?.(blob);
+        },
+      },
+      onPlaybackReady: (playback: StreamingPlayback) => {
+        this.ensureNotCancelled(signal, runId);
+        this.stopActiveStreamPlayback();
+        attemptPlayback = playback;
+        this.activeStreamPlayback = playback;
+        this.callbacks.onStreamPlaybackChange?.(playback);
+      },
     };
     try {
       const streamed = await tryStreamProvider(
@@ -371,7 +402,8 @@ export class GenerationController {
       }
     } catch (error) {
       console.warn(error);
-      this.stopActiveStreamPlayback();
+      if (attemptPlayback) this.stopActiveStreamPlayback(attemptPlayback);
+      this.ensureNotCancelled(signal, runId);
       this.status(0.58, "Fallback");
     }
     this.status(0.64, "Synthesizing");

@@ -108,7 +108,9 @@ export class StreamingPlayback {
   private timer: ReturnType<typeof setInterval> | null = null;
   playing = true;
   private buffers: PcmChunk[] = [];
+  private scheduledBufferCount = 0;
   private seekSerial = 0;
+  private transportTransition: Promise<void> = Promise.resolve();
 
   constructor(options: StreamingPlaybackOptions = {}) {
     const resolve = options.audioContextCtor ?? audioContextCtor;
@@ -139,10 +141,33 @@ export class StreamingPlayback {
     this.buffers.push({ bytes, sampleRate, channels, duration });
     const { peaks, durationDelta } = streamingPcmPeaks(waveformBytes, sampleRate, channels);
     this.callbacks.onPeaks?.(peaks, durationDelta);
-    const buffer = pcm16ToAudioBuffer(this.context, bytes, sampleRate, channels);
-    this.scheduleBuffer(buffer, 0);
-    this.estimatedDuration += buffer.duration;
+    this.estimatedDuration += duration;
+    if (this.playing) this.schedulePendingBuffers();
     this.updatePosition();
+  }
+
+  private schedulePendingBuffers(): void {
+    if (!this.context) return;
+    while (this.scheduledBufferCount < this.buffers.length) {
+      const first = this.buffers[this.scheduledBufferCount];
+      let end = this.scheduledBufferCount + 1;
+      while (
+        end < this.buffers.length &&
+        this.buffers[end].sampleRate === first.sampleRate &&
+        this.buffers[end].channels === first.channels
+      ) {
+        end += 1;
+      }
+      const bytes =
+        end === this.scheduledBufferCount + 1
+          ? first.bytes
+          : concatUint8Arrays(
+              this.buffers.slice(this.scheduledBufferCount, end).map((chunk) => chunk.bytes),
+            );
+      const buffer = pcm16ToAudioBuffer(this.context, bytes, first.sampleRate, first.channels);
+      this.scheduleBuffer(buffer, 0);
+      this.scheduledBufferCount = end;
+    }
   }
 
   private scheduleBuffer(buffer: AudioBuffer, offset = 0): void {
@@ -167,15 +192,23 @@ export class StreamingPlayback {
 
   async toggle(): Promise<void> {
     if (!this.context) return;
-    if (this.context.state === "suspended") {
-      this.playing = true;
-      this.callbacks.onPlayingChange?.(true);
-      await this.context.resume();
-    } else {
-      this.playing = false;
-      this.callbacks.onPlayingChange?.(false);
-      await this.context.suspend();
-    }
+    this.playing = !this.playing;
+    this.callbacks.onPlayingChange?.(this.playing);
+    const context = this.context;
+    const previous = this.transportTransition.catch(() => {});
+    const transition = previous.then(async () => {
+      if (this.stopped || this.context !== context) return;
+      if (this.playing) {
+        await context.resume();
+        if (!this.stopped && this.context === context && this.playing) {
+          this.schedulePendingBuffers();
+        }
+      } else {
+        await context.suspend();
+      }
+    });
+    this.transportTransition = transition;
+    await transition;
     this.updatePosition();
   }
 
@@ -189,6 +222,7 @@ export class StreamingPlayback {
     const nextContext = new this.Ctor();
     this.context = nextContext;
     this.pendingSources = 0;
+    this.scheduledBufferCount = 0;
     this.nextStartTime = this.context.currentTime + 0.05;
     this.startedAt = this.context.currentTime;
     this.seekOffset = target;
@@ -208,6 +242,7 @@ export class StreamingPlayback {
       );
       this.scheduleBuffer(buffer, offset);
     }
+    this.scheduledBufferCount = this.buffers.length;
     try {
       if (wasPlaying) {
         await nextContext.resume();
@@ -262,7 +297,14 @@ export class StreamingPlayback {
 
   private checkDrain(): void {
     if (this.stopped) return;
-    if (!this.finished || this.pendingSources > 0 || !this.replayBlob || this.replayLoaded) return;
+    if (
+      !this.finished ||
+      this.pendingSources > 0 ||
+      this.scheduledBufferCount < this.buffers.length ||
+      !this.replayBlob ||
+      this.replayLoaded
+    )
+      return;
     this.replayLoaded = true;
     const blob = this.replayBlob;
     this.stop();
@@ -391,6 +433,8 @@ export interface StreamOptions {
   audioContextCtor?: () => AudioContextConstructor | null;
   /** Forwarded to the internal {@link StreamingPlayback}. */
   playbackCallbacks?: StreamingPlaybackCallbacks;
+  /** The live playback exists and can be controlled while bytes continue arriving. */
+  onPlaybackReady?: (playback: StreamingPlayback) => void;
 }
 
 function ensureNotCancelled(options: StreamOptions): void {
@@ -495,6 +539,7 @@ export async function streamGoogle(
   const model = normalizeGoogleModelName(resolveGoogleModel(google, options.settingsModel));
   const voiceName = persona?.google?.voiceName || google.voice;
   const sink = createPcmStreamSink(sinkOptionsFrom(config, options));
+  options.onPlaybackReady?.(sink.playback);
   await sink.start();
   options.onProgress?.(0.48, "Connecting");
   const response = await fetch(`${googleInteractionsBaseUrl(google.baseUrl)}/interactions`, {
@@ -556,6 +601,7 @@ export async function streamElevenLabsHttp(
   const modelId =
     streamMeta.modelId || resolveElevenLabsStreamingModel(elevenlabs, options.settingsModel);
   const sink = createPcmStreamSink(sinkOptionsFrom(config, options));
+  options.onPlaybackReady?.(sink.playback);
   await sink.start();
   options.onProgress?.(0.48, "Connecting");
   const url = new URL(
@@ -653,6 +699,7 @@ export async function streamElevenLabs(
   }
 
   const sink = createPcmStreamSink(sinkOptionsFrom(config, options));
+  options.onPlaybackReady?.(sink.playback);
   await sink.start();
   options.onProgress?.(0.48, "Connecting");
 

@@ -30,6 +30,8 @@ export interface PlaybackApi {
   onStreamAudioReady(blob: Blob, playback: StreamingPlayback | null): void;
   /** Streaming playing-state changed (mirrors `playSvg(!playing)`). */
   onPlayingChange(playing: boolean): void;
+  /** Attach/detach live playback independently from the final downloadable blob. */
+  onStreamPlaybackChange(playback: StreamingPlayback | null): void;
   /** Streaming progress tick. */
   onStreamProgress(current: number, estimated: number, finished: boolean): void;
   /** High-level streaming state passthrough (handles the buffering reset). */
@@ -233,6 +235,20 @@ export function usePlayback(
         setPlayDisabled(false);
         streamRef.current = playback;
       },
+      onStreamPlaybackChange(playback) {
+        if (playback) {
+          resetAudio();
+          streamRef.current = playback;
+          waveformRef.current?.resetStreaming();
+          setDuration("Live");
+          setPlayDisabled(false);
+          setPaused(!playback.playing);
+          return;
+        }
+        streamRef.current = null;
+        setPaused(true);
+        setPlayDisabled(!audioRef.current?.src);
+      },
       onPlayingChange(playing) {
         setPaused(!playing);
       },
@@ -243,8 +259,6 @@ export function usePlayback(
       },
       onStreamState(state) {
         if (state === "buffering") {
-          resetAudio();
-          waveformRef.current?.resetStreaming();
           setDuration("Live");
           setPlayDisabled(false);
         }
