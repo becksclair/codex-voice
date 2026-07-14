@@ -13,14 +13,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
       - name: Install Linux build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libxdo-dev pkg-config
+          sudo apt-get install -y build-essential curl file libasound2-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev pkg-config wget
       - run: cargo fmt --check
       - run: cargo check --workspace
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cd web && bun install --frozen-lockfile && bun run check && bun run test && bun run build
 
   deny:
     runs-on: ubuntu-latest
@@ -29,3 +33,21 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses sources
+
+  web-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install desktop and browser build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file libasound2-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev pkg-config wget
+      - run: cd web && bun install --frozen-lockfile && bun run build
+      - run: cd webtests && bun install --frozen-lockfile && bunx playwright install --with-deps chromium
+      - run: cargo build -q -p codex-voice-app --bin codex-voice
+      - run: cd webtests && bunx playwright test

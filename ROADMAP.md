@@ -58,6 +58,12 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
     built with `bun`). `web/dist` is embedded at build time; `server --web-dist
     <dir>` serves a dist from disk for binary-independent web deploys. Only
     content-hashed `/web/assets/*` is immutable-cached. See `web/README.md`.
+- [x] Add bounded speech-job admission and cancellation
+  - At most three nonterminal jobs, one active synthesis, `429 Retry-After` on overload
+  - `DELETE /web/speech-jobs/{id}` is idempotent and aborts active work
+- [x] Add short-lived one-shot desktop intents for selected-text handoff
+- [x] Let `run` own an embedded service at the stable `http://localhost:3846` desktop origin when no external service is healthy
+  - Embedded instances never publish or delete the standalone discovery file
 
 **Validation:** `cargo test --workspace`, `cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"`, `cargo run -p codex-voice-app --bin codex-voice -- server`
 
@@ -74,12 +80,11 @@ KDE6/Wayland portal-based hotkeys, text injection, and desktop UI surface.
   - Sets clipboard, sends Ctrl+V through portal keyboard session, restores clipboard
   - Persists restore tokens for reuse across process restarts
 - [x] Implement `LinuxPermissionService` with portal diagnostics
-- [x] Implement Linux tray
+- [x] Implement the unified Tauri 2 tray/webview shell
   - Status updates, Start Test Recording, Speak text..., Open Settings, Open Logs, Run Diagnostics, Quit
-  - Originally GTK3 via `tray-icon`; migrated to ksni (StatusNotifierItem over
-    D-Bus) to drop the unmaintained GTK3 stack (plan 023)
+  - Supersedes the historical GTK3, ksni, and iced implementations
 - [x] Implement desktop notification HUD (`notify-send`) for focus-safe status
-- [x] Implement settings/status window (iced; formerly GTK3)
+- [x] Implement settings/status webview window using the React PWA's settings-only route
 - [x] Add `doctor linux-portals`, `doctor paste`
 - [x] Wire `codex-voice run` with full Linux engine + tray + HUD
 
@@ -98,12 +103,10 @@ Windows has a full desktop surface with system tray, settings window, and engine
   - Waits for Control release before paste to avoid hotkey contamination
 - [x] Implement `WindowsPermissionService` stub
 - [x] Wire `codex-voice run` for Windows with system tray
-- [x] Add Windows system tray (`tray-icon` cross-platform menu)
+- [x] Add Windows system tray through the unified Tauri 2 shell
   - Status updates, Start Test Recording, Speak text..., Open Settings, Open Logs, Run Diagnostics, Quit
-  - `@crates/codex-voice-ui/src/windows_tray.rs`
-- [x] Add Windows settings/status window (Win32 dialog with static text)
-  - Shows current status, hotkey info, insertion method, log path
-  - Updates in real-time as status changes arrive via channel
+  - `@crates/codex-voice-app/src/tray.rs`
+- [x] Add Windows settings/status webview window
 - [ ] Add Windows desktop notification HUD (deferred — tray tooltip used for v1)
 - [x] Validate compilation on Windows VM
   - `cargo check --workspace` passes on Windows
@@ -144,9 +147,8 @@ macOS has a complete desktop surface with global hotkeys, Accessibility text inj
 - [x] Add macOS diagnostics: `doctor hotkey`, `doctor paste`
   - `doctor hotkey` uses the same `global-hotkey` service
   - `doctor paste` tests Accessibility + clipboard fallback
-- [x] Add macOS system tray (`tray-icon` cross-platform menu)
-  - Status updates, Start Test Recording, Speak text..., Open Settings (osascript dialog), Open Logs, Run Diagnostics, Quit
-  - `@crates/codex-voice-ui/src/macos_tray.rs`
+- [x] Add macOS system tray through the unified Tauri 2 shell
+  - Status updates, Start Test Recording, Speak text..., Open Settings, Open Logs, Run Diagnostics, Quit
 - [x] Add macOS notification HUD (`osascript display notification`)
   - Best-effort desktop notifications with sound and replace semantics
 
@@ -154,44 +156,24 @@ macOS has a complete desktop surface with global hotkeys, Accessibility text inj
 
 ---
 
-## Phase 6 — Cross-Platform UI Decision
+## Phase 6 — Cross-Platform UI (Complete)
 
-All three platforms now have native UI surfaces using `tray-icon` for the system tray. Slint was planned in the original ExecPlan but was never adopted.
-
-- [x] **Decision made:** Keep per-platform native UI
-  - Linux: ksni (StatusNotifierItem/D-Bus) tray + `notify-send` HUD + iced settings/Speak-Text windows
-  - Windows: `tray-icon` tray + Win32 settings window
-  - macOS: `tray-icon` tray + `osascript` dialog settings + `osascript` notification HUD
-  - All platforms share the same `UiStatus`, `UiCommand`, and event loop pattern
-  - `@crates/codex-voice-ui/src/lib.rs`
-- [ ] If migrating to Slint later: implement Slint UI crate, replace native surfaces
-  - Requires `slint` and `slint-build` dependencies
-  - Research: [Slint desktop docs](https://docs.slint.dev/latest/docs/slint/guide/platforms/desktop/)
-  - Not a priority unless maintainability of three native surfaces becomes a problem
+- [x] Consolidate all platforms on a Tauri 2 tray and webview shell in `codex-voice-app`
+- [x] Remove the separate `codex-voice-ui` crate and its GTK3, ksni, and iced stacks
+- [x] Keep status HUD delivery platform-native and focus-safe
 
 ---
 
 ## Phase 7 — Packaging & Distribution
 
-No packaging exists. No `cargo-packager` config, no `resources/`, no icons.
+- [x] Add canonical desktop icons and a Tauri 2 bundle manifest
+- [x] Configure Windows NSIS current-user packaging with WebView2 bootstrapper download
+- [x] Keep a portable Windows ZIP and emit SHA-256 files for both artifacts
+- [x] Add Windows package and macOS compile checks to GitHub CI
+- [ ] Configure signed/notarized macOS packages
+- [ ] Configure Linux AppImage/deb/Pacman packages; `mise run setup` remains the Linux install path
 
-- [ ] Add `cargo-packager` to workspace dev-dependencies
-  - Research: [cargo-packager docs](https://docs.rs/cargo-packager)
-- [ ] Create `resources/icons/` with platform-specific icon sets
-- [ ] Create `resources/macos/Info.plist` with `NSMicrophoneUsageDescription`
-- [ ] Add `[package.metadata.packager]` to `crates/codex-voice-app/Cargo.toml`
-  - Product name: `Codex Voice`
-  - Identifier: `dev.codexvoice.app`
-  - Category: `Productivity`
-- [ ] Configure macOS packaging: `.app` + `.dmg`, background app, unsigned
-- [ ] Configure Linux packaging: AppImage, `.deb`, Pacman
-  - Document portal/D-Bus package dependencies
-- [ ] Configure Windows packaging: NSIS `.exe` (WiX `.msi` optional)
-- [ ] Add `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` for Windows release builds
-- [ ] Add packaging commands to `README.md`
-- [ ] Keep `mise run setup` as the Linux developer install path
-
-**Validation:** `cargo packager --release --format app,dmg` (macOS), `cargo packager --release --format appimage,deb,pacman` (Linux), `cargo packager --release --format nsis` (Windows)
+**Validation:** `packaging/windows/build-dist.ps1`, plus the interactive checklist in `packaging/windows/SMOKE.md`.
 
 ---
 
@@ -233,7 +215,7 @@ crates/codex-voice-codex   → Codex auth, private transcription HTTP
 crates/codex-voice-tts     → Google Gemini + ElevenLabs TTS backends
 crates/codex-voice-platform → Linux/Wayland portal adapters, Windows adapters
 crates/codex-voice-transcriber → Local OpenAI-compatible audio service + embedded web PWA
-crates/codex-voice-ui      → Linux ksni tray + iced windows, notifications, per-platform tray shims
+crates/codex-voice-app     → CLI wiring plus the unified Tauri tray/webview desktop shell
 web/                       → Standalone React TTS PWA (Vite/TypeScript/Tailwind), embedded into the transcriber crate at build time
 ```
 

@@ -5,7 +5,7 @@ Rust-native Linux-first implementation of the Codex Voice hold-to-dictate utilit
 The current milestone keeps the old Swift app out of scope and builds the Linux
 runtime first:
 
-- Rust workspace with separate core, audio, Codex, platform, UI, and app crates.
+- Rust workspace with separate core, audio, Codex, platform, and app crates.
 - CPAL microphone capture to mono 16-bit WAV.
 - Core dictation state machine for press, release, transcribe, insert, and cleanup.
 - Codex auth reuse through `~/.codex/auth.json` plus `codex app-server --listen stdio://`
@@ -15,8 +15,10 @@ runtime first:
 - Local OpenAI-compatible text-to-speech (TTS) service backed by Google Gemini TTS or ElevenLabs.
 - Linux KDE/Wayland diagnostics for portal availability.
 - Linux clipboard paste diagnostic using RemoteDesktop portal keyboard events.
-- Desktop tray, system notification status HUD, settings/status window, log file,
-  diagnostics, test recording, speak-text, and quit menu actions.
+- Cross-platform Tauri 2 desktop shell: a system tray plus plain webview windows
+  that load the existing React PWA over HTTP (no bundler, no Tauri IPC — windows
+  are external-URL webviews). System notification status HUD, log file,
+  diagnostics, test recording, speak-text, settings, and quit menu actions.
 
 ## Commands
 
@@ -34,13 +36,27 @@ cargo run -p codex-voice-app --bin codex-voice -- transcriber probe-limits --fil
 cargo run -p codex-voice-app --bin codex-voice -- run
 ```
 
+The desktop `run` command requires a built frontend when no standalone server
+is already available. On a clean checkout, run `mise run web-build` first (or
+use `mise run dev` for the normal full-stack development loop).
+
 `run` binds Control-M for hold-to-dictate and binds Super-F6 (Command-F6 on
-macOS, Win-F6 on Windows) to speak the currently selected text. It exposes a
-desktop tray surface with status, settings, diagnostics, test recording,
-`Speak text...`, replay, logs, and quit actions. If a healthy local transcriber
-service is running, `run` uses it as the transcription backend; otherwise it
-falls back to direct Codex transcription. Speech playback always uses the local
-audio service's `/v1/audio/speech` endpoint.
+macOS, Win-F6 on Windows) to speak the currently selected text — pressing it
+opens (or focuses) the main window with the selection prefilled and speech
+generation started automatically. It exposes a Tauri tray with a status label
+plus `Start Test Recording`, `Speak text...` (opens the main window), `Open
+Settings` (opens the settings window), `Open Logs`, `Run Diagnostics`, and
+`Quit` actions. The main and settings windows are plain webviews that load the
+same React PWA (`{base}/web?app=1` and `{base}/web?app=1&view=settings`); there
+is no native settings/speak-text UI and no Tauri IPC. `run` reuses a discovered
+service only when `/healthz` reports desktop readiness and its root is the
+canonical `http://localhost:3846` origin; otherwise it self-hosts there. Keeping
+one desktop origin preserves the PWA's localStorage and IndexedDB. The
+embedded instance is owned by the desktop process and deliberately does not
+publish a discovery file. Selected text is handed to the PWA through a
+short-lived, one-shot desktop intent rather than being placed in the URL. All
+TTS generation and playback for speak-text happens in the PWA via the
+`/web/speech` endpoints described below.
 
 ## Local Audio Server
 
@@ -101,7 +117,11 @@ Routes: `GET /web/` (app shell), `GET /web/assets/*` (content-hashed,
 immutable JS/CSS/icons), `GET /web/config` (browser-facing TTS config),
 `GET /web/sw.js` (service worker), `POST /web/speech` (synchronous synthesis),
 `POST /web/speech-jobs` and `GET /web/speech-jobs/{id}` (async speech jobs for
-longer input). The manifests (`manifest.webmanifest`,
+longer input), and `DELETE /web/speech-jobs/{id}` (idempotent cancellation).
+Desktop selection handoff uses `POST /web/desktop-intents`, one-shot
+`GET /web/desktop-intents/{id}`, and idempotent `DELETE` cleanup.
+The service admits at most three nonterminal jobs and executes one synthesis
+job at a time; overload returns `429` with `Retry-After`. The manifests (`manifest.webmanifest`,
 `manifest-light.webmanifest`) and install icons are static files under
 `web/public/`. Only `/web/assets/*` is served with immutable caching; the app
 shell, service worker, manifests, and icons are served `no-cache`, and Workbox
@@ -275,7 +295,7 @@ Description=Codex Voice local OpenAI-compatible audio server
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/codex-voice-wrapper server --bind 0.0.0.0:3845
+ExecStart=/usr/local/bin/codex-voice-wrapper server --bind <tailscale-ip>:3845
 Restart=on-failure
 RestartSec=2
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
@@ -283,6 +303,10 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 [Install]
 WantedBy=default.target
 ```
+
+Replace `<tailscale-ip>` with the host's explicit Tailscale address. Wildcard
+binds are intentionally rejected; loopback and Tailscale addresses are the
+supported server surfaces.
 
 The wrapper script sources `~/personal/dotfiles/secrets.sh` (API keys, TTS config)
 before launching the binary.
@@ -314,14 +338,26 @@ Ctrl+V through a RemoteDesktop keyboard portal session. The first run may ask fo
 desktop portal approval; subsequent runs reuse the persisted restore token when
 the portal returns one.
 
-The Linux desktop surface uses a pure-Rust tray via the StatusNotifierItem
-D-Bus protocol (ksni) — the native tray protocol on KDE Plasma — and renders its
-on-demand Settings and Speak Text windows with iced, so it has no GTK dependency.
-It mirrors dictation state in the tray and uses the desktop notification service
-for the HUD so it does not steal focus from the target app. Logs are written to
+The Linux desktop surface is the same Tauri tray and webview windows used on
+all platforms (tray-icon + appindicator for the tray, webkit2gtk for the
+windows). It mirrors dictation state in the tray and uses `notify-send` for
+the HUD so it does not steal focus from the target app. Logs are written to
 `${XDG_STATE_HOME:-~/.local/state}/codex-voice/codex-voice.log`, and the tray
-provides menu actions for test recording, settings/status, logs, portal
+provides menu actions for test recording, speak-text, settings, logs, portal
 diagnostics, and quitting the background app.
+
+## System requirements
+
+Linux runtime and build dependencies for the Tauri tray/webview shell:
+
+- Arch/CachyOS: `webkit2gtk-4.1 libappindicator-gtk3 librsvg`
+- Debian/Ubuntu: `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev`
+
+The Windows NSIS installer uses Tauri's WebView2 bootstrapper download mode, so
+it installs the Evergreen runtime when the target machine does not already have
+it. Build both the installer and portable ZIP with
+`packaging/windows/build-dist.ps1`; SHA-256 files are emitted beside them.
+macOS uses the system WKWebView and needs no extra dependencies.
 
 ## Validation
 

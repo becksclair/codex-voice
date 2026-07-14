@@ -2,7 +2,7 @@
 
 ## Project Snapshot
 
-Codex Voice is a Rust workspace for a Linux-first, Rust-native hold-to-dictate desktop utility. The workspace is split into small crates for app wiring, core state, audio capture, Codex auth/transcription, TTS, platform adapters, and UI. Read the nearest crate-level `AGENTS.md` before editing files under `crates/**`.
+Codex Voice is a Rust workspace for a Linux-first, Rust-native hold-to-dictate desktop utility. The workspace is split into small crates for app wiring, core state, audio capture, Codex auth/transcription, TTS, and platform adapters. The desktop UI is a Tauri 2 shell (tray + webview windows) that lives inside `codex-voice-app`; there is no separate UI crate. Read the nearest crate-level `AGENTS.md` before editing files under `crates/**`.
 
 ## Root Setup Commands
 
@@ -40,6 +40,22 @@ The TTS web PWA is a standalone React app at `web/`, decoupled from the Rust ser
 ### Architecture in one paragraph
 
 `bun run build` in `web/` produces `web/dist` (content-hashed assets under `dist/assets/`). The transcriber crate's `build.rs` copies `web/dist` into `$OUT_DIR` and embeds it via `include_dir!`, so the release binary is self-contained. When `web/dist` is absent, a stub page is embedded instead and cargo prints a warning — plain cargo builds never require bun, and dist-content tests skip themselves. At runtime, `codex-voice server --web-dist <dir>` serves a dist directory from disk (fully shadowing the embedded copy), which allows deploying web updates without rebuilding the Rust binary. The JSON API surface (`/web/config`, `/web/speech`, `/web/speech-jobs*`) is served by Rust and is independent of the asset pipeline.
+
+### Desktop app URL contract
+
+`codex-voice run` opens Tauri webview windows pointed at the same PWA over
+HTTP — there is no Tauri IPC, so the desktop integration is entirely
+query-string/hash driven:
+
+- `?app=1` — desktop app mode; the PWA skips service-worker registration.
+- `?view=settings` — the settings drawer starts open.
+- `#intent=<128-bit hex id>` — consumes a short-lived, one-shot selected-text
+  intent from the local service and starts speech generation automatically.
+  Used by the Super-F6 speak-selection hotkey without exposing text in the URL.
+
+The main window loads `{base}/web?app=1`; the settings window loads
+`{base}/web?app=1&view=settings`. Any code parsing these parameters or the
+`#intent=` hash lives in `web/src/`.
 
 ### Using it
 
@@ -91,7 +107,7 @@ Typical development loop: `mise run dev`, edit under `web/src/`, changes hot-rel
 - TTS (Google Gemini + ElevenLabs): `crates/codex-voice-tts/` -> [see AGENTS.md](crates/codex-voice-tts/AGENTS.md)
 - Transcriber service/client/discovery: `crates/codex-voice-transcriber/` -> [see AGENTS.md](crates/codex-voice-transcriber/AGENTS.md)
 - Platform adapters: `crates/codex-voice-platform/` -> [see AGENTS.md](crates/codex-voice-platform/AGENTS.md)
-- Native tray/HUD/settings surfaces for Linux, macOS, and Windows: `crates/codex-voice-ui/` -> [see AGENTS.md](crates/codex-voice-ui/AGENTS.md)
+- Tauri tray/window shell (no separate UI crate): `crates/codex-voice-app/src/tray.rs`, `src/status.rs`, `src/hud.rs` -> [see AGENTS.md](crates/codex-voice-app/AGENTS.md)
 - Web frontend (React PWA): `web/` -> [see README.md](web/README.md); e2e suite: `webtests/` -> [see README.md](webtests/README.md)
 - Architecture plan: `ROADMAP.md` (see `docs/execplan-rust-native-cross-platform.md.ARCHIVED` for original detailed research)
 

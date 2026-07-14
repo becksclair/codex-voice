@@ -3,6 +3,11 @@ description = "Build codex-voice, install it, and enable user services"
 run = '''
 set -eu
 
+# The Tauri tray/webview shell needs these system packages at build and run
+# time on Linux (not installed by this task — install manually first):
+#   Arch/CachyOS:    webkit2gtk-4.1 libappindicator-gtk3 librsvg
+#   Debian/Ubuntu:   libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
 # Build the web frontend first: the release binary embeds web/dist at compile time.
 (cd web && bun install --frozen-lockfile && bun run build)
 
@@ -65,7 +70,7 @@ run = "cargo clippy --workspace --all-targets -- -D warnings"
 [tasks.test-web]
 description = "Run the Playwright web PWA behavioral suite (requires bun + chromium)"
 dir = "{{cwd}}"
-depends = ["web-build"]
+depends = ["web-build", "webtests-install"]
 run = [
   # Prebuild outside Playwright's webServer timeout: a refreshed web/dist
   # retriggers the transcriber build script, and a cold compile inside the
@@ -134,6 +139,11 @@ dir = "{{cwd}}"
 depends = ["web-install"]
 run = "cd web && bun run test"
 
+[tasks.webtests-install]
+description = "Install Playwright test dependencies from the lockfile"
+dir = "{{cwd}}"
+run = "cd webtests && bun install --frozen-lockfile"
+
 [tasks.deny]
 description = "Check dependencies for advisories, license, and source policy"
 dir = "{{cwd}}"
@@ -141,4 +151,4 @@ run = "cargo deny check advisories licenses sources"
 
 [tasks.verify]
 description = "Run all verification gates"
-depends = ["fmt", "check", "test", "lint", "web-check", "web-test"]
+depends = ["fmt", "check", "test", "lint", "deny", "web-check", "web-test", "web-build"]
