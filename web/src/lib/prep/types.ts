@@ -63,6 +63,8 @@ export interface PrepResult {
   error?: string;
   /** Warning string when a degraded fallback (local tag / excerpt) was used. */
   warning?: string;
+  /** Machine-readable degraded fallback kind; presentation text must not drive orchestration. */
+  fallback?: "extractive-excerpt";
   /** The prior shorten pass, when a performance pass ran on shortened text. */
   shortened?: PrepResult;
 }

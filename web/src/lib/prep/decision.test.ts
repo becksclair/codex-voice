@@ -219,4 +219,13 @@ describe("providerMaxTextLength", () => {
     expect(providerMaxTextLength(config, "elevenlabs")).toBe(5000);
     expect(providerMaxTextLength(null, "google")).toBe(Infinity);
   });
+
+  it("caps ElevenLabs v3 browser requests at the upstream 5000-character limit", () => {
+    const config = {
+      maxTextLength: 6000,
+      providers: { elevenlabs: { modelId: "eleven_v3", maxTextLength: 6000 } },
+    } as unknown as BrowserTtsConfig;
+    expect(providerMaxTextLength(config, "elevenlabs", "default")).toBe(5000);
+    expect(providerMaxTextLength(config, "elevenlabs", "elevenlabs:eleven_flash_v2_5")).toBe(6000);
+  });
 });

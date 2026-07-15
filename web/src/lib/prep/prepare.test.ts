@@ -162,6 +162,21 @@ describe("prepareForProvider — server-only prep", () => {
     expect(result.error).toBe("Configured emotion prep is server-only.");
     expect(result.input).toBe("Hello world");
   });
+
+  it("uses a fitted excerpt when provider-required shortening cannot run in the browser", async () => {
+    const config = baseConfig({ browserSupported: false }, 10);
+    const result = await prepareForProvider(
+      config,
+      "google",
+      "abcdefghijklmnopqrst",
+      null,
+      settings,
+      { requireBrowserPrep: true },
+    );
+
+    expect(result.input).toBe("abcdefghij");
+    expect(result.fallback).toBe("extractive-excerpt");
+  });
 });
 
 describe("prepareForProvider — failure handling", () => {
@@ -256,6 +271,58 @@ describe("prepareForProvider — forced shorten", () => {
     expect(result.strategy).toBe("shorten");
     expect(result.input).toBe(input.slice(0, 10));
     expect(result.warning).toContain("below the minimum length");
+    expect(result.fallback).toBe("extractive-excerpt");
+  });
+});
+
+describe("prepareForProvider — forced shorten failure", () => {
+  it("uses a fitted source excerpt when over-limit prep times out", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("Aborted", "AbortError")),
+            );
+          }),
+      ),
+    );
+    const input = "x".repeat(6001);
+    const promise = prepareForProvider(
+      baseConfig({ attemptTimeoutMs: 10, timeoutMs: 10 }, 6000),
+      "google",
+      input,
+      null,
+      settings,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    const result = await promise;
+    expect(result.input).toHaveLength(4000);
+    expect(result.changed).toBe(true);
+    expect(result.strategy).toBe("shorten");
+    vi.useRealTimers();
+  });
+
+  it("preserves provider-valid input when optional shortening fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => googleTextResponse("prep unavailable", 400)),
+    );
+    const input = "x".repeat(6000);
+    const result = await prepareForProvider(
+      baseConfig({ mode: "shorten", threshold: 4000, maxLength: 4000 }, 10000),
+      "google",
+      input,
+      null,
+      { ...settings, summarization: true },
+    );
+
+    expect(result.input).toBe(input);
+    expect(result.changed).toBe(false);
+    expect(result.error).toContain("Emotion prep failed");
+    expect(result.fallback).toBeUndefined();
   });
 });
 

@@ -85,8 +85,8 @@ mod tests {
 
         let speech_prep = resolved.speech_prep.expect("speech prep defaults on");
         assert_eq!(speech_prep.provider, SpeechPrepProviderKind::Codex);
-        assert_eq!(speech_prep.model, "gpt-5.3-codex-spark");
-        assert_eq!(speech_prep.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(speech_prep.model, "gpt-5.6-luna");
+        assert_eq!(speech_prep.reasoning_effort, None);
         assert_eq!(
             speech_prep.strategies.google,
             SpeechPrepStrategy::InlineTags
@@ -280,6 +280,9 @@ mod tests {
                         "maxLength": 420
                     },
                     "providers": {
+                        "codex": {
+                            "reasoningEffort": "medium"
+                        },
                         "google": {
                             "apiKey": { "source": "env", "id": "TEST_GOOGLE_KEY_SPEECH_PREP" },
                             "voice": "Sulafat",
@@ -299,6 +302,7 @@ mod tests {
         assert_eq!(speech_prep.provider, SpeechPrepProviderKind::Google);
         assert_eq!(speech_prep.mode, SpeechPrepMode::PerformanceTags);
         assert_eq!(speech_prep.model, "google/gemini-3.5-flash");
+        assert_eq!(speech_prep.reasoning_effort, None);
         assert!(speech_prep.fallback_models.is_empty());
         assert_eq!(
             speech_prep.strategies.google,

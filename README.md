@@ -232,15 +232,16 @@ cargo run -p codex-voice-app --bin codex-voice -- tts bench --models gemini-3.5-
 
 The `read-aloud-defaults.json` config is read from `~/.codex/read-aloud-defaults.json`
 and supports Google Gemini TTS and ElevenLabs backends with persona-aware
-provider fallback. Optional `messages.tts.speechPrep` uses a configured Google
-generation model before synthesis. Its default mode is `performance-tags`, which
+provider fallback. Optional `messages.tts.speechPrep` uses a configured Codex or
+Google generation model before synthesis. Codex prep defaults to `gpt-5.6-luna`
+with no reasoning. Its default mode is `performance-tags`, which
 preserves the original wording and inserts sparse inline bracketed audio tags
 such as `[tender]`, `[sigh]`, or `[light chuckle]` only when the selected speech
 model supports them. Set `"mode": "shorten"` explicitly for the older over-limit
 shortening behavior. Model support is inferred for known tag-aware models and can
-be overridden per provider with `"inlineAudioTags": true` or `false`. Use a
-Google text generation model that supports `generateContent` for
-`speechPrep.model`; `google/gemini-3.5-flash` is the expected current model name.
+be overridden per provider with `"inlineAudioTags": true` or `false`. Set
+`speechPrep.provider`, `speechPrep.model`, and `speechPrep.reasoningEffort` to
+override the Codex defaults; Google prep models must support `generateContent`.
 
 ## User Service Setup
 

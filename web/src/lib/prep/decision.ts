@@ -173,9 +173,21 @@ export function extractiveShortenToFit(value: string, maxLength: number): string
 export function providerMaxTextLength(
   config: BrowserTtsConfig | null | undefined,
   provider: string,
+  settingsModel?: string | null,
 ): number {
   const providerConfig = config?.providers?.[provider as "google" | "elevenlabs"];
-  return Number(providerConfig?.maxTextLength) || Number(config?.maxTextLength) || Infinity;
+  const configured =
+    Number(providerConfig?.maxTextLength) || Number(config?.maxTextLength) || Infinity;
+  if (provider === "elevenlabs") {
+    const model = resolveElevenLabsModel(
+      config?.providers?.elevenlabs,
+      settingsModel,
+    ).toLowerCase();
+    if (model === "eleven_v3" || model.startsWith("eleven_v3_")) {
+      return Math.min(configured, 5000);
+    }
+  }
+  return configured;
 }
 
 /**

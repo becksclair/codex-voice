@@ -1317,7 +1317,12 @@ mod tests {
         );
 
         assert!(prompt.contains("at least 4000 characters"));
-        assert!(prompt.contains("Do not collapse prose into a short abstract"));
+        assert!(prompt.contains("complete semantic meaning"));
+        assert!(prompt.contains("author's voice and point of view"));
+        assert!(prompt.contains("distinctive imagery"));
+        assert!(prompt.contains("Do not sanitize, moralize, euphemize"));
+        assert!(prompt.contains("make surgical cuts"));
+        assert!(prompt.contains("Do not add bracketed performance tags"));
         validate_shorten_output(6000, &"a".repeat(3999), 4000).unwrap_err();
         validate_shorten_output(6000, &"a".repeat(4000), 4000).unwrap();
     }

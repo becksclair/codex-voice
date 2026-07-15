@@ -275,6 +275,188 @@ describe("GenerationController — path selection", () => {
     expect(urls[0]).toContain("/v1/text-to-speech/voice-1/stream");
   });
 
+  it("streams a fitted ElevenLabs v3 excerpt after over-limit prep fails", async () => {
+    const config = directConfig();
+    config.providers.elevenlabs!.modelId = "eleven_v3";
+    config.providers.elevenlabs!.maxTextLength = 6000;
+    config.speechPrep = {
+      ...noPrep,
+      threshold: 120,
+      maxInputLength: 12000,
+      maxLength: 6000,
+    } as BrowserTtsConfig["speechPrep"];
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    const streamInputs: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes(":generateContent")) {
+        return new Response("prep unavailable", { status: 400 });
+      }
+      if (url.includes("/v1/text-to-speech/voice-1/stream")) {
+        streamInputs.push(String(JSON.parse(String(init?.body)).text));
+        return new Response(new Uint8Array([0, 0, 1, 0]), { status: 200 });
+      }
+      if (url === "/web/speech-jobs") throw new Error("server job must not be created");
+      throw new Error(`unrouted fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new GenerationController({
+      config,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        provider: "elevenlabs",
+        voice: "persona:narrator",
+        model: "elevenlabs:eleven_v3",
+      },
+      audioContextCtor: fakeAudioContextCtor,
+      callbacks: {},
+    });
+
+    await controller.generate("x".repeat(6386));
+
+    expect(streamInputs).toHaveLength(1);
+    expect(streamInputs[0]).toHaveLength(4000);
+  });
+
+  it("streams immediately after an unusably short summary without a second prep pass", async () => {
+    const config = directConfig();
+    config.providers.elevenlabs!.modelId = "eleven_v3";
+    config.providers.elevenlabs!.maxTextLength = 6000;
+    config.speechPrep = {
+      ...noPrep,
+      threshold: 120,
+      maxInputLength: 12000,
+      maxLength: 6000,
+    } as BrowserTtsConfig["speechPrep"];
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    let prepCalls = 0;
+    const streamInputs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes(":generateContent")) {
+          prepCalls += 1;
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text: "too short" }] } }] }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/v1/text-to-speech/voice-1/stream")) {
+          streamInputs.push(String(JSON.parse(String(init?.body)).text));
+          return new Response(new Uint8Array([0, 0, 1, 0]), { status: 200 });
+        }
+        if (url === "/web/speech-jobs") throw new Error("server job must not be created");
+        throw new Error(`unrouted fetch: ${url}`);
+      }),
+    );
+    const controller = new GenerationController({
+      config,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        provider: "elevenlabs",
+        voice: "persona:narrator",
+        model: "elevenlabs:eleven_v3",
+      },
+      audioContextCtor: fakeAudioContextCtor,
+      callbacks: {},
+    });
+
+    await controller.generate("x".repeat(6386));
+
+    expect(prepCalls).toBe(1);
+    expect(streamInputs).toEqual(["x".repeat(4000)]);
+  });
+
+  it("fits an over-limit ElevenLabs v3 stream when speech prep is absent", async () => {
+    const config = directConfig();
+    config.providers.elevenlabs!.modelId = "eleven_v3";
+    config.providers.elevenlabs!.maxTextLength = 6000;
+    config.speechPrep = undefined;
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    const streamInputs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/v1/text-to-speech/voice-1/stream")) {
+          streamInputs.push(String(JSON.parse(String(init?.body)).text));
+          return new Response(new Uint8Array([0, 0, 1, 0]), { status: 200 });
+        }
+        if (url === "/web/speech-jobs") throw new Error("server job must not be created");
+        throw new Error(`unrouted fetch: ${url}`);
+      }),
+    );
+    const controller = new GenerationController({
+      config,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        provider: "elevenlabs",
+        voice: "persona:narrator",
+        model: "elevenlabs:eleven_v3",
+      },
+      audioContextCtor: fakeAudioContextCtor,
+      callbacks: {},
+    });
+
+    await controller.generate("x".repeat(6386));
+
+    expect(streamInputs).toEqual(["x".repeat(4000)]);
+  });
+
+  it("does not let performance tags re-expand an ElevenLabs v3 stream past its limit", async () => {
+    const config = directConfig();
+    config.providers.elevenlabs!.modelId = "eleven_v3";
+    config.providers.elevenlabs!.maxTextLength = 6000;
+    config.speechPrep = {
+      ...noPrep,
+      threshold: 120,
+      maxInputLength: 12000,
+      maxLength: 6000,
+    } as BrowserTtsConfig["speechPrep"];
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    const shortened = "A.".repeat(2000);
+    const decorated = "[softly] A.".repeat(112) + "A.".repeat(1888);
+    let prepCalls = 0;
+    const streamInputs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes(":generateContent")) {
+          const text = prepCalls++ === 0 ? shortened : decorated;
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/v1/text-to-speech/voice-1/stream")) {
+          streamInputs.push(String(JSON.parse(String(init?.body)).text));
+          return new Response(new Uint8Array([0, 0, 1, 0]), { status: 200 });
+        }
+        if (url === "/web/speech-jobs") throw new Error("server job must not be created");
+        throw new Error(`unrouted fetch: ${url}`);
+      }),
+    );
+    const controller = new GenerationController({
+      config,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        provider: "elevenlabs",
+        voice: "persona:narrator",
+        model: "elevenlabs:eleven_v3",
+      },
+      audioContextCtor: fakeAudioContextCtor,
+      callbacks: {},
+    });
+
+    await controller.generate("A.".repeat(3193));
+
+    expect(prepCalls).toBe(2);
+    expect(decorated.length).toBeGreaterThan(5000);
+    expect(streamInputs).toEqual([shortened]);
+  });
+
   it("falls back to a server job when a preferred browser stream cannot start", async () => {
     const config = directConfig();
     config.speechPrep = undefined;

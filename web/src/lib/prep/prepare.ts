@@ -18,8 +18,9 @@ import {
   speechPrepForProviderLimit,
   speechPrepForStreaming,
   speechPrepStrategy,
-  truncateToChars,
+  shortenFitLimit,
   extractiveShortenToFit,
+  truncateToChars,
 } from "./decision.ts";
 import {
   elapsedMs,
@@ -67,15 +68,33 @@ export async function prepareForProvider(
   settings: PrepSettings,
   options: PrepareOptions = {},
 ): Promise<PrepResult> {
+  options.throwIfCancelled?.();
   const prepCache = options.prepCache ?? null;
   const basePrep = browserSpeechPrepForDirect(config);
-  const maxTextLength = providerMaxTextLength(config, provider);
+  const maxTextLength = providerMaxTextLength(config, provider, settings.model);
   const mustShorten = Array.from(input).length > maxTextLength;
+  const forcedExtractiveFallback = (warning: string): PrepResult => {
+    const extracted = extractiveShortenToFit(input, shortenFitLimit(maxTextLength));
+    return {
+      input: extracted,
+      instructions: null,
+      changed: extracted !== input,
+      warning,
+      fallback: "extractive-excerpt",
+      strategy: "shorten",
+      elapsedMs: 0,
+    };
+  };
   const prep: EffectiveSpeechPrep | null = mustShorten
     ? speechPrepForProviderLimit(basePrep, maxTextLength)
     : options.forcePerformanceTags
       ? speechPrepForStreaming(basePrep)
       : basePrep;
+  if (mustShorten && !prep) {
+    return forcedExtractiveFallback(
+      "Speech prep is not configured, so a fitted source excerpt was used.",
+    );
+  }
   const strategy = speechPrepStrategy(
     { ...config, speechPrep: (prep ?? undefined) as BrowserTtsConfig["speechPrep"] },
     provider,
@@ -108,6 +127,7 @@ export async function prepareForProvider(
       activePrep.mode === "shorten"
         ? "Configured summarization prep is server-only."
         : "Configured emotion prep is server-only.";
+    if (mustShorten) return forcedExtractiveFallback(message);
     if (options.requireBrowserPrep) throw nonRetryableError(message);
     return remember({
       input,
@@ -120,9 +140,19 @@ export async function prepareForProvider(
     });
   }
   if (activePrep.provider === "google" && !activePrep.apiKey) {
+    if (mustShorten) {
+      return forcedExtractiveFallback(
+        "Google speech prep is missing an API key, so a fitted source excerpt was used.",
+      );
+    }
     throw new Error("Google emotion prep is missing an API key.");
   }
   if (activePrep.provider === "codex" && !activePrep.codexAuth?.accessToken) {
+    if (mustShorten) {
+      return forcedExtractiveFallback(
+        "Codex speech prep is missing cached auth, so a fitted source excerpt was used.",
+      );
+    }
     throw new Error("Codex emotion prep is missing cached auth.");
   }
 
@@ -172,7 +202,21 @@ export async function prepareForProvider(
       elapsedMs: elapsedMs(startedAt),
     });
   };
+  const extractiveShortenFallback = (warning: string): PrepResult | null => {
+    if (!activePrep.forceSummarization) return null;
+    const extracted = extractiveShortenToFit(prepInput, activePrep.maxLength);
+    return remember({
+      input: extracted,
+      instructions: null,
+      changed: extracted !== input,
+      warning,
+      fallback: "extractive-excerpt",
+      strategy,
+      elapsedMs: elapsedMs(startedAt),
+    });
+  };
   const fallbackOrPassThrough = (message: string): PrepResult =>
+    extractiveShortenFallback(message) ||
     localTagFallback(message) ||
     remember({
       input,
@@ -268,6 +312,7 @@ export async function prepareForProvider(
             changed: extracted !== input,
             warning:
               "Summarization returned text below the minimum length, so a fitted source excerpt was used.",
+            fallback: "extractive-excerpt",
             strategy,
             elapsedMs: elapsedMs(startedAt),
           });
@@ -316,46 +361,17 @@ export async function prepareForProvider(
       }
     }
     if (lastError) {
-      const fallback = localTagFallback(
+      return fallbackOrPassThrough(
         lastError?.message || "Emotion prep failed, so local performance tags were used.",
       );
-      if (fallback) return fallback;
-      return remember({
-        input,
-        instructions: null,
-        changed: false,
-        error: lastError?.message || "Emotion prep failed after retries.",
-        strategy,
-        elapsedMs: elapsedMs(startedAt),
-      });
     }
-    const timeoutFallback = localTagFallback(
-      "Emotion prep timed out, so local performance tags were used.",
-    );
-    if (timeoutFallback) return timeoutFallback;
-    return remember({
-      input,
-      instructions: null,
-      changed: false,
-      error: "Emotion prep timed out before a model returned text.",
-      strategy,
-      elapsedMs: elapsedMs(startedAt),
-    });
+    return fallbackOrPassThrough("Emotion prep timed out, so local performance tags were used.");
   } catch (error) {
     const typed = error as PrepError;
     console.warn(typed);
-    const fallback = localTagFallback(
+    return fallbackOrPassThrough(
       typed?.message || "Emotion prep failed, so a local sparse performance tag was used.",
     );
-    if (fallback) return fallback;
-    return remember({
-      input,
-      instructions: null,
-      changed: false,
-      error: typed?.message || "Emotion prep failed.",
-      strategy,
-      elapsedMs: elapsedMs(startedAt),
-    });
   }
 }
 

@@ -9,8 +9,7 @@ use super::models::{
 };
 use serde_json::Value;
 
-const DEFAULT_CODEX_SPEECH_PREP_MODEL: &str = "gpt-5.3-codex-spark";
-const DEFAULT_CODEX_SPEECH_PREP_REASONING_EFFORT: &str = "medium";
+const DEFAULT_CODEX_SPEECH_PREP_MODEL: &str = "gpt-5.6-luna";
 const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_PERFORMANCE_TAG_THRESHOLD: usize = 120;
 const DEFAULT_SHORTEN_MIN_OUTPUT_CHARS: usize = 4_000;
@@ -312,11 +311,11 @@ pub fn resolve_speech_prep_config(
     });
     let reasoning_effort = json_string_opt(val, "reasoningEffort")
         .or_else(|| {
-            codex_provider.and_then(|provider| json_string_opt(provider, "reasoningEffort"))
-        })
-        .or_else(|| {
             (provider == SpeechPrepProviderKind::Codex)
-                .then(|| DEFAULT_CODEX_SPEECH_PREP_REASONING_EFFORT.to_string())
+                .then(|| {
+                    codex_provider.and_then(|provider| json_string_opt(provider, "reasoningEffort"))
+                })
+                .flatten()
         })
         .filter(|effort| !effort.eq_ignore_ascii_case("none"));
     let strategies = parse_speech_prep_strategies(val)?;

@@ -7,8 +7,9 @@
       "timeoutMs": 20000,
       "speechPrep": {
         "enabled": true,
-        "provider": "google",
-        "model": "google/gemini-3.5-flash",
+        "provider": "codex",
+        "model": "gpt-5.6-luna",
+        "reasoningEffort": "none",
         "mode": "performance-tags"
       },
       "providers": {

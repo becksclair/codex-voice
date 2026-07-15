@@ -30,6 +30,7 @@ import { saveCachedConfig, syncCodexAuthToServer } from "./config.ts";
 import { resolvePersona, resolveProvider, selectedPersonaName } from "./personas.ts";
 import {
   prepareForProvider,
+  providerMaxTextLength,
   type EffectiveSpeechPrep,
   type PrepResult,
   type PrepSettings,
@@ -365,7 +366,13 @@ export class GenerationController {
         onCodexAuthRefreshed,
       },
     );
-    if (prep.strategy === "shorten" && prep.input !== input) {
+    // Stream an extractive fallback immediately instead of spending another
+    // full prep timeout trying to decorate it before any audio can start.
+    if (
+      prep.strategy === "shorten" &&
+      prep.input !== input &&
+      prep.fallback !== "extractive-excerpt"
+    ) {
       const performancePrep = await prepareForProvider(
         config,
         provider,
@@ -381,7 +388,11 @@ export class GenerationController {
           onCodexAuthRefreshed,
         },
       );
-      if (performancePrep.input !== prep.input || performancePrep.instructions) {
+      const providerLimit = providerMaxTextLength(config, provider, settings.model);
+      if (
+        Array.from(performancePrep.input).length <= providerLimit &&
+        (performancePrep.input !== prep.input || performancePrep.instructions)
+      ) {
         prep = {
           ...performancePrep,
           shortened: prep,
