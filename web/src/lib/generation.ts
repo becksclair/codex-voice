@@ -187,6 +187,19 @@ export function canGenerateDirectWithConfiguredPrep(
   return Boolean(config?.providers?.google || config?.providers?.elevenlabs);
 }
 
+/** Whether the current provider/persona/model selection can play a browser stream. */
+export function canStreamSelectedProvider(
+  config: BrowserTtsConfig | null | undefined,
+  settings: WebSettings,
+): boolean {
+  if (!config) return false;
+  const selectedProvider = settings.provider !== "auto" ? settings.provider : null;
+  const provider =
+    selectedProvider || resolveProvider(config, resolvePersona(config, null, settings), settings);
+  const persona = resolvePersona(config, provider, settings);
+  return canStreamProvider(config, provider, persona, settings.model);
+}
+
 export function serverJobOptions(
   config: BrowserTtsConfig | null | undefined,
   settings: WebSettings,
@@ -219,6 +232,7 @@ export class GenerationController {
   private cancelled = false;
   private abortController: AbortController | null = null;
   private active = false;
+  private activeRunOwner: string | null = null;
   private activeStreamPlayback: StreamingPlayback | null = null;
   private lifecycleInterrupted = false;
   private activeServerJobId: string | null = null;
@@ -298,15 +312,19 @@ export class GenerationController {
    * and stop streaming playback. Ports `cancelActiveGeneration`.
    */
   cancel(): void {
-    const serverJobId = this.activeServerJobId ?? loadPendingGeneration()?.jobId ?? null;
+    const runOwner = this.activeRunOwner;
+    const pending = runOwner ? loadPendingGeneration() : null;
+    const serverJobId =
+      this.activeServerJobId ?? (pending?.owner === runOwner ? pending.jobId : null);
     this.cancelled = true;
     this.runId += 1;
     this.active = false;
-    clearPendingGeneration();
+    if (runOwner) clearPendingGeneration(runOwner);
     this.abortController?.abort();
     this.abortController = null;
     this.stopActiveStreamPlayback();
     this.activeServerJobId = null;
+    this.activeRunOwner = null;
     if (serverJobId) this.releaseServerJob(serverJobId);
   }
 
@@ -320,6 +338,7 @@ export class GenerationController {
     signal: AbortSignal | null,
     runId: number,
     settings: GenerationSettingsSnapshot,
+    streamOnly = false,
   ): Promise<SynthesisResult> {
     this.status(0.32, "Preparing");
     const throwIfCancelled = (): void => this.ensureNotCancelled(signal, runId);
@@ -433,8 +452,10 @@ export class GenerationController {
       console.warn(error);
       if (attemptPlayback) this.stopActiveStreamPlayback(attemptPlayback);
       this.ensureNotCancelled(signal, runId);
+      if (streamOnly) throw error;
       this.status(0.58, "Fallback");
     }
+    if (streamOnly) throw new Error(`${provider} streaming is not available.`);
     this.status(0.64, "Synthesizing");
     const model =
       provider === "google"
@@ -461,6 +482,7 @@ export class GenerationController {
     signal: AbortSignal | null,
     runId: number,
     settings: GenerationSettingsSnapshot,
+    streamOnly = false,
   ): Promise<SynthesisResult> {
     const config = this.config as BrowserTtsConfig;
     const prepCache = new Map<string, PrepResult>();
@@ -478,8 +500,10 @@ export class GenerationController {
         signal,
         runId,
         settings,
+        streamOnly,
       );
     } catch (error) {
+      if (streamOnly) throw error;
       if (!isRetryable(error as StatusError) || persona?.fallbackPolicy !== "preserve-persona")
         throw error;
       const fallback = fallbackProvider(primary);
@@ -493,6 +517,7 @@ export class GenerationController {
         signal,
         runId,
         settings,
+        streamOnly,
       );
     }
   }
@@ -537,9 +562,9 @@ export class GenerationController {
    * Run a generation. Ports `runGeneration` (app.html line ~3560).
    *
    * Decision tree: resume a server job when `resumeJobId` is set; otherwise
-   * use the backend. Browser-direct generation is an availability fallback
-   * only when backend job creation fails at the network boundary or through a
-   * gateway/service-unavailable response before a job exists.
+   * stream directly when the selected browser provider/model supports it. Use
+   * the durable backend job for non-streamable selections and as a fallback
+   * when direct streaming cannot start.
    */
   async generate(input: string, resumeJobId: string | null = null): Promise<void> {
     const runSettings: GenerationSettingsSnapshot = Object.freeze({ ...this.settings });
@@ -547,6 +572,7 @@ export class GenerationController {
     const runOwner = `${this.controllerId}:${runId}`;
     this.runId = runId;
     this.cancelled = false;
+    this.activeRunOwner = runOwner;
     const controller = new AbortController();
     this.abortController = controller;
     this.active = true;
@@ -568,6 +594,22 @@ export class GenerationController {
           runOwner,
           runSettings,
         );
+      } else if (canStreamSelectedProvider(this.config, runSettings)) {
+        this.status(0.25, "Streaming");
+        try {
+          result = await this.generateDirect(input, controller.signal, runId, runSettings, true);
+        } catch {
+          this.ensureNotCancelled(controller.signal, runId);
+          this.status(0.25, "Server fallback");
+          result = await this.generateViaServer(
+            input,
+            null,
+            controller.signal,
+            runId,
+            runOwner,
+            runSettings,
+          );
+        }
       } else {
         this.status(0.25, "Server");
         try {
@@ -644,6 +686,7 @@ export class GenerationController {
       if (this.abortController === controller) this.abortController = null;
       if (runId === this.runId) {
         this.active = false;
+        this.activeRunOwner = null;
         this.callbacks.onGeneratingChange?.(false);
       }
     }

@@ -64,6 +64,10 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
     gateway availability error. Browser-rotated bundles remain pending while
     offline and synchronize atomically to the canonical auth file after backend
     recovery without invoking the Codex CLI.
+  - **Streaming/update recovery 2026-07-15:** stream-capable selections prefer
+    browser-direct playback with durable server-job fallback. Installed PWAs
+    perform a no-cache update check on launch and immediately activate/claim a
+    new worker so Android cannot indefinitely reopen an old precached shell.
 - [x] Add bounded speech-job admission and cancellation
   - At most three nonterminal jobs, one active synthesis, `429 Retry-After` on overload
   - `DELETE /web/speech-jobs/{id}` is idempotent and aborts active work

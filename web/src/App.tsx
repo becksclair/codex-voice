@@ -10,6 +10,7 @@ import {
 import { GenerateBar } from "./components/GenerateBar.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { TextEditor } from "./components/TextEditor.tsx";
+import { UpdateToast } from "./components/UpdateToast.tsx";
 import { WaveformPlayer } from "./components/WaveformPlayer.tsx";
 import { useGeneration } from "./hooks/useGeneration.ts";
 import { useLatest } from "./hooks/useLatest.ts";
@@ -20,6 +21,7 @@ import { useServerConfig } from "./hooks/useServerConfig.ts";
 import { useSettings } from "./hooks/useSettings.ts";
 import { useVisualViewport } from "./hooks/useVisualViewport.ts";
 import { useWaveform } from "./hooks/useWaveform.ts";
+import { clearWorkerUpdateNotice, hasWorkerUpdateNotice } from "./pwa.ts";
 
 /**
  * The Codex Voice web shell.
@@ -31,7 +33,15 @@ import { useWaveform } from "./hooks/useWaveform.ts";
  * UI state (the error banner and the settings drawer).
  */
 export function App() {
-  return settingsView(location.search) ? <SettingsWindowApp /> : <MainWindowApp />;
+  const [showUpdateToast] = useState(hasWorkerUpdateNotice);
+  useEffect(() => clearWorkerUpdateNotice(), []);
+
+  return (
+    <>
+      {showUpdateToast && <UpdateToast />}
+      {settingsView(location.search) ? <SettingsWindowApp /> : <MainWindowApp />}
+    </>
+  );
 }
 
 function SettingsWindowApp() {

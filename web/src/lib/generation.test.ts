@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserPersonaConfig, BrowserTtsConfig } from "./config.ts";
-import type { StreamingPlayback } from "./audio/streaming.ts";
+import type { AudioContextConstructor, StreamingPlayback } from "./audio/streaming.ts";
 import {
   canGenerateDirectWithConfiguredPrep,
+  canStreamSelectedProvider,
   fallbackProvider,
   GenerationController,
   isBackendUnavailable,
@@ -16,7 +17,55 @@ import {
   GENERATION_STATE_STORAGE_KEY,
   getLastGeneratedAudio,
   loadPendingGeneration,
+  savePendingGeneration,
 } from "./storage.ts";
+
+class FakeAudioBuffer {
+  duration: number;
+  private data: Float32Array[];
+  constructor(
+    public numberOfChannels: number,
+    public length: number,
+    public sampleRate: number,
+  ) {
+    this.duration = length / sampleRate;
+    this.data = Array.from({ length: numberOfChannels }, () => new Float32Array(length));
+  }
+  getChannelData(channel: number): Float32Array {
+    return this.data[channel];
+  }
+}
+
+class FakeBufferSource {
+  buffer: FakeAudioBuffer | null = null;
+  onended: (() => void) | null = null;
+  connect(): void {}
+  start(): void {}
+}
+
+class FakeAudioContext {
+  currentTime = 0;
+  state: "running" | "suspended" | "closed" = "running";
+  destination = {};
+  createBuffer(channels: number, length: number, sampleRate: number): FakeAudioBuffer {
+    return new FakeAudioBuffer(channels, length, sampleRate);
+  }
+  createBufferSource(): FakeBufferSource {
+    return new FakeBufferSource();
+  }
+  async resume(): Promise<void> {
+    this.state = "running";
+  }
+  async suspend(): Promise<void> {
+    this.state = "suspended";
+  }
+  async close(): Promise<void> {
+    this.state = "closed";
+  }
+}
+
+const fakeAudioContextCtor = (): AudioContextConstructor =>
+  FakeAudioContext as unknown as AudioContextConstructor;
 
 /** Route a mock fetch by URL substring. */
 function routedFetch(routes: { match: string; respond: () => Response }[]): typeof fetch {
@@ -145,6 +194,21 @@ describe("pure decision helpers", () => {
     expect(canGenerateDirectWithConfiguredPrep(null)).toBe(false);
   });
 
+  it("prefers direct streaming only for a streamable selected provider", () => {
+    const config = directConfig();
+    config.speechPrep = undefined;
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    expect(
+      canStreamSelectedProvider(config, {
+        ...DEFAULT_SETTINGS,
+        provider: "elevenlabs",
+        voice: "persona:narrator",
+        model: "elevenlabs:eleven_v3",
+      }),
+    ).toBe(true);
+    expect(canStreamSelectedProvider(config, DEFAULT_SETTINGS)).toBe(false);
+  });
+
   it("maps PWA selections to backend job overrides", () => {
     expect(
       serverJobOptions(directConfig(), {
@@ -164,6 +228,109 @@ describe("pure decision helpers", () => {
 });
 
 describe("GenerationController — path selection", () => {
+  it("streams a supported ElevenLabs selection before creating a server job", async () => {
+    const config = directConfig();
+    config.speechPrep = undefined;
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url === "/web/speech-jobs") throw new Error("server job must not be created");
+      if (url.includes("/v1/text-to-speech/voice-1/stream")) {
+        return new Response(new Uint8Array([0, 0, 1, 0]), {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        });
+      }
+      throw new Error(`unrouted fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const audio: { provider: string; streamed?: boolean; streamingModel?: string }[] = [];
+    const controller = new GenerationController({
+      config,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        provider: "elevenlabs",
+        voice: "persona:narrator",
+        model: "elevenlabs:eleven_v3",
+      },
+      audioContextCtor: fakeAudioContextCtor,
+      callbacks: {
+        onAudioReady: (_blob, meta) =>
+          audio.push({
+            provider: meta.provider,
+            streamed: meta.streamed,
+            streamingModel: meta.streamingModel,
+          }),
+      },
+    });
+
+    await controller.generate("Hello from the stream");
+
+    expect(audio).toEqual([
+      { provider: "elevenlabs", streamed: true, streamingModel: "eleven_v3" },
+    ]);
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain("/v1/text-to-speech/voice-1/stream");
+  });
+
+  it("falls back to a server job when a preferred browser stream cannot start", async () => {
+    const config = directConfig();
+    config.speechPrep = undefined;
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    const wavB64 = btoa("RIFF0000WAVEfmt ");
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes("/v1/text-to-speech/voice-1/stream")) {
+        return new Response("stream unavailable", { status: 503 });
+      }
+      if (url === "/web/speech-jobs" && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: "job-stream-fallback" }), { status: 200 });
+      }
+      if (url.endsWith("/web/speech-jobs/job-stream-fallback") && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      if (url.endsWith("/web/speech-jobs/job-stream-fallback")) {
+        return new Response(
+          JSON.stringify({
+            status: "complete",
+            result: {
+              input: "Hello after fallback",
+              input_changed: false,
+              audio_base64: wavB64,
+              mime_type: "audio/wav",
+              format: "wav",
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`unrouted fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const providers: string[] = [];
+    const controller = new GenerationController({
+      config,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        provider: "elevenlabs",
+        voice: "persona:narrator",
+        model: "elevenlabs:eleven_v3",
+      },
+      audioContextCtor: fakeAudioContextCtor,
+      callbacks: { onAudioReady: (_blob, meta) => providers.push(meta.provider) },
+    });
+
+    await controller.generate("Hello after fallback");
+
+    expect(providers).toEqual(["server"]);
+    expect(urls[0]).toContain("/v1/text-to-speech/voice-1/stream");
+    expect(urls).toContain("/web/speech-jobs");
+  });
+
   it("chunked direct path: non-streamable google synthesizes via generateContent", async () => {
     const fetchMock = routedFetch([
       {
@@ -459,6 +626,49 @@ describe("GenerationController — provider fallback ordering", () => {
 });
 
 describe("GenerationController — cancellation", () => {
+  it("cancelling a direct stream preserves another owner's pending server job", async () => {
+    const config = directConfig();
+    config.speechPrep = undefined;
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    const requests: { url: string; method: string }[] = [];
+    const fetchMock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          requests.push({ url: String(input), method: init?.method ?? "GET" });
+          init?.signal?.addEventListener("abort", () => {
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new GenerationController({
+      config,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        provider: "elevenlabs",
+        voice: "persona:narrator",
+        model: "elevenlabs:eleven_v3",
+      },
+      audioContextCtor: fakeAudioContextCtor,
+    });
+
+    const run = controller.generate("stream owned by this controller");
+    await vi.waitFor(() =>
+      expect(requests.some(({ url }) => url.includes("/v1/text-to-speech/voice-1/stream"))).toBe(
+        true,
+      ),
+    );
+    savePendingGeneration("other tab", "job-other", "other-owner");
+
+    controller.cancel();
+    await run;
+
+    expect(loadPendingGeneration()?.jobId).toBe("job-other");
+    expect(requests).not.toContainEqual(
+      expect.objectContaining({ url: "/web/speech-jobs/job-other", method: "DELETE" }),
+    );
+  });
+
   it("does not let stale cleanup stop a replacement stream", () => {
     const changes: Array<StreamingPlayback | null> = [];
     const controller = new GenerationController({

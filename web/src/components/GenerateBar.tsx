@@ -42,7 +42,10 @@ export function GenerateBar(props: GenerateBarProps) {
         onClick={props.onGenerate}
       >
         <span className="relative z-[1] inline-flex w-full min-w-0 items-center justify-center">
-          <span className="spinner absolute left-0 max-[420px]:-left-2.5" aria-hidden="true"></span>
+          <span
+            className="spinner absolute left-0 max-[420px]:-left-[11px]"
+            aria-hidden="true"
+          ></span>
           <span
             id="generate-label"
             className={

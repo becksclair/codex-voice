@@ -14,6 +14,20 @@ export const proxyTargets = [
   "/web/desktop-intents",
 ];
 export const backendNavigationDenylist = [/^\/web\/(config|codex-auth|speech|desktop-intents)/];
+export const pwaWorkboxOptions = {
+  // Registration is manual, so vite-plugin-pwa does not inject these defaults
+  // for `autoUpdate`. Without them, Android can keep a new worker waiting and
+  // continue reopening the old precached shell indefinitely.
+  skipWaiting: true,
+  clientsClaim: true,
+  // Default globs skip png/webmanifest, so the icons and both manifests were
+  // absent from the precache and failed offline (the legacy SW cached them).
+  globPatterns: ["**/*.{js,css,html,png,webmanifest}"],
+  navigateFallback: "/web/index.html",
+  navigateFallbackDenylist: backendNavigationDenylist,
+  // Never cache the JSON API surface served by the Rust backend.
+  runtimeCaching: [],
+};
 const proxy = Object.fromEntries(
   proxyTargets.map((path) => [path, { target: backend, changeOrigin: true }]),
 );
@@ -40,16 +54,7 @@ export default defineConfig({
       // runtime by the pre-paint script in index.html. Disabling the plugin's
       // own manifest generation avoids a duplicate <link rel="manifest">.
       manifest: false,
-      workbox: {
-        // Default globs skip png/webmanifest, so the icons and both manifests
-        // were absent from the precache and failed offline (the legacy SW
-        // cached them). Keep in sync with what public/ actually ships.
-        globPatterns: ["**/*.{js,css,html,png,webmanifest}"],
-        navigateFallback: "/web/index.html",
-        navigateFallbackDenylist: backendNavigationDenylist,
-        // Never cache the JSON API surface served by the Rust backend.
-        runtimeCaching: [],
-      },
+      workbox: pwaWorkboxOptions,
     }),
   ],
   server: {

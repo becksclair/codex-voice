@@ -30,8 +30,12 @@ if (isAppMode(location.search)) {
   // `controllerchange` reload behavior from app.html (lines ~809-814); the
   // idle-deferral logic lives in ./pwa.ts.
   if ("serviceWorker" in navigator) {
+    let hadController = navigator.serviceWorker.controller !== null;
     navigator.serviceWorker.addEventListener("controllerchange", () => {
-      requestWorkerReload();
+      // The first worker claim already controls a page loaded from the current
+      // network shell. Only subsequent controller swaps require a reload.
+      if (hadController) requestWorkerReload();
+      hadController = true;
     });
   }
 }

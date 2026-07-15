@@ -16,6 +16,9 @@ let isBusy: () => boolean = () => false;
 const UPDATE_INTERVAL_MS = 15 * 60 * 1000;
 const UPDATE_MIN_GAP_MS = 60 * 1000;
 const APP_MODE_WORKER_RELOAD_KEY = "codex-voice.web.app-mode-worker-cleanup";
+const WORKER_UPDATE_NOTICE_KEY = "codex-voice.web.worker-update-notice";
+
+type NoticeStorage = Pick<Storage, "getItem" | "removeItem" | "setItem">;
 
 interface UpdateCheckOptions {
   intervalMs?: number;
@@ -69,9 +72,10 @@ export async function removeLegacyAppModeServiceWorkers(
 
 /**
  * Keep a long-running installed PWA checking for new service-worker builds.
- * Registration itself performs the initial check; subsequent checks run when
- * the app returns to the foreground and on a bounded interval while it stays
- * open. The no-store probe follows vite-plugin-pwa's recommended update flow.
+ * Check immediately on every launch, then again when the app returns to the
+ * foreground and on a bounded interval while it stays open. The explicit
+ * no-store probe avoids browser registration throttling serving an older
+ * installed PWA shell after a cold reopen.
  */
 export function startServiceWorkerUpdateChecks(
   swUrl: string,
@@ -80,7 +84,7 @@ export function startServiceWorkerUpdateChecks(
 ): () => void {
   const intervalMs = options.intervalMs ?? UPDATE_INTERVAL_MS;
   const minGapMs = options.minGapMs ?? UPDATE_MIN_GAP_MS;
-  let lastCheck = Date.now();
+  let lastCheck = Number.NEGATIVE_INFINITY;
   let checking = false;
 
   const check = async (): Promise<void> => {
@@ -107,6 +111,7 @@ export function startServiceWorkerUpdateChecks(
   const timer = window.setInterval(() => void check(), intervalMs);
   window.addEventListener("focus", checkWhenVisible);
   document.addEventListener("visibilitychange", checkWhenVisible);
+  void check();
 
   return () => {
     window.clearInterval(timer);
@@ -123,6 +128,33 @@ export function setBusyPredicate(fn: () => boolean): void {
   isBusy = fn;
 }
 
+/** Persist a one-navigation notice so the refreshed app can confirm its update. */
+export function markWorkerUpdateNotice(storage?: NoticeStorage): void {
+  try {
+    (storage ?? sessionStorage).setItem(WORKER_UPDATE_NOTICE_KEY, "1");
+  } catch {
+    // Update activation must not fail when browser storage is unavailable.
+  }
+}
+
+/** Whether the current navigation followed a worker-triggered update reload. */
+export function hasWorkerUpdateNotice(storage?: NoticeStorage): boolean {
+  try {
+    return (storage ?? sessionStorage).getItem(WORKER_UPDATE_NOTICE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Clear the one-navigation worker update notice after the refreshed app mounts. */
+export function clearWorkerUpdateNotice(storage?: NoticeStorage): void {
+  try {
+    (storage ?? sessionStorage).removeItem(WORKER_UPDATE_NOTICE_KEY);
+  } catch {
+    // Best-effort only.
+  }
+}
+
 /**
  * Reload for a pending worker update when the app is idle. No-op if nothing is
  * pending or the app is still busy. Ports `reloadForWorkerUpdateWhenIdle`.
@@ -131,6 +163,7 @@ export function reloadForWorkerUpdateWhenIdle(): void {
   if (!pending || isBusy()) return;
   pending = false;
   refreshing = true;
+  markWorkerUpdateNotice();
   window.location.reload();
 }
 

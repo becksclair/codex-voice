@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { removeLegacyAppModeServiceWorkers, startServiceWorkerUpdateChecks } from "./pwa.ts";
+import {
+  clearWorkerUpdateNotice,
+  hasWorkerUpdateNotice,
+  markWorkerUpdateNotice,
+  removeLegacyAppModeServiceWorkers,
+  startServiceWorkerUpdateChecks,
+} from "./pwa.ts";
 
 const cleanup: Array<() => void> = [];
 
@@ -18,7 +24,7 @@ function registration(update = vi.fn(async () => {})): ServiceWorkerRegistration
   return { installing: null, update } as unknown as ServiceWorkerRegistration;
 }
 
-test("checks for an updated worker periodically with cache bypassed", async () => {
+test("checks for an updated worker immediately and periodically with cache bypassed", async () => {
   const update = vi.fn(async () => {});
   const fetchMock = vi.fn(async () => new Response("worker", { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
@@ -29,13 +35,15 @@ test("checks for an updated worker periodically with cache bypassed", async () =
     }),
   );
 
+  await vi.waitFor(() => expect(update).toHaveBeenCalledOnce());
+
   await vi.advanceTimersByTimeAsync(1_000);
 
   expect(fetchMock).toHaveBeenCalledWith("/web/sw.js", {
     cache: "no-store",
     headers: { cache: "no-store", "cache-control": "no-cache" },
   });
-  expect(update).toHaveBeenCalledOnce();
+  expect(update).toHaveBeenCalledTimes(2);
 });
 
 test("checks when the PWA returns to the foreground", async () => {
@@ -51,9 +59,10 @@ test("checks when the PWA returns to the foreground", async () => {
     }),
   );
 
+  await vi.waitFor(() => expect(update).toHaveBeenCalledOnce());
   await vi.advanceTimersByTimeAsync(1_000);
   window.dispatchEvent(new Event("focus"));
-  await vi.waitFor(() => expect(update).toHaveBeenCalledOnce());
+  await vi.waitFor(() => expect(update).toHaveBeenCalledTimes(2));
 });
 
 test("skips checks while offline or while another worker is installing", async () => {
@@ -103,4 +112,36 @@ test("removes a legacy web worker and reloads a controlled app-mode page once", 
 
   expect(unregister).toHaveBeenCalledOnce();
   expect(reload).toHaveBeenCalledOnce();
+});
+
+test("persists and clears the one-navigation worker update notice", () => {
+  const storage = new Map<string, string>();
+  const storageAdapter = {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => void storage.set(key, value),
+    removeItem: (key: string) => void storage.delete(key),
+  };
+
+  expect(hasWorkerUpdateNotice(storageAdapter)).toBe(false);
+  markWorkerUpdateNotice(storageAdapter);
+  expect(hasWorkerUpdateNotice(storageAdapter)).toBe(true);
+  clearWorkerUpdateNotice(storageAdapter);
+  expect(hasWorkerUpdateNotice(storageAdapter)).toBe(false);
+});
+
+test("worker update notice helpers tolerate denied session storage", () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+  Object.defineProperty(globalThis, "sessionStorage", {
+    configurable: true,
+    get: () => {
+      throw new Error("storage denied");
+    },
+  });
+  try {
+    expect(() => markWorkerUpdateNotice()).not.toThrow();
+    expect(hasWorkerUpdateNotice()).toBe(false);
+    expect(() => clearWorkerUpdateNotice()).not.toThrow();
+  } finally {
+    if (original) Object.defineProperty(globalThis, "sessionStorage", original);
+  }
 });

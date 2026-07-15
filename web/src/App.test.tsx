@@ -1,12 +1,14 @@
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "./App.tsx";
+import { markWorkerUpdateNotice } from "./pwa.ts";
 
 // The mount effect fetches /web/config and reads IndexedDB. Stub fetch to an
 // offline reject (fetchConfig swallows it and returns null) so tests exercise
 // the shell without a backend.
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
   vi.stubGlobal(
     "fetch",
     vi.fn(() => Promise.reject(new Error("offline"))),
@@ -54,6 +56,20 @@ test("renders every element ID in the frozen test contract", () => {
   for (const id of REQUIRED_IDS) {
     expect(document.getElementById(id), `missing #${id}`).not.toBeNull();
   }
+});
+
+test("shows the update toast only after a worker-triggered reload", () => {
+  const first = render(<App />);
+  expect(document.getElementById("update-toast")).toBeNull();
+  first.unmount();
+
+  markWorkerUpdateNotice();
+  render(<App />);
+
+  expect(document.getElementById("update-toast")?.textContent).toContain(
+    "Updated to latest version",
+  );
+  expect(sessionStorage.length).toBe(0);
 });
 
 test("character count updates as the user types", () => {

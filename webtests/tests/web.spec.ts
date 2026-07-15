@@ -3,6 +3,7 @@ import { test, expect } from '@playwright/test';
 // Storage keys used by the PWA (see assets/web/app.html).
 const TEXT_KEY = 'codex-voice.web.text';
 const SETTINGS_KEY = 'codex-voice.web.settings.v1';
+const UPDATE_NOTICE_KEY = 'codex-voice.web.worker-update-notice';
 
 // Start every test from a clean slate so persisted localStorage from a prior
 // test never leaks in and masks a real regression.
@@ -16,6 +17,24 @@ test('shell loads with title, textarea, and generate button', async ({ page }) =
   await expect(page).toHaveTitle('Codex Voice');
   await expect(page.locator('#text')).toBeVisible();
   await expect(page.locator('#generate')).toBeVisible();
+});
+
+test('worker update toast appears at the top and can be dismissed', async ({ page }) => {
+  await page.evaluate((key) => sessionStorage.setItem(key, '1'), UPDATE_NOTICE_KEY);
+  await page.reload();
+
+  const toast = page.locator('#update-toast');
+  await expect(toast).toBeVisible();
+  await expect(toast).toContainText('Updated to latest version');
+  const box = await toast.boundingBox();
+  const computedTop = await toast.evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).top),
+  );
+  expect(box).not.toBeNull();
+  expect(box!.y).toBeCloseTo(computedTop, 1);
+
+  await toast.getByRole('button', { name: 'Dismiss update notice' }).click();
+  await expect(toast).toHaveCount(0);
 });
 
 test('typed text persists across a reload', async ({ page }) => {
@@ -92,11 +111,13 @@ test('manifest route returns JSON with the app name', async ({ request }) => {
 });
 
 test('service worker route serves javascript', async ({ request }) => {
-  const res = await request.get('/web-sw.js');
+  const res = await request.get('/web/sw.js');
   expect(res.status()).toBe(200);
   expect(res.headers()['content-type']).toContain('javascript');
   const body = await res.text();
   expect(body.length).toBeGreaterThan(0);
+  expect(body).toContain('self.skipWaiting()');
+  expect(body).toMatch(/\.clientsClaim\(\)/);
 });
 
 test('theme setting persists across a reload', async ({ page }) => {
