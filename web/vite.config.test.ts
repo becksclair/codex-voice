@@ -4,6 +4,7 @@ import { backendNavigationDenylist, proxyTargets } from "./vite.config.ts";
 test("the dev server proxies every backend-owned web route", () => {
   expect(proxyTargets).toEqual([
     "/web/config",
+    "/web/codex-auth",
     "/web/speech",
     "/web/speech-jobs",
     "/web/desktop-intents",

@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import {
   fetchConfig,
   loadCachedConfig,
+  reconcileBrowserConfig,
   saveCachedConfig,
+  syncCodexAuthToServer,
   type BrowserTtsConfig,
 } from "../lib/index.ts";
 
@@ -22,8 +24,12 @@ export function useServerConfig(): BrowserTtsConfig | null {
     void (async () => {
       const fresh = await fetchConfig();
       if (cancelled || !fresh) return;
-      saveCachedConfig(fresh);
-      setConfig(fresh);
+      setConfig((current) => {
+        const reconciled = reconcileBrowserConfig(fresh, current);
+        saveCachedConfig(reconciled);
+        void syncCodexAuthToServer(reconciled);
+        return reconciled;
+      });
     })();
     return () => {
       cancelled = true;

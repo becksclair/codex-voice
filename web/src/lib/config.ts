@@ -6,7 +6,7 @@
  * friends), which serialize with `rename_all = "camelCase"`. Fields declared
  * with `#[serde(skip_serializing_if = "Option::is_none")]` are optional here.
  *
- * The functions port `sanitizeBrowserConfig`, `loadCachedConfig`, and the
+ * The functions own the refresh-capable browser config cache and the
  * config-fetching portion of `refreshConfig` from app.html.
  */
 
@@ -87,16 +87,17 @@ export interface BrowserSpeechPrepFallbackConfig {
 }
 
 /**
- * Cached Codex OAuth credentials. The server never serializes this — it is
- * injected client-side after a token refresh (app.html line ~2449) and is
- * stripped again by {@link sanitizeBrowserConfig} before persisting/using.
+ * Cached Codex OAuth credentials. The server supplies the initial bundle and
+ * the browser persists rotated credentials for backend-independent refresh.
  */
 export interface BrowserCodexAuth {
   accessToken?: string;
   refreshToken?: string;
+  accountId?: string;
   tokenUrl?: string;
   clientId?: string;
   expiresAt?: number;
+  serverSyncPending?: boolean;
   [key: string]: unknown;
 }
 
@@ -119,7 +120,7 @@ export interface BrowserSpeechPrepConfig {
   maxLength: number;
   attemptTimeoutMs: number;
   timeoutMs: number;
-  /** Client-only cached Codex auth; stripped by {@link sanitizeBrowserConfig}. */
+  /** Refresh-capable Codex auth cached for browser-direct speech prep. */
   codexAuth?: BrowserCodexAuth;
 }
 
@@ -169,36 +170,56 @@ export interface BrowserTtsConfig {
   personas: Record<string, BrowserPersonaConfig>;
 }
 
-/**
- * Strip the client-only `speechPrep.codexAuth` field in place and return the
- * same object.
- *
- * Ports `sanitizeBrowserConfig` (app.html line ~873). Only `codexAuth` is
- * removed; every other field is left untouched. Accepts `unknown` because it
- * runs on freshly-parsed JSON and cached values that may be malformed.
- */
-export function sanitizeBrowserConfig<T>(config: T): T {
-  const candidate = config as { speechPrep?: { codexAuth?: unknown } } | null | undefined;
-  if (candidate?.speechPrep?.codexAuth) {
-    delete candidate.speechPrep.codexAuth;
+function accessTokenExpiry(auth: BrowserCodexAuth | null | undefined): number | null {
+  try {
+    const segment = String(auth?.accessToken || "").split(".")[1];
+    if (!segment) return null;
+    const normalized = segment.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const exp = Number((JSON.parse(atob(padded)) as { exp?: unknown }).exp);
+    return Number.isFinite(exp) ? exp : null;
+  } catch {
+    return null;
   }
-  return config;
+}
+
+function completeCodexAuth(auth: BrowserCodexAuth | null | undefined): auth is BrowserCodexAuth {
+  return Boolean(auth?.accessToken && auth.refreshToken && auth.accountId);
+}
+
+/**
+ * Merge a live config over the cached config without rolling back a token
+ * bundle refreshed by the browser. Account changes always take the live
+ * bundle; otherwise the access token with the later JWT expiry wins, with the
+ * cached bundle winning ties so a rotated refresh token is retained.
+ */
+export function reconcileBrowserConfig(
+  fresh: BrowserTtsConfig,
+  cached: BrowserTtsConfig | null | undefined,
+): BrowserTtsConfig {
+  const freshAuth = fresh.speechPrep?.codexAuth;
+  const cachedAuth = cached?.speechPrep?.codexAuth;
+  if (!completeCodexAuth(cachedAuth)) return fresh;
+  if (!completeCodexAuth(freshAuth)) return fresh;
+  if (freshAuth.accountId !== cachedAuth.accountId) return fresh;
+  const freshExpiry = accessTokenExpiry(freshAuth);
+  const cachedExpiry = accessTokenExpiry(cachedAuth);
+  if (cachedExpiry !== null && (freshExpiry === null || cachedExpiry >= freshExpiry)) {
+    fresh.speechPrep!.codexAuth = cachedAuth;
+  }
+  return fresh;
 }
 
 /**
  * Load a cached config from localStorage under {@link CONFIG_STORAGE_KEY}.
  *
- * Ports `loadCachedConfig` (app.html line ~880): parses the stored JSON,
- * sanitizes it, and re-persists the sanitized form (so any lingering
- * `codexAuth` is scrubbed from storage). Returns `null` on absence or parse
- * failure.
+ * Parses the stored JSON, including refresh-capable Codex credentials. Returns
+ * `null` on absence or parse failure.
  */
 export function loadCachedConfig(): BrowserTtsConfig | null {
   try {
     const raw = localStorage.getItem(CONFIG_STORAGE_KEY);
-    const config = raw ? sanitizeBrowserConfig(JSON.parse(raw) as BrowserTtsConfig) : null;
-    if (config) localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
-    return config;
+    return raw ? (JSON.parse(raw) as BrowserTtsConfig) : null;
   } catch {
     return null;
   }
@@ -207,21 +228,52 @@ export function loadCachedConfig(): BrowserTtsConfig | null {
 /**
  * Persist a config to localStorage under {@link CONFIG_STORAGE_KEY}.
  *
- * Mirrors the `localStorage.setItem(configStorageKey, ...)` calls in app.html
- * (`refreshConfig`, `loadCachedConfig`). The config is stored as-is; callers
- * should sanitize first if the value may contain `codexAuth`.
+ * The config is stored as-is, including Codex OAuth credentials, so an
+ * installed PWA can reload while the backend is unavailable.
  */
 export function saveCachedConfig(config: BrowserTtsConfig): void {
   localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
 }
 
 /**
+ * Best-effort synchronization of a browser-rotated Codex bundle back to the
+ * canonical server auth file. Failed attempts remain pending in origin
+ * storage and are retried after config recovery or before the next server job.
+ */
+export async function syncCodexAuthToServer(
+  config: BrowserTtsConfig | null | undefined,
+  signal: AbortSignal | null = null,
+): Promise<boolean> {
+  if (!config) return false;
+  const auth = config.speechPrep?.codexAuth;
+  if (!completeCodexAuth(auth) || !auth.serverSyncPending) return false;
+  try {
+    const response = await fetch("/web/codex-auth", {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        accessToken: auth.accessToken,
+        refreshToken: auth.refreshToken,
+        accountId: auth.accountId,
+      }),
+    });
+    if (!response.ok) return false;
+    auth.serverSyncPending = false;
+    saveCachedConfig(config);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Fetch and validate the live config from `/web/config`.
  *
  * Ports the network + validation half of `refreshConfig` (app.html line
- * ~1025). Uses `cache: 'no-store'`, sanitizes the payload, and requires
+ * ~1025). Uses `cache: 'no-store'` and requires
  * `version === 1` with a `providers` object; returns `null` on a non-OK
- * response, invalid payload, or network error. Persisting the result and
+ * response, invalid payload, or network error. Persisting and reconciling the result and
  * repopulating settings is left to the caller (B2), matching the original
  * split of responsibilities.
  */
@@ -229,7 +281,7 @@ export async function fetchConfig(): Promise<BrowserTtsConfig | null> {
   try {
     const response = await fetch("/web/config", { cache: "no-store" });
     if (!response.ok) return null;
-    const config = sanitizeBrowserConfig((await response.json()) as BrowserTtsConfig);
+    const config = (await response.json()) as BrowserTtsConfig;
     if (config?.version !== 1 || !config.providers) return null;
     return config;
   } catch {

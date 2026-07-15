@@ -106,7 +106,7 @@ export async function createWebSpeechJob(
     } catch {
       // Ignored, matching app.html behavior.
     }
-    throw new Error(message);
+    throw new ServerJobError(message, response.status);
   }
   const job = (await response.json()) as { id?: string };
   if (!job?.id) throw new Error("TTS job did not return an id.");
@@ -137,7 +137,7 @@ export async function fetchWebSpeechJob(
     } catch {
       // Ignored, matching app.html behavior.
     }
-    throw new Error(message);
+    throw new ServerJobError(message, response.status);
   }
   return (await response.json()) as WebSpeechJobStatus;
 }

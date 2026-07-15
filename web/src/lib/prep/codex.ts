@@ -127,6 +127,7 @@ export async function refreshCodexAuth(
     accessToken: json.access_token || auth.accessToken,
     refreshToken: json.refresh_token || auth.refreshToken,
     accountId: json.account_id || auth.accountId,
+    serverSyncPending: true,
   };
   onRefreshed?.(prep);
   return prep.codexAuth;

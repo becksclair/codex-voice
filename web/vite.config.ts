@@ -8,11 +8,12 @@ const backend = process.env.CODEX_VOICE_BACKEND ?? "http://127.0.0.1:3845";
 
 export const proxyTargets = [
   "/web/config",
+  "/web/codex-auth",
   "/web/speech",
   "/web/speech-jobs",
   "/web/desktop-intents",
 ];
-export const backendNavigationDenylist = [/^\/web\/(config|speech|desktop-intents)/];
+export const backendNavigationDenylist = [/^\/web\/(config|codex-auth|speech|desktop-intents)/];
 const proxy = Object.fromEntries(
   proxyTargets.map((path) => [path, { target: backend, changeOrigin: true }]),
 );

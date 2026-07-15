@@ -91,6 +91,60 @@ describe("prepareForProvider — browser-supported inline tags", () => {
   });
 });
 
+describe("prepareForProvider — refreshed Codex auth", () => {
+  it("reports rotated credentials from a transformed streaming prep clone", async () => {
+    const expired = `header.${btoa(JSON.stringify({ exp: 1 }))}.signature`;
+    const fresh = `header.${btoa(
+      JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+    )}.signature`;
+    const config = baseConfig({
+      provider: "codex",
+      baseUrl: "/_codex",
+      model: "gpt-test",
+      codexAuth: {
+        accessToken: expired,
+        refreshToken: "initial-refresh",
+        accountId: "account-id",
+        tokenUrl: "https://auth.example.test/oauth/token",
+        clientId: "client-id",
+      },
+    });
+    const onCodexAuthRefreshed = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("auth.example.test")) {
+          return new Response(
+            JSON.stringify({
+              access_token: fresh,
+              refresh_token: "rotated-refresh",
+              account_id: "account-id",
+            }),
+          );
+        }
+        if (url === "/_codex/responses") {
+          return new Response(
+            'data: {"type":"response.output_text.delta","delta":"[softly] Hello world"}\n\n' +
+              "data: [DONE]\n\n",
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    await prepareForProvider(config, "google", "Hello world", null, settings, {
+      forcePerformanceTags: true,
+      onCodexAuthRefreshed,
+    });
+
+    expect(onCodexAuthRefreshed).toHaveBeenCalledTimes(1);
+    const refreshed = onCodexAuthRefreshed.mock.calls[0][0] as EffectiveSpeechPrep;
+    expect(refreshed).not.toBe(config.speechPrep);
+    expect(refreshed.codexAuth?.refreshToken).toBe("rotated-refresh");
+  });
+});
+
 describe("prepareForProvider — server-only prep", () => {
   it("throws a non-retryable error when browser prep is required", async () => {
     const config = baseConfig({ browserSupported: false });

@@ -111,11 +111,25 @@ From the repo root, the mise tasks wrap these: `dev` (full stack), `web-dev`,
   draft and, when enabled, generate the newly pasted text.
 - Emotion adds model-supported delivery cues while preserving wording;
   Summarize only shortens text that exceeds the selected voice's limit.
+- `/web/config` bootstraps refresh-capable Codex OAuth credentials when Codex
+  speech prep is configured. They are persisted inside
+  `codex-voice.web.config.v1`, refreshed directly through `auth.openai.com`,
+  and used through the same-origin `/_codex/responses` relay when backend job
+  creation fails with a network or 502/503/504 error. Browser origin storage
+  deliberately shares the private Tailnet trust boundary already used for the
+  provider API keys exposed in config. The server rejects `/web/config`
+  requests carrying any browser Origin other than `voice.heliasar.com` or a
+  loopback Vite origin on port `5173`, and re-reads the configured Codex auth
+  file before each config response.
+  Browser token rotation remains marked pending in the cached config while the
+  backend is offline. Recovery or the next backend-first generation retries
+  `POST /web/codex-auth`, which accepts only a complete same-account bundle
+  whose access token is not older than the canonical auth file.
 
 ## Route-shadowing constraint
 
 The Rust service exposes JSON API routes under `/web/*`
-(`GET /web/config`, `POST /web/speech`, `POST /web/speech-jobs`,
+(`GET /web/config`, `POST /web/codex-auth`, `POST /web/speech`, `POST /web/speech-jobs`,
 `GET|DELETE /web/speech-jobs/{id}`, and the one-shot desktop-intent routes).
 Because this app is served under the same `/web/`
 base, **no file at the `dist/` root may be named `config`, `speech`, or

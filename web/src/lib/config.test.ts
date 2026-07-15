@@ -3,8 +3,9 @@ import type { BrowserTtsConfig } from "./config.ts";
 import {
   fetchConfig,
   loadCachedConfig,
-  sanitizeBrowserConfig,
+  reconcileBrowserConfig,
   saveCachedConfig,
+  syncCodexAuthToServer,
 } from "./config.ts";
 import { CONFIG_STORAGE_KEY } from "./storage.ts";
 
@@ -65,6 +66,34 @@ function fixture(): BrowserTtsConfig {
   };
 }
 
+function jwt(exp: number): string {
+  return `header.${btoa(JSON.stringify({ exp }))}.signature`;
+}
+
+function withCodexAuth(
+  config: BrowserTtsConfig,
+  auth: { accessToken: string; refreshToken: string; accountId: string },
+): BrowserTtsConfig {
+  config.speechPrep = {
+    provider: "codex",
+    mode: "performance-tags",
+    strategies: { google: "style", elevenlabs: "tags", default: "tags" },
+    tagPalette: ["[laughs]"],
+    capPerformanceTags: true,
+    browserSupported: true,
+    baseUrl: "/_codex",
+    model: "gpt",
+    fallbackModels: [],
+    threshold: 100,
+    maxInputLength: 4000,
+    maxLength: 4000,
+    attemptTimeoutMs: 4000,
+    timeoutMs: 30000,
+    codexAuth: auth,
+  };
+  return config;
+}
+
 beforeEach(() => {
   localStorage.clear();
 });
@@ -72,44 +101,76 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("sanitizeBrowserConfig", () => {
-  it("strips speechPrep.codexAuth and nothing else", () => {
-    const config = fixture() as BrowserTtsConfig;
-    config.speechPrep = {
-      provider: "codex",
-      mode: "performance-tags",
-      strategies: { google: "style", elevenlabs: "tags", default: "tags" },
-      tagPalette: ["[laughs]"],
-      capPerformanceTags: true,
-      browserSupported: true,
-      baseUrl: "https://x",
-      model: "gpt",
-      fallbackModels: [],
-      threshold: 100,
-      maxInputLength: 4000,
-      maxLength: 4000,
-      attemptTimeoutMs: 4000,
-      timeoutMs: 30000,
-      codexAuth: { accessToken: "secret" },
-    };
-    const result = sanitizeBrowserConfig(config);
-    expect(result.speechPrep?.codexAuth).toBeUndefined();
-    // Everything else intact.
-    expect(result.speechPrep?.model).toBe("gpt");
-    expect(result.providers.google?.apiKey).toBe("g-key");
-    expect(result.defaultProvider).toBe("google");
+describe("reconcileBrowserConfig", () => {
+  it("preserves a newer cached token bundle for the same account", () => {
+    const fresh = withCodexAuth(fixture(), {
+      accessToken: jwt(100),
+      refreshToken: "server-refresh",
+      accountId: "account-1",
+    });
+    const cached = withCodexAuth(fixture(), {
+      accessToken: jwt(200),
+      refreshToken: "browser-refresh",
+      accountId: "account-1",
+    });
+
+    const result = reconcileBrowserConfig(fresh, cached);
+    expect(result.speechPrep?.codexAuth?.refreshToken).toBe("browser-refresh");
   });
 
-  it("is a no-op when codexAuth is absent", () => {
-    const config = fixture();
-    expect(sanitizeBrowserConfig(config)).toBe(config);
+  it("uses a newer server bundle and replaces a different account", () => {
+    const cached = withCodexAuth(fixture(), {
+      accessToken: jwt(100),
+      refreshToken: "cached-refresh",
+      accountId: "account-1",
+    });
+    const newer = withCodexAuth(fixture(), {
+      accessToken: jwt(200),
+      refreshToken: "server-refresh",
+      accountId: "account-1",
+    });
+    expect(reconcileBrowserConfig(newer, cached).speechPrep?.codexAuth?.refreshToken).toBe(
+      "server-refresh",
+    );
+
+    const otherAccount = withCodexAuth(fixture(), {
+      accessToken: jwt(50),
+      refreshToken: "other-refresh",
+      accountId: "account-2",
+    });
+    expect(reconcileBrowserConfig(otherAccount, cached).speechPrep?.codexAuth?.accountId).toBe(
+      "account-2",
+    );
+  });
+
+  it("treats a fresh config without complete auth as authoritative", () => {
+    const fresh = fixture();
+    fresh.speechPrep = withCodexAuth(fixture(), {
+      accessToken: jwt(200),
+      refreshToken: "server-refresh",
+      accountId: "account-1",
+    }).speechPrep;
+    delete fresh.speechPrep?.codexAuth;
+    fresh.speechPrep!.browserSupported = false;
+    const cached = withCodexAuth(fixture(), {
+      accessToken: jwt(100),
+      refreshToken: "cached-refresh",
+      accountId: "account-1",
+    });
+
+    expect(reconcileBrowserConfig(fresh, cached).speechPrep?.codexAuth).toBeUndefined();
   });
 });
 
 describe("loadCachedConfig / saveCachedConfig", () => {
   it("round-trips through localStorage", () => {
-    saveCachedConfig(fixture());
-    expect(loadCachedConfig()?.defaultProvider).toBe("google");
+    const config = withCodexAuth(fixture(), {
+      accessToken: "access",
+      refreshToken: "refresh",
+      accountId: "account",
+    });
+    saveCachedConfig(config);
+    expect(loadCachedConfig()?.speechPrep?.codexAuth?.refreshToken).toBe("refresh");
   });
 
   it("returns null on absence", () => {
@@ -120,32 +181,51 @@ describe("loadCachedConfig / saveCachedConfig", () => {
     localStorage.setItem(CONFIG_STORAGE_KEY, "{not json");
     expect(loadCachedConfig()).toBeNull();
   });
+});
 
-  it("re-persists a sanitized cached config", () => {
-    const config = fixture() as BrowserTtsConfig;
-    config.speechPrep = {
-      provider: "codex",
-      mode: "m",
-      strategies: { google: "", elevenlabs: "", default: "" },
-      tagPalette: [],
-      capPerformanceTags: false,
-      browserSupported: false,
-      baseUrl: "",
-      model: "",
-      fallbackModels: [],
-      threshold: 0,
-      maxInputLength: 0,
-      maxLength: 0,
-      attemptTimeoutMs: 0,
-      timeoutMs: 0,
-      codexAuth: { accessToken: "leak" },
-    };
-    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
-    loadCachedConfig();
-    const persisted = JSON.parse(
-      localStorage.getItem(CONFIG_STORAGE_KEY) || "{}",
-    ) as BrowserTtsConfig;
-    expect(persisted.speechPrep?.codexAuth).toBeUndefined();
+describe("syncCodexAuthToServer", () => {
+  it("posts a pending complete bundle and clears the pending marker", async () => {
+    const config = withCodexAuth(fixture(), {
+      accessToken: jwt(200),
+      refreshToken: "rotated-refresh",
+      accountId: "account-1",
+    });
+    config.speechPrep!.codexAuth!.serverSyncPending = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    expect(await syncCodexAuthToServer(config)).toBe(true);
+    expect(fetch).toHaveBeenCalledWith(
+      "/web/codex-auth",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          accessToken: jwt(200),
+          refreshToken: "rotated-refresh",
+          accountId: "account-1",
+        }),
+      }),
+    );
+    expect(config.speechPrep?.codexAuth?.serverSyncPending).toBe(false);
+    expect(loadCachedConfig()?.speechPrep?.codexAuth?.serverSyncPending).toBe(false);
+  });
+
+  it("keeps the marker pending when the server is unavailable", async () => {
+    const config = withCodexAuth(fixture(), {
+      accessToken: jwt(200),
+      refreshToken: "rotated-refresh",
+      accountId: "account-1",
+    });
+    config.speechPrep!.codexAuth!.serverSyncPending = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 502 })),
+    );
+
+    expect(await syncCodexAuthToServer(config)).toBe(false);
+    expect(config.speechPrep?.codexAuth?.serverSyncPending).toBe(true);
   });
 });
 

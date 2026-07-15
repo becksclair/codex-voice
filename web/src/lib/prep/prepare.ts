@@ -127,9 +127,7 @@ export async function prepareForProvider(
   }
 
   const onRefreshed = (refreshed: EffectiveSpeechPrep): void => {
-    // Only persist when prep IS the live config object (app.html gates on
-    // `directConfig?.speechPrep === prep`).
-    if (refreshed === (config.speechPrep as unknown)) options.onCodexAuthRefreshed?.(refreshed);
+    options.onCodexAuthRefreshed?.(refreshed);
   };
 
   const startedAt = performance.now();

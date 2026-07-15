@@ -38,8 +38,8 @@ pub(crate) use speech::TtsServiceState;
 use speech::{speech, watch_tts_config};
 use transcribe::transcribe;
 use web::{
-    web_config, web_speech, web_speech_job_create, web_speech_job_delete, web_speech_job_status,
-    web_speech_prep, WebSpeechJobManager, WebSpeechJobStore,
+    web_codex_auth_sync, web_config, web_speech, web_speech_job_create, web_speech_job_delete,
+    web_speech_job_status, web_speech_prep, WebSpeechJobManager, WebSpeechJobStore,
 };
 use web_assets::{legacy_service_worker, serve_web_asset, serve_web_index};
 
@@ -269,6 +269,7 @@ fn service_router(state: ServiceState) -> Router {
         .route("/v1/healthz", health_routes)
         .route("/web", get(serve_web_index))
         .route("/web/config", get(web_config))
+        .route("/web/codex-auth", post(web_codex_auth_sync))
         .route("/web/desktop-intents", post(create_desktop_intent))
         .route(
             "/web/desktop-intents/{id}",
@@ -358,10 +359,26 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            kind: "forbidden",
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             kind: "not_found",
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            kind: "conflict",
             message: message.into(),
         }
     }

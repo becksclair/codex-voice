@@ -9,9 +9,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_REFRESH_SKEW_SECONDS: u64 = 300;
+static CODEX_AUTH_FILE_WRITE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct CodexLlmClient {
@@ -158,10 +159,16 @@ impl CodexLlmClient {
         let refreshed = refresh_tokens(&self.client, &payload, &tokens.refresh_token).await?;
         let result_tokens = extract_tokens(&refreshed)?;
         let auth_file = self.auth_file.clone();
-        tokio::task::spawn_blocking(move || write_auth_file(&auth_file, &refreshed))
-            .await
-            .map_err(|error| SpeechError::Auth(format!("auth write task failed: {error}")))??;
-        Ok(result_tokens)
+        let written = tokio::task::spawn_blocking(move || {
+            write_auth_payload_if_not_older(&auth_file, &refreshed)
+        })
+        .await
+        .map_err(|error| SpeechError::Auth(format!("auth write task failed: {error}")))??;
+        if written {
+            Ok(result_tokens)
+        } else {
+            extract_tokens(&self.read_auth_payload().await?)
+        }
     }
 
     async fn read_auth_payload(&self) -> SpeechResult<Value> {
@@ -172,11 +179,83 @@ impl CodexLlmClient {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CodexAuthTokens {
-    access_token: String,
-    refresh_token: String,
-    account_id: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAuthSnapshot {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub account_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexAuthSyncResult {
+    Updated,
+    Unchanged,
+    RejectedOlder,
+    RejectedAccount,
+    RejectedInvalid,
+}
+
+type CodexAuthTokens = CodexAuthSnapshot;
+
+/// Read the complete refresh-capable Codex OAuth bundle without invoking the
+/// Codex CLI. Browser-facing config uses this only as a bootstrap snapshot;
+/// callers must never log the returned values.
+pub fn read_codex_auth_snapshot(path: &Path) -> SpeechResult<CodexAuthSnapshot> {
+    let payload = read_auth_file(path)?;
+    extract_tokens(&payload)
+}
+
+/// Atomically merge a browser-refreshed Codex bundle into the canonical auth
+/// file. Only the same account may be updated, and an older access token can
+/// never replace a newer one.
+pub fn sync_codex_auth_snapshot(
+    path: &Path,
+    incoming: &CodexAuthSnapshot,
+) -> SpeechResult<CodexAuthSyncResult> {
+    let _guard = CODEX_AUTH_FILE_WRITE_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut payload = read_auth_file(path)?;
+    let current = extract_tokens(&payload)?;
+    if current.account_id != incoming.account_id {
+        return Ok(CodexAuthSyncResult::RejectedAccount);
+    }
+    let Some(incoming_expiry) = access_token_expiry(&incoming.access_token) else {
+        return Ok(CodexAuthSyncResult::RejectedInvalid);
+    };
+    if access_token_expiry(&current.access_token).is_some_and(|expiry| incoming_expiry < expiry) {
+        return Ok(CodexAuthSyncResult::RejectedOlder);
+    }
+    if current == *incoming {
+        return Ok(CodexAuthSyncResult::Unchanged);
+    }
+
+    let token_object = payload
+        .as_object_mut()
+        .and_then(|object| object.get_mut("tokens"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| SpeechError::Auth("Codex auth file has no token object".into()))?;
+    token_object.insert(
+        "access_token".into(),
+        Value::String(incoming.access_token.clone()),
+    );
+    token_object.insert(
+        "refresh_token".into(),
+        Value::String(incoming.refresh_token.clone()),
+    );
+    token_object.insert(
+        "account_id".into(),
+        Value::String(incoming.account_id.clone()),
+    );
+    payload
+        .as_object_mut()
+        .expect("auth payload checked above")
+        .insert(
+            "last_refresh".into(),
+            Value::String(format!("{}", chrono_like_timestamp())),
+        );
+    write_auth_file_unlocked(path, &payload)?;
+    Ok(CodexAuthSyncResult::Updated)
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,7 +376,38 @@ async fn refresh_tokens(
     Ok(merged)
 }
 
+fn write_auth_payload_if_not_older(path: &Path, payload: &Value) -> SpeechResult<bool> {
+    let _guard = CODEX_AUTH_FILE_WRITE_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let incoming = extract_tokens(payload)?;
+    if let Ok(current_payload) = read_auth_file(path) {
+        let current = extract_tokens(&current_payload)?;
+        if current.account_id != incoming.account_id {
+            return Err(SpeechError::Auth(
+                "refreshed Codex auth account no longer matches the configured account".into(),
+            ));
+        }
+        if matches!(
+            (access_token_expiry(&incoming.access_token), access_token_expiry(&current.access_token)),
+            (Some(incoming), Some(current)) if incoming < current
+        ) {
+            return Ok(false);
+        }
+    }
+    write_auth_file_unlocked(path, payload)?;
+    Ok(true)
+}
+
+#[cfg(test)]
 fn write_auth_file(path: &Path, payload: &Value) -> SpeechResult<()> {
+    let _guard = CODEX_AUTH_FILE_WRITE_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    write_auth_file_unlocked(path, payload)
+}
+
+fn write_auth_file_unlocked(path: &Path, payload: &Value) -> SpeechResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             SpeechError::Auth(format!("failed to create Codex auth directory: {error}"))
@@ -327,16 +437,7 @@ fn write_auth_file(path: &Path, payload: &Value) -> SpeechResult<()> {
 }
 
 fn access_token_needs_refresh(access_token: &str) -> bool {
-    let Some(payload) = access_token.split('.').nth(1) else {
-        return true;
-    };
-    let Ok(decoded) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) else {
-        return true;
-    };
-    let Ok(json) = serde_json::from_slice::<Value>(&decoded) else {
-        return true;
-    };
-    let Some(exp) = json.get("exp").and_then(Value::as_u64) else {
+    let Some(exp) = access_token_expiry(access_token) else {
         return true;
     };
     let now = SystemTime::now()
@@ -344,6 +445,17 @@ fn access_token_needs_refresh(access_token: &str) -> bool {
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     exp <= now + CODEX_REFRESH_SKEW_SECONDS
+}
+
+fn access_token_expiry(access_token: &str) -> Option<u64> {
+    let payload = access_token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice::<Value>(&decoded)
+        .ok()?
+        .get("exp")
+        .and_then(Value::as_u64)
 }
 
 fn codex_responses_body(model: &str, reasoning_effort: Option<&str>, prompt: &str) -> Value {
@@ -495,11 +607,133 @@ mod tests {
         assert_eq!(body["reasoning"]["effort"], "medium");
     }
 
-    fn unexpired_access_token() -> String {
-        let exp = chrono_like_timestamp() + 3600;
+    fn access_token_with_expiry(exp: u64) -> String {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&json!({ "exp": exp })).unwrap());
         format!("header.{payload}.signature")
+    }
+
+    fn unexpired_access_token() -> String {
+        access_token_with_expiry(chrono_like_timestamp() + 3600)
+    }
+
+    #[test]
+    fn browser_auth_sync_updates_same_account_and_preserves_other_fields() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("auth.json");
+        let current = CodexAuthSnapshot {
+            access_token: access_token_with_expiry(100),
+            refresh_token: "old-refresh".into(),
+            account_id: "acct-123".into(),
+        };
+        std::fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "tokens": {
+                    "access_token": current.access_token,
+                    "refresh_token": current.refresh_token,
+                    "account_id": current.account_id,
+                    "id_token": "preserved-id-token"
+                },
+                "provider": "chatgpt"
+            }))
+            .unwrap(),
+        )
+        .expect("write auth fixture");
+        let incoming = CodexAuthSnapshot {
+            access_token: access_token_with_expiry(200),
+            refresh_token: "rotated-refresh".into(),
+            account_id: "acct-123".into(),
+        };
+
+        assert_eq!(
+            sync_codex_auth_snapshot(&path, &incoming).expect("sync succeeds"),
+            CodexAuthSyncResult::Updated
+        );
+        let payload = read_auth_file(&path).expect("read updated auth");
+        assert_eq!(extract_tokens(&payload).unwrap(), incoming);
+        assert_eq!(payload["tokens"]["id_token"], "preserved-id-token");
+        assert_eq!(payload["provider"], "chatgpt");
+
+        let same_access_rotated_refresh = CodexAuthSnapshot {
+            refresh_token: "second-rotation".into(),
+            ..incoming
+        };
+        assert_eq!(
+            sync_codex_auth_snapshot(&path, &same_access_rotated_refresh).unwrap(),
+            CodexAuthSyncResult::Updated
+        );
+        assert_eq!(
+            read_codex_auth_snapshot(&path).unwrap().refresh_token,
+            "second-rotation"
+        );
+    }
+
+    #[test]
+    fn browser_auth_sync_rejects_older_or_different_account() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("auth.json");
+        let current = CodexAuthSnapshot {
+            access_token: access_token_with_expiry(200),
+            refresh_token: "current-refresh".into(),
+            account_id: "acct-123".into(),
+        };
+        std::fs::write(
+            &path,
+            serde_json::to_string(&json!({ "tokens": {
+                "access_token": current.access_token,
+                "refresh_token": current.refresh_token,
+                "account_id": current.account_id
+            }}))
+            .unwrap(),
+        )
+        .expect("write auth fixture");
+        let older = CodexAuthSnapshot {
+            access_token: access_token_with_expiry(100),
+            refresh_token: "older-refresh".into(),
+            account_id: "acct-123".into(),
+        };
+        assert_eq!(
+            sync_codex_auth_snapshot(&path, &older).expect("older bundle is classified"),
+            CodexAuthSyncResult::RejectedOlder
+        );
+        assert_eq!(read_codex_auth_snapshot(&path).unwrap(), current);
+
+        let different_account = CodexAuthSnapshot {
+            account_id: "acct-456".into(),
+            ..older
+        };
+        assert_eq!(
+            sync_codex_auth_snapshot(&path, &different_account).unwrap(),
+            CodexAuthSyncResult::RejectedAccount
+        );
+        assert_eq!(read_codex_auth_snapshot(&path).unwrap(), current);
+    }
+
+    #[test]
+    fn server_refresh_write_cannot_replace_a_newer_browser_sync() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("auth.json");
+        let newer = json!({ "tokens": {
+            "access_token": access_token_with_expiry(200),
+            "refresh_token": "browser-refresh",
+            "account_id": "acct-123"
+        }});
+        std::fs::write(&path, serde_json::to_string(&newer).unwrap()).expect("write auth fixture");
+        let stale_server_refresh = json!({ "tokens": {
+            "access_token": access_token_with_expiry(100),
+            "refresh_token": "server-refresh",
+            "account_id": "acct-123"
+        }});
+
+        assert!(
+            !write_auth_payload_if_not_older(&path, &stale_server_refresh)
+                .expect("stale write is classified")
+        );
+        assert_eq!(
+            read_codex_auth_snapshot(&path).unwrap().refresh_token,
+            "browser-refresh"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

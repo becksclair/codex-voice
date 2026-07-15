@@ -123,9 +123,12 @@ describe("pure decision helpers", () => {
     expect(fallbackProvider("elevenlabs")).toBe("google");
   });
 
-  it("classifies only network failures as backend unavailability", () => {
+  it("classifies network and gateway failures as backend unavailability", () => {
     expect(isBackendUnavailable(new TypeError("Failed to fetch"))).toBe(true);
-    expect(isBackendUnavailable(new Error("TTS job failed (503)"))).toBe(false);
+    for (const status of [502, 503, 504]) {
+      expect(isBackendUnavailable({ status } as Error & { status: number })).toBe(true);
+    }
+    expect(isBackendUnavailable({ status: 500 } as Error & { status: number })).toBe(false);
     expect(isBackendUnavailable({ name: "AbortError" } as Error)).toBe(false);
   });
 
@@ -387,8 +390,28 @@ describe("GenerationController — path selection", () => {
     ]);
   });
 
-  it("does not classify a reachable backend HTTP failure as offline", async () => {
-    const fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
+  it("uses browser-direct generation when Saga returns a pre-job 502", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/web/speech-jobs") return new Response("bad gateway", { status: 502 });
+      if (url.includes(":generateContent")) return googleAudioResponse();
+      throw new Error(`unrouted fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const providers: string[] = [];
+    const controller = new GenerationController({
+      config: directConfig(),
+      settings,
+      callbacks: { onAudioReady: (_blob, meta) => providers.push(meta.provider) },
+    });
+
+    await controller.generate("Hello");
+
+    expect(providers).toEqual(["google"]);
+  });
+
+  it("does not classify a backend HTTP 500 as offline", async () => {
+    const fetchMock = vi.fn(async () => new Response("unavailable", { status: 500 }));
     vi.stubGlobal("fetch", fetchMock);
     const errors: string[] = [];
     const controller = new GenerationController({
@@ -399,7 +422,7 @@ describe("GenerationController — path selection", () => {
 
     await controller.generate("Hello");
 
-    expect(errors).toEqual(["TTS job failed (503)"]);
+    expect(errors).toEqual(["TTS job failed (500)"]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

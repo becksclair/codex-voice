@@ -161,9 +161,19 @@ runs the backend alone; `mise run verify` includes `web-check` and `web-test`,
 command table lives in the "Web Frontend" section of `AGENTS.md`.
 
 `/web/config` and the `/web/speech*` routes are deliberately unauthenticated
-so the PWA can call them without a bearer token; the trust boundary is
+so the PWA can call them without a bearer token. The config includes provider
+keys and, for Codex prep, a refresh-capable OAuth bundle; the trust boundary is
 private-network/Tailscale-only deployment, per the "Deployment Context"
 section of the root `AGENTS.md`.
+Browser requests carrying an Origin are accepted for `/web/config` only from
+`https://voice.heliasar.com` or the Vite development origins on loopback port
+`5173`; the broader CORS policy used by the OpenAI-compatible API cannot read
+this credential payload. Codex auth is re-read from its configured file for
+each config response so a server-side refresh is not exported as a stale
+snapshot. Browser OAuth rotation is marked pending in origin storage and
+atomically synchronized back to the configured auth file through
+`POST /web/codex-auth` when the backend becomes reachable again; same-account,
+non-older bundles are the only accepted updates.
 
 ## Text-to-Speech (TTS)
 
@@ -250,40 +260,56 @@ systemctl --user status codex-voice.service codex-voice-server.service
 
 ## Homelab Reverse-Proxy Setup
 
-When the service runs on a different machine from the homelab ingress point, Orion
-(Raspberry Pi) proxies `codex-voice.heliasar.com` across the Tailscale network to
-the service host. This lets any Tailnet client reach the OpenAI-compatible endpoints
-without knowing the backend machine's Tailscale IP.
+Saga proxies `voice.heliasar.com` across the Tailscale network to the service
+host. This lets any Tailnet client reach the PWA and OpenAI-compatible endpoints
+without knowing the backend machine's Tailscale IP. The legacy
+`codex-voice.heliasar.com` hostname redirects to `voice.heliasar.com`.
 
 ### Architecture
 
 ```
-Client ──https──▶ Orion (Caddy 80/443)
+Client ──https──▶ Saga (Caddy 80/443)
                     │
                     └──reverse_proxy──▶ asgard (Tailscale 100.120.202.119:3845)
 ```
 
-- **Orion** is the ingress node; host Caddy owns `80/443`.
+- **Saga** is the ingress node; Tailnet-bound Caddy owns `80/443`.
 - **asgard** runs the actual `codex-voice server` bound to `0.0.0.0:3845`.
 - Caddy handles TLS termination with the wildcard `heliasar.com` certificate.
+- Saga handles only exact `POST /_codex/responses` independently, forwarding
+  it to ChatGPT so a warmed PWA can perform Codex prep while asgard is offline.
 
-### Orion Caddy snippet
+### Saga Caddy snippet
 
-`/opt/homelab/configs/caddy/generated/30-exact-sites.caddy`:
+`/opt/homelab/config/caddy/Caddyfile`:
 
 ```caddy
-codex-voice.heliasar.com {
-    tls /etc/certs/heliasar.com.crt /etc/certs/heliasar.com.key
+voice.heliasar.com {
+    tls /etc/saga-tls/heliasar.com.crt /etc/saga-tls/heliasar.com.key
     encode zstd gzip
-    reverse_proxy 100.120.202.119:3845 {
-        header_up X-Forwarded-Proto https
-        header_up Host {host}
+
+    @codex_responses {
+        method POST
+        path /_codex/responses
+    }
+    handle @codex_responses {
+        rewrite * /backend-api/codex/responses
+        reverse_proxy https://chatgpt.com {
+            header_up Host chatgpt.com
+        }
+    }
+    handle /_codex/* {
+        respond "Not Found" 404
+    }
+    handle {
+        reverse_proxy 100.120.202.119:3845
     }
 }
 ```
 
-This is generated from the homelab `services.json` manifest, which marks the service
-as `runtime.type: external` on machine `asgard` with a managed DNS alias.
+The scoped relay is not a general ChatGPT proxy: every other `/_codex/*` path
+or method is rejected. It still requires the PWA's cached bearer token and
+account ID.
 
 ### asgard systemd unit
 
@@ -315,13 +341,15 @@ before launching the binary.
 
 ```bash
 # From any Tailnet host
-curl -s https://codex-voice.heliasar.com/healthz
+curl -s https://voice.heliasar.com/healthz
 # Expected: {"ok":true,"capabilities":{"transcriptions":true,"speech":true}}
 ```
 
-If asgard is offline, Caddy returns a gateway error; the manifest marks the service
-`availability: optional` because it depends on the laptop being awake and on the
-Tailnet.
+If asgard is offline, ordinary API routes return a gateway error while a warmed,
+service-worker-controlled PWA can load its cached shell/config and fall back to
+direct provider generation. Codex prep uses Saga's `/_codex/responses` relay;
+OAuth refresh goes directly to `auth.openai.com` and does not require the Codex
+CLI.
 
 ## Linux Notes
 

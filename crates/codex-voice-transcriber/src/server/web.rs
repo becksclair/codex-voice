@@ -2,8 +2,8 @@ use super::speech::web_speech_client;
 use super::{ApiError, ServiceState};
 
 use axum::{
-    extract::{Path, State},
-    http::{header, StatusCode},
+    extract::{FromRequest, Path, Request, State},
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -14,9 +14,14 @@ use codex_voice_tts::config::{
     ResolvedTtsConfig, SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies,
     SpeechPrepStrategy,
 };
+use codex_voice_tts::{
+    read_codex_auth_snapshot, sync_codex_auth_snapshot, CodexAuthSnapshot, CodexAuthSyncResult,
+    CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL,
+};
 use serde::{Deserialize, Serialize, Serializer};
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -28,6 +33,7 @@ const WEB_SPEECH_MAX_TERMINAL_JOBS: usize = 16;
 const WEB_SPEECH_MAX_TERMINAL_BYTES: usize = 128 * 1024 * 1024;
 const WEB_SPEECH_ADMISSION_LIMIT: usize = 3;
 const WEB_SPEECH_WORKER_LIMIT: usize = 1;
+const BROWSER_CODEX_BASE_URL: &str = "/_codex";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +47,8 @@ pub(crate) struct BrowserTtsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     speech_prep: Option<BrowserSpeechPrepConfig>,
     personas: HashMap<String, BrowserPersonaConfig>,
+    #[serde(skip)]
+    codex_auth_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +70,8 @@ struct BrowserSpeechPrepConfig {
     cap_performance_tags: bool,
     browser_supported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    codex_auth: Option<BrowserCodexAuth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     browser_fallback: Option<BrowserSpeechPrepFallbackConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
@@ -75,6 +85,16 @@ struct BrowserSpeechPrepConfig {
     max_length: usize,
     attempt_timeout_ms: u64,
     timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserCodexAuth {
+    access_token: String,
+    refresh_token: String,
+    account_id: String,
+    token_url: String,
+    client_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -257,19 +277,34 @@ impl BrowserTtsConfig {
                         timeout_ms: duration_millis(elevenlabs.timeout),
                     }),
             },
-            speech_prep: config
-                .speech_prep
-                .as_ref()
-                .map(|prep| BrowserSpeechPrepConfig {
+            speech_prep: config.speech_prep.as_ref().map(|prep| {
+                let codex_auth = (prep.provider == SpeechPrepProviderKind::Codex)
+                    .then_some(prep.auth_file.as_deref())
+                    .flatten()
+                    .and_then(|path| read_codex_auth_snapshot(path).ok())
+                    .map(|auth| BrowserCodexAuth {
+                        access_token: auth.access_token,
+                        refresh_token: auth.refresh_token,
+                        account_id: auth.account_id,
+                        token_url: CODEX_OAUTH_TOKEN_URL.to_string(),
+                        client_id: CODEX_OAUTH_CLIENT_ID.to_string(),
+                    });
+                BrowserSpeechPrepConfig {
                     provider: speech_prep_provider_name(prep.provider).to_string(),
                     mode: speech_prep_mode_name(prep.mode).to_string(),
                     strategies: browser_speech_prep_strategies(prep.strategies),
                     tag_palette: prep.tag_palette.clone(),
                     cap_performance_tags: prep.cap_performance_tags,
-                    browser_supported: prep.provider == SpeechPrepProviderKind::Google,
+                    browser_supported: prep.provider == SpeechPrepProviderKind::Google
+                        || codex_auth.is_some(),
+                    codex_auth,
                     browser_fallback: browser_speech_prep_fallback(prep, config),
                     api_key: prep.api_key.clone(),
-                    base_url: prep.base_url.clone(),
+                    base_url: if prep.provider == SpeechPrepProviderKind::Codex {
+                        BROWSER_CODEX_BASE_URL.to_string()
+                    } else {
+                        prep.base_url.clone()
+                    },
                     model: prep.model.clone(),
                     fallback_models: prep.fallback_models.clone(),
                     reasoning_effort: prep.reasoning_effort.clone(),
@@ -278,13 +313,45 @@ impl BrowserTtsConfig {
                     max_length: prep.max_length,
                     attempt_timeout_ms: duration_millis(prep.attempt_timeout),
                     timeout_ms: duration_millis(prep.timeout),
-                }),
+                }
+            }),
             personas: config
                 .personas
                 .iter()
                 .map(|(name, persona)| (name.clone(), browser_persona(persona)))
                 .collect(),
+            codex_auth_file: config.speech_prep.as_ref().and_then(|prep| {
+                (prep.provider == SpeechPrepProviderKind::Codex)
+                    .then(|| prep.auth_file.clone())
+                    .flatten()
+            }),
         }
+    }
+
+    pub(crate) async fn refresh_codex_auth(mut self) -> Self {
+        let Some(auth_file) = self.codex_auth_file.clone() else {
+            return self;
+        };
+        let auth = tokio::task::spawn_blocking(move || read_codex_auth_snapshot(&auth_file))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|auth| BrowserCodexAuth {
+                access_token: auth.access_token,
+                refresh_token: auth.refresh_token,
+                account_id: auth.account_id,
+                token_url: CODEX_OAUTH_TOKEN_URL.to_string(),
+                client_id: CODEX_OAUTH_CLIENT_ID.to_string(),
+            });
+        if let Some(prep) = self.speech_prep.as_mut() {
+            prep.browser_supported = auth.is_some();
+            prep.codex_auth = auth;
+        }
+        self
+    }
+
+    fn codex_auth_file(&self) -> Option<PathBuf> {
+        self.codex_auth_file.clone()
     }
 }
 
@@ -471,15 +538,21 @@ pub(crate) fn prune_web_speech_jobs_at(
 
 pub(crate) async fn web_config(
     State(state): State<ServiceState>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let config = state
-        .tts
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .web_tts_config
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| ApiError::service_unavailable("TTS service is not configured"))?;
+    authorize_web_config_origin(&headers)?;
+    let config = {
+        let tts = state
+            .tts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tts.web_tts_config
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ApiError::service_unavailable("TTS service is not configured"))?
+    }
+    .refresh_codex_auth()
+    .await;
 
     Ok((
         [
@@ -488,6 +561,82 @@ pub(crate) async fn web_config(
         ],
         Json(config),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCodexAuthSyncRequest {
+    access_token: String,
+    refresh_token: String,
+    account_id: String,
+}
+
+pub(crate) async fn web_codex_auth_sync(
+    State(state): State<ServiceState>,
+    request: Request,
+) -> Result<StatusCode, ApiError> {
+    authorize_web_config_origin(request.headers())?;
+    let Json(request) = Json::<BrowserCodexAuthSyncRequest>::from_request(request, &state)
+        .await
+        .map_err(ApiError::json_rejection)?;
+    if request.access_token.trim().is_empty()
+        || request.refresh_token.trim().is_empty()
+        || request.account_id.trim().is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "Codex auth synchronization requires a complete credential bundle",
+        ));
+    }
+    let auth_file = {
+        let tts = state
+            .tts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tts.web_tts_config
+            .as_ref()
+            .and_then(BrowserTtsConfig::codex_auth_file)
+            .ok_or_else(|| ApiError::service_unavailable("Codex browser auth is not configured"))?
+    };
+    let incoming = CodexAuthSnapshot {
+        access_token: request.access_token,
+        refresh_token: request.refresh_token,
+        account_id: request.account_id,
+    };
+    let result =
+        tokio::task::spawn_blocking(move || sync_codex_auth_snapshot(&auth_file, &incoming))
+            .await
+            .map_err(|error| ApiError::internal(format!("Codex auth sync task failed: {error}")))?
+            .map_err(|_| ApiError::service_unavailable("Codex auth synchronization failed"))?;
+    match result {
+        CodexAuthSyncResult::Updated | CodexAuthSyncResult::Unchanged => Ok(StatusCode::NO_CONTENT),
+        CodexAuthSyncResult::RejectedOlder => Err(ApiError::conflict(
+            "Browser Codex auth is older than the configured credentials",
+        )),
+        CodexAuthSyncResult::RejectedAccount => Err(ApiError::conflict(
+            "Browser Codex auth belongs to a different account",
+        )),
+        CodexAuthSyncResult::RejectedInvalid => Err(ApiError::bad_request(
+            "Browser Codex auth access token is invalid",
+        )),
+    }
+}
+
+fn authorize_web_config_origin(headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(());
+    };
+    let origin = origin
+        .to_str()
+        .map_err(|_| ApiError::forbidden("web config origin is not allowed"))?;
+    let allowed = matches!(
+        origin,
+        "https://voice.heliasar.com" | "http://localhost:5173" | "http://127.0.0.1:5173"
+    );
+    if allowed {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("web config origin is not allowed"))
+    }
 }
 
 #[derive(Debug, Deserialize)]

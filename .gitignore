@@ -8,3 +8,4 @@ crates/codex-voice-app/gen/
 
 # Claude Code session state (worktrees etc.)
 /.claude/
+/.playwright-cli/

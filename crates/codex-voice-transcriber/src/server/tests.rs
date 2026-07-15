@@ -9,6 +9,7 @@ use super::*;
 use crate::test_support::*;
 use axum::body;
 use axum::http::{header, StatusCode};
+use base64::Engine;
 use codex_voice_core::{SpeechFormat, TranscriptionClient};
 use codex_voice_tts::config::SpeechPrepProviderKind;
 use std::collections::HashMap;
@@ -371,6 +372,160 @@ async fn web_config_is_public_and_exports_browser_tts_config() {
     );
 }
 
+#[tokio::test]
+async fn web_config_rejects_untrusted_browser_origins() {
+    let app = service_router(test_state_with_web_tts_config(1024));
+    let rejected = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web/config")
+                .header(header::ORIGIN, "https://attacker.example")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    let rejected_body = body::to_bytes(rejected.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    assert!(!String::from_utf8_lossy(&rejected_body).contains("apiKey"));
+
+    for origin in [
+        "https://voice.heliasar.com",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/web/config")
+                    .header(header::ORIGIN, origin)
+                    .body(body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+        assert_eq!(response.status(), StatusCode::OK, "origin {origin}");
+    }
+
+    let unrelated_loopback = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web/config")
+                .header(header::ORIGIN, "http://127.0.0.1:3846")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+    assert_eq!(unrelated_loopback.status(), StatusCode::FORBIDDEN);
+}
+
+fn test_access_token(exp: u64) -> String {
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&serde_json::json!({ "exp": exp })).unwrap());
+    format!("header.{payload}.signature")
+}
+
+#[tokio::test]
+async fn web_codex_auth_sync_updates_only_same_account_non_older_credentials() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let auth_file = temp.path().join("auth.json");
+    let current_access = test_access_token(100);
+    std::fs::write(
+        &auth_file,
+        serde_json::to_string(&serde_json::json!({"tokens": {
+            "access_token": current_access,
+            "refresh_token": "current-refresh",
+            "account_id": "account-id"
+        }}))
+        .unwrap(),
+    )
+    .expect("auth written");
+    let mut config = sample_tts_config();
+    let prep = config.speech_prep.as_mut().expect("speech prep exists");
+    prep.provider = SpeechPrepProviderKind::Codex;
+    prep.api_key = None;
+    prep.auth_file = Some(auth_file.clone());
+    let app = service_router(test_state_with_speech_and_config(1024, Some(config)));
+
+    let newer_access = test_access_token(200);
+    let updated = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/web/codex-auth")
+                .header(header::ORIGIN, "https://voice.heliasar.com")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body::Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "accessToken": newer_access,
+                        "refreshToken": "rotated-refresh",
+                        "accountId": "account-id"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::NO_CONTENT);
+    let synced = codex_voice_tts::read_codex_auth_snapshot(&auth_file).unwrap();
+    assert_eq!(synced.refresh_token, "rotated-refresh");
+    assert_eq!(synced.access_token, newer_access);
+
+    for (access_token, account_id) in [
+        (test_access_token(100), "account-id"),
+        (test_access_token(300), "different-account"),
+    ] {
+        let rejected = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/web/codex-auth")
+                    .header(header::ORIGIN, "https://voice.heliasar.com")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body::Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "accessToken": access_token,
+                            "refreshToken": "rejected-refresh",
+                            "accountId": account_id
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    }
+    assert_eq!(
+        codex_voice_tts::read_codex_auth_snapshot(&auth_file)
+            .unwrap()
+            .refresh_token,
+        "rotated-refresh"
+    );
+
+    let untrusted = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/web/codex-auth")
+                .header(header::ORIGIN, "https://attacker.example")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body::Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(untrusted.status(), StatusCode::FORBIDDEN);
+}
+
 #[test]
 fn browser_config_exports_codex_speech_prep_with_cached_auth() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -394,7 +549,7 @@ fn browser_config_exports_codex_speech_prep_with_cached_auth() {
     let json = serde_json::to_value(browser_config).expect("serializes");
 
     assert_eq!(json["speechPrep"]["provider"], "codex");
-    assert_eq!(json["speechPrep"]["browserSupported"], false);
+    assert_eq!(json["speechPrep"]["browserSupported"], true);
     assert_eq!(json["speechPrep"]["browserFallback"]["provider"], "google");
     assert_eq!(
         json["speechPrep"]["browserFallback"]["apiKey"],
@@ -408,13 +563,80 @@ fn browser_config_exports_codex_speech_prep_with_cached_auth() {
         json["speechPrep"]["browserFallback"]["model"],
         "google/gemini-3.5-flash"
     );
+    assert_eq!(json["speechPrep"]["baseUrl"], "/_codex");
     assert_eq!(json["speechPrep"]["model"], "gpt-5.3-codex-spark");
     assert!(json["speechPrep"]["fallbackModels"]
         .as_array()
         .is_some_and(Vec::is_empty));
     assert_eq!(json["speechPrep"]["reasoningEffort"], "medium");
-    assert!(json["speechPrep"].get("codexAuth").is_none());
+    assert_eq!(
+        json["speechPrep"]["codexAuth"]["accessToken"],
+        "access-token"
+    );
+    assert_eq!(
+        json["speechPrep"]["codexAuth"]["refreshToken"],
+        "refresh-token"
+    );
+    assert_eq!(json["speechPrep"]["codexAuth"]["accountId"], "account-id");
+    assert_eq!(
+        json["speechPrep"]["codexAuth"]["tokenUrl"],
+        "https://auth.openai.com/oauth/token"
+    );
     assert!(json["speechPrep"].get("apiKey").is_none());
+}
+
+#[tokio::test]
+async fn browser_config_refreshes_codex_auth_from_disk() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let auth_file = temp.path().join("auth.json");
+    std::fs::write(
+        &auth_file,
+        r#"{"tokens":{"access_token":"old-access","refresh_token":"old-refresh","account_id":"account-id"}}"#,
+    )
+    .expect("auth written");
+    let mut config = sample_tts_config();
+    let prep = config.speech_prep.as_mut().expect("speech prep exists");
+    prep.provider = SpeechPrepProviderKind::Codex;
+    prep.api_key = None;
+    prep.auth_file = Some(auth_file.clone());
+    let browser_config = BrowserTtsConfig::from_resolved(&config);
+
+    std::fs::write(
+        &auth_file,
+        r#"{"tokens":{"access_token":"new-access","refresh_token":"new-refresh","account_id":"account-id"}}"#,
+    )
+    .expect("rotated auth written");
+    let json = serde_json::to_value(browser_config.refresh_codex_auth().await)
+        .expect("browser config serializes");
+
+    assert_eq!(json["speechPrep"]["codexAuth"]["accessToken"], "new-access");
+    assert_eq!(
+        json["speechPrep"]["codexAuth"]["refreshToken"],
+        "new-refresh"
+    );
+}
+
+#[test]
+fn browser_config_omits_incomplete_codex_auth() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let auth_file = temp.path().join("auth.json");
+    std::fs::write(
+        &auth_file,
+        r#"{"tokens":{"access_token":"access-token","account_id":"account-id"}}"#,
+    )
+    .expect("auth written");
+    let mut config = sample_tts_config();
+    let prep = config.speech_prep.as_mut().expect("speech prep exists");
+    prep.provider = SpeechPrepProviderKind::Codex;
+    prep.api_key = None;
+    prep.auth_file = Some(auth_file);
+    prep.base_url = "https://chatgpt.com/backend-api/codex".to_string();
+
+    let json = serde_json::to_value(BrowserTtsConfig::from_resolved(&config))
+        .expect("browser config serializes");
+
+    assert_eq!(json["speechPrep"]["browserSupported"], false);
+    assert!(json["speechPrep"].get("codexAuth").is_none());
 }
 
 #[tokio::test]

@@ -26,9 +26,14 @@ import {
 } from "./audio/streaming.ts";
 import { audioBlobFromBase64 } from "./audio/wav.ts";
 import type { BrowserPersonaConfig, BrowserTtsConfig } from "./config.ts";
-import { saveCachedConfig } from "./config.ts";
+import { saveCachedConfig, syncCodexAuthToServer } from "./config.ts";
 import { resolvePersona, resolveProvider, selectedPersonaName } from "./personas.ts";
-import { prepareForProvider, type PrepResult, type PrepSettings } from "./prep/index.ts";
+import {
+  prepareForProvider,
+  type EffectiveSpeechPrep,
+  type PrepResult,
+  type PrepSettings,
+} from "./prep/index.ts";
 import type { WebSettings } from "./settings.ts";
 import {
   clearPendingGeneration,
@@ -150,7 +155,12 @@ export function isRetryable(error: StatusError | null | undefined): boolean {
 
 /** Whether backend job creation failed because the backend is unreachable. */
 export function isBackendUnavailable(error: StatusError | null | undefined): boolean {
-  return error?.name === "TypeError" && !error.status;
+  return (
+    (error?.name === "TypeError" && !error.status) ||
+    error?.status === 502 ||
+    error?.status === 503 ||
+    error?.status === 504
+  );
 }
 
 /** The other provider. Ports `fallbackProvider`. */
@@ -313,8 +323,12 @@ export class GenerationController {
   ): Promise<SynthesisResult> {
     this.status(0.32, "Preparing");
     const throwIfCancelled = (): void => this.ensureNotCancelled(signal, runId);
-    const onCodexAuthRefreshed = (): void => {
-      if (config) saveCachedConfig(config);
+    const onCodexAuthRefreshed = (refreshed: EffectiveSpeechPrep): void => {
+      if (config.speechPrep && refreshed?.codexAuth) {
+        config.speechPrep.codexAuth = refreshed.codexAuth;
+      }
+      saveCachedConfig(config);
+      void syncCodexAuthToServer(config, signal);
     };
     const forcePerformanceTags = canStreamProvider(config, provider, persona, settings.model);
     let prep = await prepareForProvider(
@@ -494,8 +508,15 @@ export class GenerationController {
   ): Promise<SynthesisResult> {
     this.status(0.35, jobId ? "Resuming" : "Preparing");
     this.ensureNotCancelled(signal, runId);
-    const activeJobId =
-      jobId || (await createWebSpeechJob(input, signal, serverJobOptions(this.config, settings)));
+    let activeJobId = jobId;
+    if (!activeJobId) {
+      await syncCodexAuthToServer(this.config, signal);
+      activeJobId = await createWebSpeechJob(
+        input,
+        signal,
+        serverJobOptions(this.config, settings),
+      );
+    }
     this.activeServerJobId = activeJobId;
     savePendingGeneration(input, activeJobId, owner);
     const result = await waitForWebSpeechJob(activeJobId, {
@@ -517,7 +538,8 @@ export class GenerationController {
    *
    * Decision tree: resume a server job when `resumeJobId` is set; otherwise
    * use the backend. Browser-direct generation is an availability fallback
-   * only when backend job creation fails at the network boundary.
+   * only when backend job creation fails at the network boundary or through a
+   * gateway/service-unavailable response before a job exists.
    */
   async generate(input: string, resumeJobId: string | null = null): Promise<void> {
     const runSettings: GenerationSettingsSnapshot = Object.freeze({ ...this.settings });

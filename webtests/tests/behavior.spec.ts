@@ -86,6 +86,193 @@ async function installSpeechHarness(page: Page, complete = true): Promise<Speech
 
 test.use({ serviceWorkers: 'block' });
 
+test.describe('offline Codex generation', () => {
+  test.use({ serviceWorkers: 'allow' });
+
+  test('cached Codex auth survives a service-worker reload and powers direct generation', async ({
+    context,
+    page,
+  }) => {
+    const expiredToken = `header.${Buffer.from(JSON.stringify({ exp: 1 })).toString('base64url')}.sig`;
+    const freshToken = `header.${Buffer.from(
+      JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+    ).toString('base64url')}.sig`;
+    const config = {
+      version: 1,
+      defaultProvider: 'google',
+      maxTextLength: 5000,
+      providers: {
+        google: {
+          apiKey: 'google-test-key',
+          baseUrl: 'https://google.example.test/v1beta',
+          voice: 'Kore',
+          model: 'gemini-test-tts',
+          fallbackModels: [],
+          streaming: {
+            transport: 'interactions-stream',
+            supportedModels: [],
+            outputFormat: 'pcm_24000',
+            sampleRate: 24000,
+            channels: 1,
+          },
+          inlineAudioTags: true,
+          maxTextLength: 5000,
+          timeoutMs: 30000,
+          constraints: [],
+        },
+      },
+      speechPrep: {
+        provider: 'codex',
+        mode: 'performance-tags',
+        strategies: { google: 'inline-tags', elevenlabs: 'inline-tags', default: 'inline-tags' },
+        tagPalette: ['softly'],
+        capPerformanceTags: true,
+        browserSupported: true,
+        baseUrl: '/_codex',
+        model: 'gpt-test',
+        fallbackModels: [],
+        threshold: 0,
+        maxInputLength: 5000,
+        maxLength: 5000,
+        attemptTimeoutMs: 5000,
+        timeoutMs: 10000,
+        codexAuth: {
+          accessToken: expiredToken,
+          refreshToken: 'initial-refresh',
+          accountId: 'account-id',
+          tokenUrl: 'https://auth.example.test/oauth/token',
+          clientId: 'client-id',
+        },
+      },
+      personas: {},
+    };
+    let configOnline = true;
+    let syncedAuth: { refreshToken?: string } | null = null;
+    const requests: string[] = [];
+    await page.route('**/*', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      requests.push(`${request.method()} ${url.pathname}`);
+      if (url.pathname === '/web/config') {
+        return configOnline
+          ? route.fulfill({
+              status: 200,
+              contentType: 'application/json',
+              body: JSON.stringify(config),
+            })
+          : route.fulfill({ status: 502, body: 'Bad Gateway' });
+      }
+      if (url.pathname === '/web/codex-auth') {
+        if (!configOnline) return route.fulfill({ status: 502, body: 'Bad Gateway' });
+        syncedAuth = request.postDataJSON() as { refreshToken?: string };
+        return route.fulfill({ status: 204, body: '' });
+      }
+      if (url.pathname === '/web/speech-jobs') {
+        return route.fulfill({ status: 502, body: 'Bad Gateway' });
+      }
+      if (url.hostname === 'auth.example.test') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            access_token: freshToken,
+            refresh_token: 'rotated-refresh',
+            account_id: 'account-id',
+          }),
+        });
+      }
+      if (url.pathname === '/_codex/responses') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/event-stream',
+          body:
+            'data: {"type":"response.output_text.delta","delta":"[softly] Offline hello"}\n\n' +
+            'data: {"type":"response.completed","response":{}}\n\n' +
+            'data: [DONE]\n\n',
+        });
+      }
+      if (url.hostname === 'google.example.test') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [{ inlineData: { data: testWavBase64(), mimeType: 'audio/wav' } }],
+                },
+              },
+            ],
+          }),
+        });
+      }
+      return route.continue();
+    });
+
+    await page.goto('/web?offline-codex=1');
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            JSON.parse(localStorage.getItem('codex-voice.web.config.v1') || '{}')?.speechPrep
+              ?.codexAuth?.refreshToken,
+        ),
+      )
+      .toBe('initial-refresh');
+
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.reload();
+    await expect
+      .poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null), {
+        timeout: 15_000,
+      })
+      .toBe(true);
+
+    configOnline = false;
+    await context.setOffline(true);
+    await page.reload();
+    await page.locator('#text').fill('Offline hello');
+    await page.locator('#generate').click();
+
+    await expect(page.locator('#download')).toBeEnabled();
+    await expect(page.locator('#error-banner')).toBeHidden();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            JSON.parse(localStorage.getItem('codex-voice.web.config.v1') || '{}')?.speechPrep
+              ?.codexAuth?.refreshToken,
+        ),
+      )
+      .toBe('rotated-refresh');
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            JSON.parse(localStorage.getItem('codex-voice.web.config.v1') || '{}')?.speechPrep
+              ?.codexAuth?.serverSyncPending,
+        ),
+      )
+      .toBe(true);
+    expect(requests).toContain('POST /_codex/responses');
+    expect(requests.filter((entry) => entry === 'POST /web/speech-jobs')).toHaveLength(1);
+
+    await context.setOffline(false);
+    configOnline = true;
+    await page.reload();
+    await expect.poll(() => syncedAuth?.refreshToken).toBe('rotated-refresh');
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            JSON.parse(localStorage.getItem('codex-voice.web.config.v1') || '{}')?.speechPrep
+              ?.codexAuth?.serverSyncPending,
+        ),
+      )
+      .toBe(false);
+  });
+});
+
 test('mocked generation supports waveform, playback, seeking, download, and restore', async ({
   page,
 }) => {
@@ -196,7 +383,10 @@ test('generation owners are unique across same-origin pages', async ({ page, con
   await page.locator('#generate').click();
   const firstOwner = await expect
     .poll(() =>
-      page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? 'null')?.owner, GENERATION_KEY),
+      page.evaluate(
+        (key) => JSON.parse(localStorage.getItem(key) ?? 'null')?.owner,
+        GENERATION_KEY,
+      ),
     )
     .not.toBeUndefined()
     .then(() =>
@@ -235,7 +425,9 @@ for (const viewport of [
     await page.locator('#settings-toggle').click();
     await page.locator('#generate-on-paste').scrollIntoViewIfNeeded();
     await expect(page.locator('#generate-on-paste')).toBeVisible();
-    await expect.poll(() => page.locator('main').evaluate((main) => main.scrollTop)).toBeGreaterThan(0);
+    await expect
+      .poll(() => page.locator('main').evaluate((main) => main.scrollTop))
+      .toBeGreaterThan(0);
 
     await page.locator('html').evaluate((root) => root.classList.add('keyboard-open'));
     await page.locator('#emotion').scrollIntoViewIfNeeded();

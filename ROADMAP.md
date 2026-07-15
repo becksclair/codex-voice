@@ -58,6 +58,12 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
     built with `bun`). `web/dist` is embedded at build time; `server --web-dist
     <dir>` serves a dist from disk for binary-independent web deploys. Only
     content-hashed `/web/assets/*` is immutable-cached. See `web/README.md`.
+  - **Offline Codex prep 2026-07-15:** the PWA caches refresh-capable Codex
+    auth from `/web/config` and uses Saga's scoped same-origin Responses relay
+    plus direct TTS when backend job creation is unreachable or returns a
+    gateway availability error. Browser-rotated bundles remain pending while
+    offline and synchronize atomically to the canonical auth file after backend
+    recovery without invoking the Codex CLI.
 - [x] Add bounded speech-job admission and cancellation
   - At most three nonterminal jobs, one active synthesis, `429 Retry-After` on overload
   - `DELETE /web/speech-jobs/{id}` is idempotent and aborts active work
