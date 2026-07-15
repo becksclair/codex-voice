@@ -189,10 +189,10 @@ function MainWindowApp() {
         />
         <GenerateBar
           generating={generation.generating}
+          generationActive={generation.busy}
           progress={generation.progress}
           label={generation.label}
-          generateDisabled={generation.busy}
-          onGenerate={() => void generation.generate()}
+          onGenerate={generation.toggleActive}
           paused={playback.paused}
           playDisabled={playback.playDisabled}
           onTogglePlay={() => void playback.api.togglePlay()}

@@ -10,9 +10,9 @@ const GLASS_ICON_BUTTON =
 
 interface GenerateBarProps {
   generating: boolean;
+  generationActive: boolean;
   progress: number;
   label: string;
-  generateDisabled: boolean;
   onGenerate: () => void;
   paused: boolean;
   playDisabled: boolean;
@@ -32,18 +32,34 @@ export function GenerateBar(props: GenerateBarProps) {
     "relative flex h-11 min-h-11 items-center justify-center overflow-hidden rounded-[18px] border-0 bg-[var(--accent)] px-2.5 text-[0.98rem] font-bold text-[var(--button-text)] cursor-pointer touch-manipulation shadow-[var(--button-shadow)] disabled:cursor-not-allowed disabled:opacity-[0.55]";
 
   return (
-    <div className="buttons grid grid-cols-[minmax(0,1fr)_20px_repeat(3,44px)] items-center gap-x-3 gap-y-2">
+    <div className="buttons grid grid-cols-[minmax(0,1fr)_20px_repeat(3,44px)] items-center gap-x-3 gap-y-2 max-[420px]:grid-cols-[minmax(0,1fr)_repeat(3,44px)]">
       <button
         id="generate"
         type="button"
         className={props.generating ? `${generateClass} generating` : generateClass}
         style={{ "--generate-progress": props.progress } as CSSProperties}
-        disabled={props.generateDisabled}
+        aria-label={props.generationActive ? "Stop generation" : undefined}
         onClick={props.onGenerate}
       >
-        <span className="relative z-[1] inline-flex min-w-0 items-center justify-center gap-2">
-          <span className="spinner" aria-hidden="true"></span>
-          <span id="generate-label">{props.label}</span>
+        <span className="relative z-[1] inline-flex w-full min-w-0 items-center justify-center">
+          <span className="spinner absolute left-0 max-[420px]:-left-2.5" aria-hidden="true"></span>
+          <span
+            id="generate-label"
+            className={
+              props.generationActive
+                ? "flex flex-col text-center leading-[1.05] whitespace-nowrap max-[420px]:text-[0.82rem]"
+                : ""
+            }
+          >
+            {props.generationActive ? (
+              <>
+                <span>Generating...</span>
+                <span>Tap to Stop</span>
+              </>
+            ) : (
+              props.label
+            )}
+          </span>
         </span>
         <span
           className="generate-progress absolute right-0 bottom-0 left-0 h-[3px] overflow-hidden bg-[var(--progress-track)]"
@@ -55,7 +71,7 @@ export function GenerateBar(props: GenerateBarProps) {
       <button
         id="play"
         type="button"
-        className={`${GLASS_ICON_BUTTON} col-start-3`}
+        className={`${GLASS_ICON_BUTTON} col-start-3 max-[420px]:col-start-2`}
         disabled={props.playDisabled}
         aria-label={props.paused ? "Play" : "Pause"}
         onClick={props.onTogglePlay}

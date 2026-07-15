@@ -4,9 +4,9 @@ import { GenerateBar } from "./GenerateBar.tsx";
 
 const baseProps = {
   generating: false,
+  generationActive: false,
   progress: 0,
   label: "Generate",
-  generateDisabled: false,
   onGenerate: () => {},
   paused: true,
   playDisabled: true,
@@ -29,14 +29,17 @@ test("generate button reflects the busy/label/progress props", () => {
     <GenerateBar
       {...baseProps}
       generating={true}
-      generateDisabled={true}
+      generationActive={true}
       label="Starting"
       progress={0.08}
     />,
   );
-  expect(generate.disabled).toBe(true);
+  expect(generate.disabled).toBe(false);
   expect(generate.classList.contains("generating")).toBe(true);
-  expect(label.textContent).toBe("Starting");
+  expect(label.children[0]?.textContent).toBe("Generating...");
+  expect(label.children[1]?.textContent).toBe("Tap to Stop");
+  expect(label.classList.contains("text-center")).toBe(true);
+  expect(generate.getAttribute("aria-label")).toBe("Stop generation");
   expect(generate.style.getPropertyValue("--generate-progress")).toBe("0.08");
 });
 

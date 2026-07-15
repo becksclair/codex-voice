@@ -109,6 +109,42 @@ test("generate with empty text surfaces the error banner", () => {
   expect(banner.classList.contains("hidden")).toBe(false);
 });
 
+test("generate button remains enabled and cancels an active generation", async () => {
+  let generationSignal: AbortSignal | undefined;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/web/config") return Promise.reject(new Error("offline"));
+      if (String(input) === "/web/speech-jobs" && init?.method === "POST") {
+        generationSignal = init.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          generationSignal?.addEventListener("abort", () => {
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          });
+        });
+      }
+      return Promise.reject(new Error("offline"));
+    }),
+  );
+
+  render(<App />);
+  const text = document.getElementById("text") as HTMLTextAreaElement;
+  const generate = document.getElementById("generate") as HTMLButtonElement;
+  const label = document.getElementById("generate-label") as HTMLElement;
+  fireEvent.input(text, { target: { value: "Cancel this generation" } });
+  fireEvent.click(generate);
+
+  await waitFor(() => expect(generationSignal).toBeDefined());
+  expect(generate.disabled).toBe(false);
+  expect(label.children[0]?.textContent).toBe("Generating...");
+  expect(label.children[1]?.textContent).toBe("Tap to Stop");
+
+  fireEvent.click(generate);
+
+  expect(generationSignal?.aborted).toBe(true);
+  await waitFor(() => expect(label.textContent).toBe("Generate"));
+});
+
 test("toggling a settings checkbox persists to localStorage", () => {
   render(<App />);
   const emotion = document.getElementById("emotion") as HTMLInputElement;

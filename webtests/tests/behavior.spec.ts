@@ -325,7 +325,12 @@ test('empty paste is a no-op and clear cancels a pending job', async ({ page }) 
   await page.locator('#text').fill('keep this active draft');
   await page.locator('#generate').click();
   await expect.poll(() => harness.inputs.length).toBe(1);
-  await expect(page.locator('#generate')).toBeDisabled();
+  await expect(page.locator('#generate')).toBeEnabled();
+  await expect(page.locator('#generate')).toHaveAttribute('aria-label', 'Stop generation');
+  await expect(page.locator('#generate-label').locator('span')).toHaveText([
+    'Generating...',
+    'Tap to Stop',
+  ]);
 
   await page.locator('#settings-toggle').click();
   for (const id of ['provider', 'voice', 'model', 'emotion', 'summarize']) {
@@ -337,7 +342,7 @@ test('empty paste is a no-op and clear cancels a pending job', async ({ page }) 
   await page.evaluate(() => navigator.clipboard.writeText(''));
   await page.locator('#paste').click();
   await expect(page.locator('#text')).toHaveValue('keep this active draft');
-  await expect(page.locator('#generate')).toBeDisabled();
+  await expect(page.locator('#generate')).toBeEnabled();
 
   await page.locator('#clear').click();
   await expect(page.locator('#text')).toHaveValue('');
@@ -348,6 +353,50 @@ test('empty paste is a no-op and clear cancels a pending job', async ({ page }) 
     .toBeNull();
   await expect(page.locator('#play')).toBeDisabled();
   await expect(page.locator('#download')).toBeDisabled();
+});
+
+test('generate button cancels a pending job', async ({ page }) => {
+  const harness = await installSpeechHarness(page, false);
+  await page.setViewportSize({ width: 320, height: 568 });
+  await page.goto('/web?pending-audio=1');
+  await page.locator('#text').fill('stop this active draft');
+  await page.locator('#generate').click();
+  await expect.poll(() => harness.inputs.length).toBe(1);
+  await expect(page.locator('#generate')).toHaveAttribute('aria-label', 'Stop generation');
+  const buttonBox = await page.locator('#generate').boundingBox();
+  const labelBox = await page.locator('#generate-label').boundingBox();
+  const spinnerBox = await page.locator('#generate .spinner').boundingBox();
+  expect(buttonBox).not.toBeNull();
+  expect(labelBox).not.toBeNull();
+  expect(spinnerBox).not.toBeNull();
+  expect(Math.abs(labelBox!.x + labelBox!.width / 2 - (buttonBox!.x + buttonBox!.width / 2))).toBeLessThan(1);
+  expect(labelBox!.x).toBeGreaterThanOrEqual(buttonBox!.x);
+  expect(labelBox!.x + labelBox!.width).toBeLessThanOrEqual(buttonBox!.x + buttonBox!.width);
+  expect(spinnerBox!.x + spinnerBox!.width).toBeLessThanOrEqual(labelBox!.x);
+
+  await page.locator('#generate').click();
+
+  await expect.poll(() => harness.deleted).toContain('job-1');
+  await expect(page.locator('#generate-label')).toHaveText('Generate');
+  await expect(page.locator('#text')).toHaveValue('stop this active draft');
+  await expect
+    .poll(() => page.evaluate((key) => localStorage.getItem(key), GENERATION_KEY))
+    .toBeNull();
+});
+
+test('two generate clicks in one event turn cancel before generation starts', async ({ page }) => {
+  const harness = await installSpeechHarness(page, false);
+  await page.goto('/web?rapid-cancel=1');
+  await page.locator('#text').fill('cancel before the lazy pipeline starts');
+
+  await page.locator('#generate').evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+
+  await expect(page.locator('#generate-label')).toHaveText('Generate');
+  await page.waitForTimeout(50);
+  expect(harness.inputs).toEqual([]);
 });
 
 test('a pending server job resumes after reload', async ({ page }) => {

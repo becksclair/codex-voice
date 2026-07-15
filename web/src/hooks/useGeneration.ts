@@ -28,7 +28,7 @@ interface UseGenerationOptions {
 
 /** The public surface of {@link useGeneration}. */
 export interface GenerationState {
-  /** Whether the generate button is busy (disabled) — mirrors `generate.disabled`. */
+  /** Whether generation is active and the generate button should cancel it. */
   busy: boolean;
   /** Whether the spinner/`.generating` treatment is showing. */
   generating: boolean;
@@ -38,6 +38,8 @@ export interface GenerationState {
   label: string;
   /** Generate the supplied text, or the current draft when omitted. */
   generate: (inputOverride?: string) => Promise<boolean>;
+  /** Start generation from the button, or synchronously cancel a pending/active run. */
+  toggleActive: () => void;
   /** Cancel any active run (used by the clear button). */
   cancelActive: () => void;
 }
@@ -266,15 +268,38 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
   const cancelActive = (): void => {
     epochRef.current += 1;
     const controller = controllerRef.current;
-    if (controller?.isActive) {
-      controller.cancel();
-      activeRef.current = false;
-      setBusy(false);
-      setGenerating(false);
-      setLabel("Generate");
-      setProgress(0);
-    }
+    if (controller?.isActive) controller.cancel();
+    activeRef.current = false;
+    setBusy(false);
+    setGenerating(false);
+    setLabel("Generate");
+    setProgress(0);
   };
 
-  return { busy, generating, progress, label, generate, cancelActive };
+  const toggleActive = (): void => {
+    if (activeRef.current) {
+      cancelActive();
+      return;
+    }
+    const input = (textRef.current?.value ?? "").trim();
+    if (!input) {
+      showError("Enter some text first.");
+      return;
+    }
+    // Reserve the active state synchronously so two clicks in one event turn
+    // cannot cancel the first run and immediately start a replacement while
+    // React is still waiting to commit `busy`.
+    activeRef.current = true;
+    setBusy(true);
+    setGenerating(true);
+    setLabel("Starting");
+    setProgress(0.08);
+    void generate(input)
+      .catch((error: Error) => showError(error.message || "TTS failed."))
+      .finally(() => {
+        if (!controllerRef.current?.isActive && activeRef.current) cancelActive();
+      });
+  };
+
+  return { busy, generating, progress, label, generate, toggleActive, cancelActive };
 }
