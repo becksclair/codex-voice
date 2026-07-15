@@ -491,8 +491,23 @@ pub(crate) async fn web_config(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct WebSpeechRequest {
     input: String,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    voice: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    speech_prep_enabled: Option<bool>,
+    #[serde(default)]
+    speech_prep_model: Option<String>,
+    #[serde(default)]
+    speech_prep_reasoning_effort: Option<String>,
+    #[serde(default)]
+    speech_prep_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -502,6 +517,12 @@ pub(crate) struct WebSpeechResponse {
     pub(crate) audio_base64: String,
     pub(crate) mime_type: String,
     pub(crate) format: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WebSpeechPrepResponse {
+    pub(crate) input: String,
+    pub(crate) input_changed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -552,9 +573,30 @@ pub(crate) async fn web_speech(
         .clone()
         .try_acquire_owned()
         .map_err(|_| ApiError::too_many_requests("TTS service is busy; try again shortly"))?;
-    synthesize_web_speech(speech_client, body.input)
+    synthesize_web_speech(speech_client, body).await.map(Json)
+}
+
+pub(crate) async fn web_speech_prep(
+    State(state): State<ServiceState>,
+    Json(body): Json<WebSpeechRequest>,
+) -> Result<Json<WebSpeechPrepResponse>, ApiError> {
+    let speech_client = web_speech_client(&state)?;
+    let _worker = state
+        .web_speech_jobs
+        .workers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::too_many_requests("TTS service is busy; try again shortly"))?;
+    let request = web_speech_request(body)?;
+    let original = request.input.clone();
+    let input = speech_client
+        .prepare(&request)
         .await
-        .map(Json)
+        .map_err(ApiError::from_speech_error)?;
+    Ok(Json(WebSpeechPrepResponse {
+        input_changed: input != original,
+        input,
+    }))
 }
 
 pub(crate) async fn web_speech_job_create(
@@ -562,8 +604,7 @@ pub(crate) async fn web_speech_job_create(
     Json(body): Json<WebSpeechRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let speech_client = web_speech_client(&state)?;
-    let input = body.input;
-    if input.trim().is_empty() {
+    if body.input.trim().is_empty() {
         return Err(ApiError::bad_request("input is required"));
     }
 
@@ -605,7 +646,7 @@ pub(crate) async fn web_speech_job_create(
             record.state = WebSpeechJobState::Pending { phase: "running" };
             record.updated_at = Instant::now();
         }
-        let result = synthesize_web_speech(speech_client, input).await;
+        let result = synthesize_web_speech(speech_client, body).await;
         let next_state = match result {
             Ok(response) => WebSpeechJobState::Complete(Arc::new(response)),
             Err(error) => WebSpeechJobState::Failed(WebSpeechJobError::from(error)),
@@ -706,20 +747,9 @@ pub(crate) async fn web_speech_job_delete(
 
 async fn synthesize_web_speech(
     speech_client: Arc<dyn SpeechClient>,
-    input: String,
+    body: WebSpeechRequest,
 ) -> Result<WebSpeechResponse, ApiError> {
-    if input.trim().is_empty() {
-        return Err(ApiError::bad_request("input is required"));
-    }
-
-    let request = SpeechRequest {
-        input,
-        model_hint: "gpt-4o-mini-tts".to_string(),
-        voice_hint: None,
-        instructions: None,
-        format: SpeechFormat::Wav,
-        speed: None,
-    };
+    let request = web_speech_request(body)?;
 
     let original_input = request.input.clone();
     let synthesized = speech_client
@@ -738,6 +768,25 @@ async fn synthesize_web_speech(
         audio_base64: base64::engine::general_purpose::STANDARD.encode(&synthesized.bytes),
         mime_type: synthesized.mime_type,
         format: synthesized.format.to_openai().to_string(),
+    })
+}
+
+fn web_speech_request(body: WebSpeechRequest) -> Result<SpeechRequest, ApiError> {
+    if body.input.trim().is_empty() {
+        return Err(ApiError::bad_request("input is required"));
+    }
+    Ok(SpeechRequest {
+        input: body.input,
+        provider_hint: body.provider,
+        model_hint: body.model.unwrap_or_else(|| "gpt-4o-mini-tts".to_string()),
+        voice_hint: body.voice,
+        speech_prep_enabled: body.speech_prep_enabled,
+        speech_prep_model_hint: body.speech_prep_model,
+        speech_prep_reasoning_effort: body.speech_prep_reasoning_effort,
+        speech_prep_timeout_ms: body.speech_prep_timeout_ms,
+        instructions: None,
+        format: SpeechFormat::Wav,
+        speed: None,
     })
 }
 

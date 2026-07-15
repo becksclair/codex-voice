@@ -772,7 +772,7 @@ async fn web_speech_jobs_complete_after_create() {
         .clone()
         .oneshot(speech_request(
             "/web/speech-jobs",
-            r#"{"input":"hello from background"}"#,
+            r#"{"input":"hello from background","provider":"elevenlabs","voice":"sky","model":"eleven_v3","speechPrepEnabled":false}"#,
             None,
         ))
         .await
@@ -817,6 +817,41 @@ async fn web_speech_jobs_complete_after_create() {
     let seen = speech.seen.lock().expect("fake speech lock");
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].input, "hello from background");
+    assert_eq!(seen[0].provider_hint.as_deref(), Some("elevenlabs"));
+    assert_eq!(seen[0].voice_hint.as_deref(), Some("sky"));
+    assert_eq!(seen[0].model_hint, "eleven_v3");
+    assert_eq!(seen[0].speech_prep_enabled, Some(false));
+}
+
+#[tokio::test]
+async fn web_speech_prep_returns_enriched_text_without_synthesis() {
+    let speech = Arc::new(FakeSpeechBackend {
+        prepared_input: Some("[fearful] hello from prep".to_string()),
+        ..Default::default()
+    });
+    let app = service_router(test_state_with_speech_backend(1024, Some(speech.clone())));
+
+    let response = app
+        .oneshot(speech_request(
+            "/web/speech-prep",
+            r#"{"input":"hello from prep","provider":"google","speechPrepEnabled":true}"#,
+            None,
+        ))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json response");
+    assert_eq!(json["input"], "[fearful] hello from prep");
+    assert_eq!(json["input_changed"], true);
+    let seen = speech.seen.lock().expect("fake speech lock");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].input, "hello from prep");
+    assert_eq!(seen[0].provider_hint.as_deref(), Some("google"));
+    assert_eq!(seen[0].speech_prep_enabled, Some(true));
 }
 
 #[test]

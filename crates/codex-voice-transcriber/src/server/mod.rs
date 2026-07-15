@@ -39,7 +39,7 @@ use speech::{speech, watch_tts_config};
 use transcribe::transcribe;
 use web::{
     web_config, web_speech, web_speech_job_create, web_speech_job_delete, web_speech_job_status,
-    WebSpeechJobManager, WebSpeechJobStore,
+    web_speech_prep, WebSpeechJobManager, WebSpeechJobStore,
 };
 use web_assets::{legacy_service_worker, serve_web_asset, serve_web_index};
 
@@ -259,6 +259,8 @@ fn service_router(state: ServiceState) -> Router {
     let transcribe_routes = post(transcribe);
     let speech_routes = post(speech).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
     let web_speech_routes = post(web_speech).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
+    let web_speech_prep_routes =
+        post(web_speech_prep).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
     let web_speech_job_routes =
         post(web_speech_job_create).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
 
@@ -274,6 +276,7 @@ fn service_router(state: ServiceState) -> Router {
         )
         .route("/web-sw.js", get(legacy_service_worker))
         .route("/web/speech", web_speech_routes)
+        .route("/web/speech-prep", web_speech_prep_routes)
         .route("/web/speech-jobs", web_speech_job_routes)
         .route(
             "/web/speech-jobs/{id}",

@@ -40,6 +40,7 @@ import {
   shortenMinOutputChars,
 } from "./prompts.ts";
 import {
+  bracketTags,
   fallbackPerformanceTags,
   performanceTagsAreValid,
   repairBareLeadingPerformanceCue,
@@ -173,6 +174,16 @@ export async function prepareForProvider(
       elapsedMs: elapsedMs(startedAt),
     });
   };
+  const fallbackOrPassThrough = (message: string): PrepResult =>
+    localTagFallback(message) ||
+    remember({
+      input,
+      instructions: null,
+      changed: false,
+      error: message,
+      strategy,
+      elapsedMs: elapsedMs(startedAt),
+    });
 
   try {
     for (const model of speechPrepModels(activePrep)) {
@@ -202,28 +213,14 @@ export async function prepareForProvider(
           lastError = error;
           console.warn(error.message);
           if (speechPrepErrorIsRetryable(error)) continue;
-          return remember({
-            input,
-            instructions: null,
-            changed: false,
-            error: error.message,
-            strategy,
-            elapsedMs: elapsedMs(startedAt),
-          });
+          return fallbackOrPassThrough(error.message);
         }
         let prepared =
           activePrep.provider === "codex"
             ? parseCodexSse(await response.text()).trim()
             : extractTextOutput(await response.json()).trim();
         if (!prepared) {
-          return remember({
-            input,
-            instructions: null,
-            changed: false,
-            error: "Emotion prep returned no text.",
-            strategy,
-            elapsedMs: elapsedMs(startedAt),
-          });
+          return fallbackOrPassThrough("Emotion prep returned no text.");
         }
         if (activePrep.mode === "performance-tags" && strategy === "inline-tags") {
           prepared = repairBareLeadingPerformanceCue(input, prepared, activePrep);
@@ -233,28 +230,16 @@ export async function prepareForProvider(
           strategy === "inline-tags" &&
           Array.from(prepared).length > activePrep.maxLength
         ) {
-          return remember({
-            input,
-            instructions: null,
-            changed: false,
-            error: "Emotion prep returned text above the configured limit.",
-            strategy,
-            elapsedMs: elapsedMs(startedAt),
-          });
+          return fallbackOrPassThrough("Emotion prep returned text above the configured limit.");
         }
         if (
           activePrep.mode === "performance-tags" &&
           strategy === "inline-tags" &&
           !performanceTagsAreValid(input, prepared)
         ) {
-          return remember({
-            input,
-            instructions: null,
-            changed: false,
-            error: "Emotion prep changed the text too much, so it was ignored.",
-            strategy,
-            elapsedMs: elapsedMs(startedAt),
-          });
+          return fallbackOrPassThrough(
+            "Emotion prep changed the text too much, so local performance tags were used.",
+          );
         }
         if (
           activePrep.mode === "performance-tags" &&
@@ -298,6 +283,20 @@ export async function prepareForProvider(
             elapsedMs: elapsedMs(startedAt),
           });
         }
+        if (activePrep.mode === "performance-tags" && strategy === "inline-tags") {
+          const local = fallbackPerformanceTags(input, activePrep, strategy);
+          const remoteTagCount = bracketTags(output).length;
+          if (local && remoteTagCount <= 2 && bracketTags(local).length > remoteTagCount) {
+            return remember({
+              input: local,
+              instructions: null,
+              changed: true,
+              warning: "Local emotion coverage added cues missed by remote prep.",
+              strategy,
+              elapsedMs: elapsedMs(startedAt),
+            });
+          }
+        }
         return remember({
           input: output,
           instructions: null,
@@ -312,7 +311,7 @@ export async function prepareForProvider(
         }
         lastError = typed;
         if (speechPrepErrorIsRetryable(typed)) continue;
-        throw typed;
+        return fallbackOrPassThrough(typed?.message || "Emotion prep failed.");
       } finally {
         clearTimeout(timer);
         externalSignal?.removeEventListener("abort", onExternalAbort);
@@ -320,7 +319,7 @@ export async function prepareForProvider(
     }
     if (lastError) {
       const fallback = localTagFallback(
-        lastError?.message || "Emotion prep failed, so a local sparse performance tag was used.",
+        lastError?.message || "Emotion prep failed, so local performance tags were used.",
       );
       if (fallback) return fallback;
       return remember({
@@ -333,7 +332,7 @@ export async function prepareForProvider(
       });
     }
     const timeoutFallback = localTagFallback(
-      "Emotion prep timed out, so a local sparse performance tag was used.",
+      "Emotion prep timed out, so local performance tags were used.",
     );
     if (timeoutFallback) return timeoutFallback;
     return remember({

@@ -111,21 +111,65 @@ describe("prepareForProvider — server-only prep", () => {
 });
 
 describe("prepareForProvider — failure handling", () => {
-  it("passes the input through raw on a non-retryable provider error", async () => {
+  it("uses context-local tags on a non-retryable provider error", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => googleTextResponse("nope", 400)),
     );
     const result = await prepareForProvider(
-      baseConfig({}),
+      baseConfig({ tagPalette: ["fearful", "sigh of relief", "laughs"] }),
       "google",
-      "Hello world",
+      "I was terrified. Then I was safe at last. We laughed.",
       null,
       settings,
     );
-    expect(result.input).toBe("Hello world");
-    expect(result.changed).toBe(false);
-    expect(result.error).toContain("Emotion prep failed");
+    expect(result.input).toBe(
+      "[fearful] I was terrified. [sigh of relief] Then I was safe at last. [laughs] We laughed.",
+    );
+    expect(result.changed).toBe(true);
+    expect(result.warning).toContain("Emotion prep failed");
+  });
+
+  it("prefers broader local transition coverage over an unchanged remote result", async () => {
+    const input = "I was terrified. Then I was safe at last. We laughed.";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => googleTextResponse(input)),
+    );
+
+    const result = await prepareForProvider(
+      baseConfig({ tagPalette: ["fearful", "sigh of relief", "laughs"] }),
+      "google",
+      input,
+      null,
+      settings,
+    );
+
+    expect(result.input).toBe(
+      "[fearful] I was terrified. [sigh of relief] Then I was safe at last. [laughs] We laughed.",
+    );
+    expect(result.warning).toContain("coverage");
+  });
+
+  it("keeps a successful model result once it has more than two tags", async () => {
+    const input = "I was terrified. Then I was safe at last. We laughed. I was terrified again.";
+    const remote =
+      "[fearful] I was terrified. [sigh of relief] Then I was safe at last. [laughs] We laughed. I was terrified again.";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => googleTextResponse(remote)),
+    );
+
+    const result = await prepareForProvider(
+      baseConfig({ tagPalette: ["fearful", "sigh of relief", "laughs"] }),
+      "google",
+      input,
+      null,
+      settings,
+    );
+
+    expect(result.input).toBe(remote);
+    expect(result.warning).toBeUndefined();
   });
 
   it("uses a local sparse tag when the model retries out", async () => {

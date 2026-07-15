@@ -93,6 +93,17 @@ pub struct FakeSpeechBackend {
 
 #[async_trait::async_trait]
 impl SpeechClient for FakeSpeechBackend {
+    async fn prepare(&self, request: &SpeechRequest) -> SpeechResult<String> {
+        self.seen
+            .lock()
+            .expect("fake speech lock")
+            .push(request.clone());
+        Ok(self
+            .prepared_input
+            .clone()
+            .unwrap_or_else(|| request.input.clone()))
+    }
+
     async fn synthesize(&self, request: &SpeechRequest) -> SpeechResult<SynthesizedSpeech> {
         self.seen
             .lock()

@@ -8,16 +8,6 @@ pub(super) fn validate_performance_tags_output(original: &str, prepared: &str) -
             "speech prep added performance direction without square-bracket tags".into(),
         ));
     }
-    let word_count = words_without_tags(original).len().max(1);
-    let max_tags = word_count.div_ceil(40).clamp(2, 16);
-    if tags.len() > max_tags {
-        return Err(SpeechError::Request(format!(
-            "speech prep returned too many performance tags: {} above max {}",
-            tags.len(),
-            max_tags
-        )));
-    }
-
     let preserve = preservation_ratio(original, prepared);
     let original_words = words_without_tags(original);
     let prepared_words = words_without_tags(prepared);

@@ -50,8 +50,13 @@ impl SpeechFormat {
 #[derive(Debug, Clone)]
 pub struct SpeechRequest {
     pub input: String,
+    pub provider_hint: Option<String>,
     pub model_hint: String,
     pub voice_hint: Option<String>,
+    pub speech_prep_enabled: Option<bool>,
+    pub speech_prep_model_hint: Option<String>,
+    pub speech_prep_reasoning_effort: Option<String>,
+    pub speech_prep_timeout_ms: Option<u64>,
     pub instructions: Option<String>,
     pub format: SpeechFormat,
     pub speed: Option<f32>,
@@ -87,5 +92,9 @@ pub enum SpeechError {
 
 #[async_trait::async_trait]
 pub trait SpeechClient: Send + Sync {
+    async fn prepare(&self, request: &SpeechRequest) -> SpeechResult<String> {
+        Ok(request.input.clone())
+    }
+
     async fn synthesize(&self, request: &SpeechRequest) -> SpeechResult<SynthesizedSpeech>;
 }

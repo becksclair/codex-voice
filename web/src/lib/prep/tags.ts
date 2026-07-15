@@ -413,11 +413,24 @@ export function fallbackPerformanceTag(
   );
 }
 
+function sentenceSegments(value: string): Array<{ start: number; end: number }> {
+  const starts: number[] = [];
+  const first = value.search(/\S/);
+  if (first < 0) return [];
+  starts.push(first);
+  const boundaries = /[.!?](?:\s+|$)|\n+/g;
+  for (const match of value.matchAll(boundaries)) {
+    let start = (match.index ?? 0) + match[0].length;
+    while (start < value.length && /\s/.test(value[start])) start += 1;
+    if (start < value.length && starts[starts.length - 1] !== start) starts.push(start);
+  }
+  return starts.map((start, index) => ({ start, end: starts[index + 1] ?? value.length }));
+}
+
 /**
- * Build a single locally-tagged fallback when remote prep fails. Ports
- * `fallbackPerformanceTags` (app.html line ~2340). Returns `null` unless the
- * mode/strategy is inline-tags, the input is untagged, a tag matches, and the
- * result is within the length limit and still valid.
+ * Build context-local fallback tags when remote prep fails. Returns `null`
+ * unless the mode/strategy is inline-tags, the input is untagged, at least one
+ * sentence matches the palette, and the result is within the provider limit.
  */
 export function fallbackPerformanceTags(
   input: string | null | undefined,
@@ -426,9 +439,18 @@ export function fallbackPerformanceTags(
 ): string | null {
   if (prep?.mode !== "performance-tags" || strategy !== "inline-tags") return null;
   if (bracketTags(input).length) return null;
-  const tag = fallbackPerformanceTag(input, prep);
-  if (!tag) return null;
-  const tagged = `[${tag}] ${String(input || "").trimStart()}`;
+  const source = String(input || "");
+  const insertions = sentenceSegments(source)
+    .map(({ start, end }) => ({
+      start,
+      tag: fallbackPerformanceTag(source.slice(start, end), prep),
+    }))
+    .filter((entry): entry is { start: number; tag: string } => Boolean(entry.tag));
+  if (!insertions.length) return null;
+  let tagged = source;
+  for (const { start, tag } of insertions.reverse()) {
+    tagged = `${tagged.slice(0, start)}[${tag}] ${tagged.slice(start)}`;
+  }
   if (Array.from(tagged).length > (prep?.maxLength ?? Infinity)) return null;
   if (!performanceTagsAreValid(input, tagged)) return null;
   return tagged;

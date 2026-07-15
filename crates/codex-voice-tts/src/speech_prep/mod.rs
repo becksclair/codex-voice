@@ -141,10 +141,20 @@ impl SpeechPrepClient {
             return Ok(None);
         }
 
-        let Some(tag) = fallback_performance_tag(text, &self.config.tag_palette) else {
+        let insertions = sentence_ranges(text)
+            .into_iter()
+            .filter_map(|(start, end)| {
+                fallback_performance_tag(&text[start..end], &self.config.tag_palette)
+                    .map(|tag| (start, tag.to_string()))
+            })
+            .collect::<Vec<_>>();
+        if insertions.is_empty() {
             return Ok(None);
-        };
-        let tagged = format!("[{tag}] {}", text.trim_start());
+        }
+        let mut tagged = text.to_string();
+        for (start, tag) in insertions.into_iter().rev() {
+            tagged.insert_str(start, &format!("[{tag}] "));
+        }
         let sanitized = sanitize_for_tts(&tagged, usize::MAX)?;
         if sanitized.chars().count() > self.config.max_length {
             return Ok(None);
@@ -624,6 +634,28 @@ fn fallback_performance_tag<'a>(text: &str, tag_palette: &'a [String]) -> Option
                 && needles.iter().any(|needle| lower.contains(needle))
         })
         .map(|(tag, _)| *tag)
+}
+
+fn sentence_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut starts = Vec::new();
+    let mut after_boundary = true;
+    for (index, ch) in text.char_indices() {
+        if after_boundary && !ch.is_whitespace() {
+            starts.push(index);
+            after_boundary = false;
+        }
+        if matches!(ch, '.' | '!' | '?' | '\n') {
+            after_boundary = true;
+        }
+    }
+    let mut ranges = starts
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect::<Vec<_>>();
+    if let Some(start) = starts.last().copied() {
+        ranges.push((start, text.len()));
+    }
+    ranges
 }
 
 fn repair_leading_bare_cue(original: &str, prepared: &str, tag_palette: &[String]) -> String {
@@ -1377,15 +1409,22 @@ mod tests {
 
         assert!(prompt.contains("Do not summarize"));
         assert!(prompt.contains("Do not rewrite the text"));
-        assert!(
-            prompt.contains("Every performance cue you add must be enclosed in square brackets")
-        );
+        assert!(prompt.contains("Every cue must be enclosed in square brackets"));
         assert!(prompt.contains("[sigh of relief]"));
         assert!(prompt.contains("Return only the tagged text"));
+        assert!(prompt.contains("Do not impose an arbitrary limit on the number of tags"));
+        assert!(prompt.contains("sustain cues through the final emotionally active sentence"));
+        assert!(prompt.contains("coverage guidance, not as a minimum or maximum count"));
+        assert!(prompt.contains("no enclosing quotation marks, code fence, label, or delimiter"));
+        assert!(prompt.contains("reserve sorrow and grief for actual loss"));
+        assert!(!prompt.contains("Use tags sparingly"));
+        assert!(prompt.contains("Follow every closing bracket with exactly one space"));
+        assert!(prompt.contains("Never place tags back-to-back"));
+        assert!(prompt.contains("never between a determiner and its noun"));
     }
 
     #[test]
-    fn fallback_performance_tags_adds_one_valid_local_cue() {
+    fn fallback_performance_tags_adds_context_local_cues_for_each_transition() {
         let config = SpeechPrepConfig {
             provider: SpeechPrepProviderKind::Google,
             mode: SpeechPrepMode::PerformanceTags,
@@ -1396,7 +1435,12 @@ mod tests {
             auth_file: None,
             reasoning_effort: None,
             strategies: crate::config::SpeechPrepStrategies::default(),
-            tag_palette: default_test_palette(),
+            tag_palette: vec![
+                "fearful".to_string(),
+                "sigh of relief".to_string(),
+                "laughs".to_string(),
+                "proud".to_string(),
+            ],
             cap_performance_tags: false,
             threshold: 120,
             max_input_length: 12_000,
@@ -1406,14 +1450,17 @@ mod tests {
         };
         let client = SpeechPrepClient::new(config).unwrap();
         let target = test_target(crate::config::ProviderKind::ElevenLabs, "eleven_v3", true);
-        let input = "Mara felt a tremor in her chest, but she kept reading the letter.";
+        let input = "Mara felt a tremor and feared the worst. Then she smiled, finally safe at last. They laughed and celebrated the victory.";
 
         let tagged = client
             .fallback_performance_tags(input, &target)
             .unwrap()
             .unwrap();
 
-        assert!(tagged.starts_with("[nervous] "));
+        assert_eq!(
+            tagged,
+            "[fearful] Mara felt a tremor and feared the worst. [sigh of relief] Then she smiled, finally safe at last. [laughs] They laughed and celebrated the victory."
+        );
         validate_performance_tags_output(input, &tagged).unwrap();
     }
 
@@ -1592,12 +1639,10 @@ mod tests {
     }
 
     #[test]
-    fn performance_tag_validation_rejects_tag_clutter() {
+    fn performance_tag_validation_has_no_arbitrary_tag_count_limit() {
         let original = "word ".repeat(120);
         let prepared = format!("[softly] {} [tender] [whispers] [sigh] [laughs]", original);
 
-        let error = validate_performance_tags_output(&original, &prepared).unwrap_err();
-
-        assert!(error.to_string().contains("too many performance tags"));
+        validate_performance_tags_output(&original, &prepared).unwrap();
     }
 }

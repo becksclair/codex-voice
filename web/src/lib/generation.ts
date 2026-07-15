@@ -27,7 +27,7 @@ import {
 import { audioBlobFromBase64 } from "./audio/wav.ts";
 import type { BrowserPersonaConfig, BrowserTtsConfig } from "./config.ts";
 import { saveCachedConfig } from "./config.ts";
-import { resolvePersona, resolveProvider } from "./personas.ts";
+import { resolvePersona, resolveProvider, selectedPersonaName } from "./personas.ts";
 import { prepareForProvider, type PrepResult, type PrepSettings } from "./prep/index.ts";
 import type { WebSettings } from "./settings.ts";
 import {
@@ -44,7 +44,12 @@ import { canStreamElevenLabs, resolveElevenLabsModel } from "./synth/elevenlabs.
 import { synthesizeElevenLabs } from "./synth/elevenlabs.ts";
 import { canStreamGoogle, resolveGoogleModel } from "./synth/google.ts";
 import { synthesizeGoogle } from "./synth/google.ts";
-import { cancelWebSpeechJob, createWebSpeechJob, waitForWebSpeechJob } from "./synth/serverJobs.ts";
+import {
+  cancelWebSpeechJob,
+  createWebSpeechJob,
+  waitForWebSpeechJob,
+  type WebSpeechJobOptions,
+} from "./synth/serverJobs.ts";
 import { clamp } from "./util.ts";
 
 /** Error carrying an HTTP-ish status, as thrown across the pipeline. */
@@ -143,6 +148,11 @@ export function isRetryable(error: StatusError | null | undefined): boolean {
   );
 }
 
+/** Whether backend job creation failed because the backend is unreachable. */
+export function isBackendUnavailable(error: StatusError | null | undefined): boolean {
+  return error?.name === "TypeError" && !error.status;
+}
+
 /** The other provider. Ports `fallbackProvider`. */
 export function fallbackProvider(provider: string): string {
   return provider === "google" ? "elevenlabs" : "google";
@@ -167,15 +177,20 @@ export function canGenerateDirectWithConfiguredPrep(
   return Boolean(config?.providers?.google || config?.providers?.elevenlabs);
 }
 
-/** Whether settings match the server defaults (server fallback gate). Ports `settingsMatchServerDefaults`. */
-export function settingsMatchServerDefaults(settings: WebSettings): boolean {
-  return (
-    settings.provider === "auto" &&
-    settings.voice === "default" &&
-    settings.model === "default" &&
-    settings.emotionPreprocessing === true &&
-    settings.summarization === false
-  );
+export function serverJobOptions(
+  config: BrowserTtsConfig | null | undefined,
+  settings: WebSettings,
+): WebSpeechJobOptions {
+  const provider = settings.provider === "auto" ? undefined : settings.provider;
+  const voice = config
+    ? (selectedPersonaName(config, provider ?? null, settings) ?? undefined)
+    : settings.voice.startsWith("persona:")
+      ? settings.voice.slice("persona:".length)
+      : undefined;
+  const model = settings.model === "default" ? undefined : settings.model.split(":", 2)[1];
+  const speechPrepEnabled =
+    config?.speechPrep?.mode === "shorten" ? settings.summarization : settings.emotionPreprocessing;
+  return { provider, voice, model, speechPrepEnabled };
 }
 
 /**
@@ -475,10 +490,12 @@ export class GenerationController {
     signal: AbortSignal | null,
     runId: number,
     owner: string,
+    settings: GenerationSettingsSnapshot,
   ): Promise<SynthesisResult> {
     this.status(0.35, jobId ? "Resuming" : "Preparing");
     this.ensureNotCancelled(signal, runId);
-    const activeJobId = jobId || (await createWebSpeechJob(input, signal));
+    const activeJobId =
+      jobId || (await createWebSpeechJob(input, signal, serverJobOptions(this.config, settings)));
     this.activeServerJobId = activeJobId;
     savePendingGeneration(input, activeJobId, owner);
     const result = await waitForWebSpeechJob(activeJobId, {
@@ -498,10 +515,9 @@ export class GenerationController {
   /**
    * Run a generation. Ports `runGeneration` (app.html line ~3560).
    *
-   * Decision tree: resume a server job when `resumeJobId` is set; else if a
-   * direct-capable config exists, try direct and fall back to the server path
-   * only when settings match the server defaults; else go straight to the
-   * server path.
+   * Decision tree: resume a server job when `resumeJobId` is set; otherwise
+   * use the backend. Browser-direct generation is an availability fallback
+   * only when backend job creation fails at the network boundary.
    */
   async generate(input: string, resumeJobId: string | null = null): Promise<void> {
     const runSettings: GenerationSettingsSnapshot = Object.freeze({ ...this.settings });
@@ -528,19 +544,32 @@ export class GenerationController {
           controller.signal,
           runId,
           runOwner,
+          runSettings,
         );
-      } else if (this.config && canGenerateDirectWithConfiguredPrep(this.config)) {
-        this.status(0.25, "Direct");
-        try {
-          result = await this.generateDirect(input, controller.signal, runId, runSettings);
-        } catch (error) {
-          if (!settingsMatchServerDefaults(runSettings)) throw error;
-          this.status(0.25, "Server");
-          result = await this.generateViaServer(input, null, controller.signal, runId, runOwner);
-        }
       } else {
         this.status(0.25, "Server");
-        result = await this.generateViaServer(input, null, controller.signal, runId, runOwner);
+        try {
+          result = await this.generateViaServer(
+            input,
+            null,
+            controller.signal,
+            runId,
+            runOwner,
+            runSettings,
+          );
+        } catch (error) {
+          const backendFailedBeforeJobCreation = this.activeServerJobId === null;
+          if (
+            !backendFailedBeforeJobCreation ||
+            !isBackendUnavailable(error as StatusError) ||
+            !this.config ||
+            !canGenerateDirectWithConfiguredPrep(this.config)
+          ) {
+            throw error;
+          }
+          this.status(0.25, "Offline direct");
+          result = await this.generateDirect(input, controller.signal, runId, runSettings);
+        }
       }
       this.ensureNotCancelled(controller.signal, runId);
       const currentDraft = this.getDraftText();

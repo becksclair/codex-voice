@@ -181,8 +181,13 @@ pub(crate) async fn speech(
 
     let request = SpeechRequest {
         input: body.input,
+        provider_hint: None,
         model_hint: body.model,
         voice_hint: voice,
+        speech_prep_enabled: None,
+        speech_prep_model_hint: None,
+        speech_prep_reasoning_effort: None,
+        speech_prep_timeout_ms: None,
         instructions: body.instructions,
         format,
         speed: body.speed.or(body.rate),

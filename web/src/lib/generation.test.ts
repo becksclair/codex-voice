@@ -5,8 +5,9 @@ import {
   canGenerateDirectWithConfiguredPrep,
   fallbackProvider,
   GenerationController,
+  isBackendUnavailable,
   isRetryable,
-  settingsMatchServerDefaults,
+  serverJobOptions,
 } from "./generation.ts";
 import { resolveProvider } from "./personas.ts";
 import type { WebSettings } from "./settings.ts";
@@ -122,9 +123,10 @@ describe("pure decision helpers", () => {
     expect(fallbackProvider("elevenlabs")).toBe("google");
   });
 
-  it("settingsMatchServerDefaults gates the server fallback", () => {
-    expect(settingsMatchServerDefaults(DEFAULT_SETTINGS)).toBe(true);
-    expect(settingsMatchServerDefaults({ ...DEFAULT_SETTINGS, provider: "google" })).toBe(false);
+  it("classifies only network failures as backend unavailability", () => {
+    expect(isBackendUnavailable(new TypeError("Failed to fetch"))).toBe(true);
+    expect(isBackendUnavailable(new Error("TTS job failed (503)"))).toBe(false);
+    expect(isBackendUnavailable({ name: "AbortError" } as Error)).toBe(false);
   });
 
   it("resolveProvider honors explicit settings then persona", () => {
@@ -139,11 +141,36 @@ describe("pure decision helpers", () => {
     expect(canGenerateDirectWithConfiguredPrep(directConfig())).toBe(true);
     expect(canGenerateDirectWithConfiguredPrep(null)).toBe(false);
   });
+
+  it("maps PWA selections to backend job overrides", () => {
+    expect(
+      serverJobOptions(directConfig(), {
+        ...DEFAULT_SETTINGS,
+        provider: "elevenlabs",
+        voice: "persona:narrator",
+        model: "elevenlabs:eleven_v3",
+        emotionPreprocessing: false,
+      }),
+    ).toEqual({
+      provider: "elevenlabs",
+      voice: "narrator",
+      model: "eleven_v3",
+      speechPrepEnabled: false,
+    });
+  });
 });
 
 describe("GenerationController — path selection", () => {
   it("chunked direct path: non-streamable google synthesizes via generateContent", async () => {
-    const fetchMock = routedFetch([{ match: ":generateContent", respond: googleAudioResponse }]);
+    const fetchMock = routedFetch([
+      {
+        match: "/web/speech-jobs",
+        respond: () => {
+          throw new TypeError("Failed to fetch");
+        },
+      },
+      { match: ":generateContent", respond: googleAudioResponse },
+    ]);
     vi.stubGlobal("fetch", fetchMock);
     const audio: { blob: Blob; provider: string; streamed?: boolean }[] = [];
     const controller = new GenerationController({
@@ -170,7 +197,9 @@ describe("GenerationController — path selection", () => {
     });
     const urls: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      urls.push(String(input));
+      const url = String(input);
+      if (url === "/web/speech-jobs") throw new TypeError("Failed to fetch");
+      urls.push(url);
       if (urls.length === 1) await firstPending;
       return googleAudioResponse();
     });
@@ -292,10 +321,9 @@ describe("GenerationController — path selection", () => {
     expect(loadPendingGeneration()).toBeNull();
   });
 
-  it("server fallback: direct failure with default settings falls back to server", async () => {
+  it("uses the healthy backend before browser-direct generation", async () => {
     const wavB64 = btoa("RIFF0000WAVEfmt ");
     const fetchMock = routedFetch([
-      { match: ":generateContent", respond: () => new Response("boom", { status: 500 }) },
       {
         match: "/web/speech-jobs/",
         respond: () =>
@@ -321,7 +349,6 @@ describe("GenerationController — path selection", () => {
     vi.stubGlobal("fetch", fetchMock);
     // Google-only config so the retryable failure cannot fall back to elevenlabs.
     const config = directConfig();
-    delete (config.providers as { elevenlabs?: unknown }).elevenlabs;
     const audio: string[] = [];
     const controller = new GenerationController({
       config,
@@ -330,12 +357,62 @@ describe("GenerationController — path selection", () => {
     });
     await controller.generate("Hello");
     expect(audio).toEqual(["server"]);
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining(":generateContent"),
+      expect.anything(),
+    );
+  });
+
+  it("uses browser-direct generation only when backend job creation is offline", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/web/speech-jobs") throw new TypeError("Failed to fetch");
+      if (url.includes(":generateContent")) return googleAudioResponse();
+      throw new Error(`unrouted fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const providers: string[] = [];
+    const controller = new GenerationController({
+      config: directConfig(),
+      settings,
+      callbacks: { onAudioReady: (_blob, meta) => providers.push(meta.provider) },
+    });
+
+    await controller.generate("Hello");
+
+    expect(providers).toEqual(["google"]);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "/web/speech-jobs",
+      expect.stringContaining(":generateContent"),
+    ]);
+  });
+
+  it("does not classify a reachable backend HTTP failure as offline", async () => {
+    const fetchMock = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const errors: string[] = [];
+    const controller = new GenerationController({
+      config: directConfig(),
+      settings,
+      callbacks: { onError: (message) => errors.push(message) },
+    });
+
+    await controller.generate("Hello");
+
+    expect(errors).toEqual(["TTS job failed (503)"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("GenerationController — provider fallback ordering", () => {
   it("falls back to elevenlabs when google fails retryably under preserve-persona", async () => {
     const fetchMock = routedFetch([
+      {
+        match: "/web/speech-jobs",
+        respond: () => {
+          throw new TypeError("Failed to fetch");
+        },
+      },
       { match: ":generateContent", respond: () => new Response("boom", { status: 500 }) },
       {
         match: "/v1/text-to-speech/",

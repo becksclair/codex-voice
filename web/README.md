@@ -19,7 +19,11 @@ Tauri desktop windows in app mode.
   and exhaustive-deps as errors) and **oxfmt** as the only formatter
   (`.oxfmtrc.json`).
 - **vitest** (happy-dom environment) for unit tests.
-- **vite-plugin-pwa** (`generateSW`, `registerType: 'autoUpdate'`).
+- **vite-plugin-pwa** (`generateSW`, `registerType: 'autoUpdate'`). Long-running
+  browser PWAs check for a new worker every 15 minutes and whenever they return
+  to the foreground; activation still defers its reload while generation or
+  streaming playback is active. Desktop `?app=1` webviews do not register a
+  service worker.
 
 ### Vite 8 vs 7 decision
 

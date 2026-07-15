@@ -123,8 +123,13 @@ pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
 
     let request = SpeechRequest {
         input: text,
+        provider_hint: None,
         model_hint: "gpt-4o-mini-tts".to_string(),
         voice_hint: args.voice,
+        speech_prep_enabled: None,
+        speech_prep_model_hint: None,
+        speech_prep_reasoning_effort: None,
+        speech_prep_timeout_ms: None,
         instructions: None,
         format,
         speed: None,

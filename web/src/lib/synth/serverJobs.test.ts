@@ -30,6 +30,31 @@ describe("createWebSpeechJob", () => {
     );
   });
 
+  it("posts backend generation overrides", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ id: "job-2", status: "pending" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createWebSpeechJob("hello", null, {
+      provider: "elevenlabs",
+      voice: "sky",
+      model: "eleven_v3",
+      speechPrepEnabled: false,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/web/speech-jobs",
+      expect.objectContaining({
+        body: JSON.stringify({
+          input: "hello",
+          provider: "elevenlabs",
+          voice: "sky",
+          model: "eleven_v3",
+          speechPrepEnabled: false,
+        }),
+      }),
+    );
+  });
+
   it("throws the server error message on failure", async () => {
     vi.stubGlobal(
       "fetch",

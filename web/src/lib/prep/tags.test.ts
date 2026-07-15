@@ -67,10 +67,24 @@ describe("performanceTagsAreValid", () => {
   });
 });
 
-describe("fallbackPerformanceTags (tag capping)", () => {
+describe("fallbackPerformanceTags", () => {
   it("adds a local tag matched from the palette", () => {
     const out = fallbackPerformanceTags("I finally breathe, safe at last", prep, "inline-tags");
     expect(out).toBe("[sigh of relief] I finally breathe, safe at last");
+  });
+
+  it("adds context-local tags for every matching sentence transition", () => {
+    const input =
+      "I was terrified and could feel the panic rising. Then she smiled, finally safe at last. We laughed and celebrated the victory.";
+    const richPrep = {
+      ...prep,
+      tagPalette: ["fearful", "sigh of relief", "laughs", "proud"],
+      maxLength: 500,
+    } as unknown as EffectiveSpeechPrep;
+
+    expect(fallbackPerformanceTags(input, richPrep, "inline-tags")).toBe(
+      "[fearful] I was terrified and could feel the panic rising. [sigh of relief] Then she smiled, finally safe at last. [laughs] We laughed and celebrated the victory.",
+    );
   });
 
   it("returns null when the tagged result exceeds maxLength", () => {

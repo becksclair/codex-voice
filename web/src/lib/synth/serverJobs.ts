@@ -42,6 +42,14 @@ export interface WebSpeechJobStatus {
   error?: WebSpeechJobError;
 }
 
+/** Optional server-side provider and prep overrides for a generation. */
+export interface WebSpeechJobOptions {
+  provider?: string;
+  voice?: string;
+  model?: string;
+  speechPrepEnabled?: boolean;
+}
+
 /** Cancel a queued/running job or release a completed server result. */
 export async function cancelWebSpeechJob(jobId: string): Promise<void> {
   const response = await fetch(`/web/speech-jobs/${encodeURIComponent(jobId)}`, {
@@ -74,7 +82,7 @@ export function sleep(ms: number): Promise<void> {
 /**
  * Create a server speech job and return its id.
  *
- * Ports `createWebSpeechJob` (app.html line ~3494): POSTs `{ input }` to
+ * POSTs the input plus optional provider/prep overrides to
  * `/web/speech-jobs`. On a non-OK response, throws with the server-provided
  * `error.message` when parseable, else `"TTS job failed ({status})"`. Throws
  * when the response lacks an `id`.
@@ -82,12 +90,13 @@ export function sleep(ms: number): Promise<void> {
 export async function createWebSpeechJob(
   input: string,
   signal: AbortSignal | null = null,
+  options: WebSpeechJobOptions = {},
 ): Promise<string> {
   const response = await fetch("/web/speech-jobs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
-    body: JSON.stringify({ input }),
+    body: JSON.stringify({ input, ...options }),
   });
   if (!response.ok) {
     let message = `TTS job failed (${response.status})`;

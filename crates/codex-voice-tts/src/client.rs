@@ -12,7 +12,9 @@ use crate::convert::{concatenate_pcm_chunks, concatenate_wav_chunks, convert_spe
 use crate::elevenlabs::ElevenLabsSpeechClient;
 use crate::google::GoogleSpeechClient;
 use crate::provider::TtsProvider;
-use crate::speech_prep::{SpeechPrepClient, SpeechPrepContext, SpeechPrepOutput, SpeechPrepTarget};
+use crate::speech_prep::{
+    collect_bracket_tags, SpeechPrepClient, SpeechPrepContext, SpeechPrepOutput, SpeechPrepTarget,
+};
 
 const CHUNKED_TTS_MIN_CHARS: usize = 1_600;
 const CHUNKED_TTS_MAX_CHARS: usize = 900;
@@ -77,9 +79,14 @@ impl ConfiguredSpeechClient {
             ),
         };
 
-        let provider = persona
-            .map(|p| p.provider)
-            .unwrap_or(self.config.default_provider);
+        let provider = match request.provider_hint.as_deref() {
+            Some(name) => ProviderKind::from_name(name).ok_or_else(|| {
+                SpeechError::Config(format!("invalid TTS provider override: {name}"))
+            })?,
+            None => persona
+                .map(|p| p.provider)
+                .unwrap_or(self.config.default_provider),
+        };
 
         Ok((provider, persona, native_voice))
     }
@@ -248,6 +255,10 @@ impl ConfiguredSpeechClient {
             return request;
         }
 
+        if request.speech_prep_enabled == Some(false) {
+            return request;
+        }
+
         let supports_inline_audio_tags =
             self.provider_supports_inline_audio_tags(provider, &request);
         let model_id = self.provider_model_id(provider, &request);
@@ -273,6 +284,18 @@ impl ConfiguredSpeechClient {
 
         let prepared_request = match prep.prepare(&request.input, context).await {
             Ok(Some(SpeechPrepOutput::Input(input))) => {
+                let input = match prep.fallback_performance_tags(&request.input, &context.target) {
+                    Ok(Some(local)) if should_use_local_tag_coverage(&input, &local) => {
+                        tracing::info!(
+                            remote_tags = collect_bracket_tags(&input).len(),
+                            local_tags = collect_bracket_tags(&local).len(),
+                            provider = ?provider,
+                            "local emotion coverage added cues missed by speech prep"
+                        );
+                        local
+                    }
+                    _ => input,
+                };
                 tracing::info!(
                     original_chars = request.input.chars().count(),
                     prepared_chars = input.chars().count(),
@@ -519,8 +542,59 @@ fn merge_instructions(existing: Option<&str>, generated: &str) -> String {
     }
 }
 
+fn should_use_local_tag_coverage(remote: &str, local: &str) -> bool {
+    let remote_tags = collect_bracket_tags(remote).len();
+    remote_tags <= 2 && collect_bracket_tags(local).len() > remote_tags
+}
+
 #[async_trait::async_trait]
 impl SpeechClient for ConfiguredSpeechClient {
+    async fn prepare(&self, request: &SpeechRequest) -> SpeechResult<String> {
+        let (provider, persona, _) = self.resolve_request(request)?;
+        let mut prep_config = self
+            .config
+            .speech_prep
+            .clone()
+            .ok_or_else(|| SpeechError::Config("speech prep is not configured".into()))?;
+        if let Some(model) = request.speech_prep_model_hint.as_ref() {
+            prep_config.model = model.clone();
+            prep_config.fallback_models.clear();
+        }
+        if let Some(effort) = request.speech_prep_reasoning_effort.as_ref() {
+            prep_config.reasoning_effort =
+                (!effort.eq_ignore_ascii_case("none")).then(|| effort.clone());
+        }
+        if let Some(timeout_ms) = request.speech_prep_timeout_ms {
+            let timeout = std::time::Duration::from_millis(timeout_ms.max(250));
+            prep_config.attempt_timeout = timeout;
+            prep_config.timeout = timeout;
+        }
+        let prep = SpeechPrepClient::new(prep_config)?;
+        let model_id = self.provider_model_id(provider, request);
+        let target = SpeechPrepTarget {
+            provider,
+            model_id: &model_id,
+            supports_inline_audio_tags: self.provider_supports_inline_audio_tags(provider, request),
+        };
+        let output = prep
+            .prepare(
+                &request.input,
+                SpeechPrepContext {
+                    target,
+                    persona,
+                    instructions: request.instructions.as_deref(),
+                },
+            )
+            .await?;
+        match output {
+            Some(SpeechPrepOutput::Input(input)) => Ok(input),
+            Some(SpeechPrepOutput::DeliveryInstruction(_)) => Err(SpeechError::Unsupported(
+                "prep-only endpoint requires inline performance tags".into(),
+            )),
+            None => Ok(request.input.clone()),
+        }
+    }
+
     async fn synthesize(&self, request: &SpeechRequest) -> SpeechResult<SynthesizedSpeech> {
         let (primary_provider, persona, native_voice) = self.resolve_request(request)?;
         let mut prep_cache = HashMap::new();
@@ -595,7 +669,8 @@ impl SpeechClient for ConfiguredSpeechClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        split_index_at_or_before, split_tts_text, synthesize_ordered, ConfiguredSpeechClient,
+        should_use_local_tag_coverage, split_index_at_or_before, split_tts_text,
+        synthesize_ordered, ConfiguredSpeechClient,
     };
     use crate::config::{GoogleRuntimeConfig, ProviderKind, ResolvedTtsConfig};
     use codex_voice_core::SpeechError;
@@ -628,6 +703,18 @@ mod tests {
             elevenlabs: None,
             personas: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn local_tag_coverage_only_replaces_genuinely_sparse_model_output() {
+        assert!(should_use_local_tag_coverage(
+            "[fearful] first. second. third.",
+            "[fearful] first. [calm] second. [serious] third.",
+        ));
+        assert!(!should_use_local_tag_coverage(
+            "[fearful] first. [calm] second. [serious] third.",
+            "[fearful] first. [calm] second. [serious] third. [uneasy] fourth.",
+        ));
     }
 
     #[test]

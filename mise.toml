@@ -88,6 +88,24 @@ run = [
   "cd webtests && LIVE_TTS=1 bunx playwright test tests/live.spec.ts",
 ]
 
+[tasks.test-web-enrichment]
+description = "Validate the configured prep model's literary enrichment quality (paid, no audio)"
+dir = "{{cwd}}"
+depends = ["web-build"]
+run = [
+  "cargo build -q -p codex-voice-app --bin codex-voice",
+  "cd webtests && LIVE_ENRICHMENT_QUALITY=1 ENRICHMENT_BENCHMARK_LABEL=configured-quality bunx playwright test tests/enrichment-review.spec.ts",
+]
+
+[tasks.test-web-enrichment-benchmark]
+description = "Compare prep-only literary enrichment across selected models (paid, no audio)"
+dir = "{{cwd}}"
+depends = ["web-build"]
+run = [
+  "cargo build -q -p codex-voice-app --bin codex-voice",
+  "cd webtests && LIVE_ENRICHMENT_BENCHMARK=1 ENRICHMENT_MODELS=gpt-5.6-luna,gpt-5.6-terra ENRICHMENT_BENCHMARK_LABEL=tuned-luna-terra bunx playwright test tests/enrichment-review.spec.ts",
+]
+
 [tasks.serve]
 description = "Run the audio server in the foreground (default bind 127.0.0.1:3845)"
 dir = "{{cwd}}"

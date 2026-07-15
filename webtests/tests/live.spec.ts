@@ -3,20 +3,14 @@ import { readFileSync } from 'node:fs';
 
 // Import the REAL chunking algorithm from the web source so the chunk-count
 // expectation below is validated against production code, not a copy.
-import { splitTtsText } from '../../web/src/lib/synth/chunking.ts';
-
 // Storage key used by the PWA (see web/src/lib/storage.ts / settings.ts).
 const SETTINGS_KEY = 'codex-voice.web.settings.v1';
 
 /**
  * Crafted natural-language input for the paid Google leg.
  *
- * At 1922 codepoints it clears TTS_CHUNK_MIN_CHARS (1600), so the browser-direct
- * Google path exercises the chunking + stitching code. With TTS_CHUNK_MAX_CHARS
- * (900) it splits into exactly THREE chunks (lengths ~792 / ~812 / ~316) — see
- * the assertion in the first stage, which recomputes this with the real
- * splitTtsText. This is the deliberate "assertions-per-dollar" compromise: large
- * enough to hit chunking, small enough to keep the paid run cheap (~1.9k chars).
+ * At 1922 codepoints it is long enough to exercise backend prep and chunked
+ * synthesis while remaining a bounded paid smoke input.
  */
 const LIVE_SMOKE_INPUT = [
   'The morning fog rolled off the harbor slowly, curling around the moored fishing boats and softening every hard edge of the waterfront into a pale grey wash.',
@@ -32,14 +26,6 @@ const LIVE_SMOKE_INPUT = [
   'A young cyclist coasted along the promenade, weaving between the puddles left by the overnight rain and ringing her bell at a pair of dawdling pigeons.',
   'The clock on the town hall struck eight with a deep and resonant chime, and the whole scene seemed to lean forward, ready at last to begin the real work of the day.',
 ].join(' ');
-
-/**
- * Pinned chunk-count fixture for LIVE_SMOKE_INPUT. Stage 0 re-validates it
- * against the real splitTtsText before any money is spent, so a change to the
- * chunking constants (TTS_CHUNK_MIN_CHARS/TTS_CHUNK_MAX_CHARS) fails fast with
- * an actionable message: re-derive this fixture, don't weaken the assertion.
- */
-const EXPECTED_CHUNKS = 3;
 
 /** Parse an `m:ss` timecode (as rendered by formatTime) to seconds; null if not a plain time. */
 function parseTimecode(raw: string | null | undefined): number | null {
@@ -70,19 +56,25 @@ async function openSettingsAndAwaitProviders(page: Page): Promise<void> {
 test.describe.serial('live TTS smoke', () => {
   // Hard gate: this spec spends real money per character. It only runs when the
   // operator explicitly opts in. Without LIVE_TTS=1 every test here is skipped.
-  test.skip(!process.env.LIVE_TTS, 'set LIVE_TTS=1 to run the paid live TTS smoke');
+  test.skip(process.env.LIVE_TTS !== '1', 'set LIVE_TTS=1 to run the paid live TTS smoke');
 
-  test('google direct (chunked) + server job in one session', async ({ page }) => {
-    // --- Stage 0: chunking expectation, validated against the real algorithm ---
-    // Free assertion (no API cost): confirms the crafted input still splits the
-    // way this smoke assumes before we spend anything.
-    const chunks = splitTtsText(LIVE_SMOKE_INPUT);
-    expect(
-      chunks.length,
-      `LIVE_SMOKE_INPUT no longer splits into ${EXPECTED_CHUNKS} chunks (got ${chunks.length}). ` +
-        'The chunking constants likely changed — re-derive the EXPECTED_CHUNKS fixture in this spec.',
-    ).toBe(EXPECTED_CHUNKS);
-    expect(chunks.length, 'input must actually exercise chunking').toBeGreaterThan(1);
+  test('google backend-first generation enriches and synthesizes in one session', async ({ page }) => {
+    test.setTimeout(180_000);
+    let serverJobCreates = 0;
+    const browserProviderRequests: string[] = [];
+    page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (url.pathname === '/web/speech-jobs' && request.method() === 'POST') {
+        serverJobCreates += 1;
+      }
+      if (
+        url.hostname === 'generativelanguage.googleapis.com' ||
+        url.hostname === 'api.elevenlabs.io' ||
+        url.hostname === 'chatgpt.com'
+      ) {
+        browserProviderRequests.push(request.url());
+      }
+    });
 
     // --- Stage 1: shell loads ---
     await loadCleanShell(page);
@@ -141,18 +133,25 @@ test.describe.serial('live TTS smoke', () => {
     await expect(page.locator('#download')).toBeEnabled();
     await expect(page.locator('#play')).toBeEnabled();
 
-    // --- Stage 6: no error surfaced after completion ---
+    // --- Stage 6: backend-first prep inserted several context-local cues ---
+    expect(serverJobCreates).toBe(1);
+    expect(browserProviderRequests).toEqual([]);
+    const preparedText = await page.locator('#text').inputValue();
+    expect(preparedText).not.toBe(LIVE_SMOKE_INPUT);
+    expect(preparedText.match(/\[[^\]\n]{1,80}\]/g)?.length ?? 0).toBeGreaterThan(2);
+
+    // --- Stage 7: no error surfaced after completion ---
     await expect(page.locator('#error-banner')).toBeHidden();
     expect((await page.locator('#error-banner').textContent())?.trim() || '').toBe('');
 
-    // --- Stage 7: plausible duration for ~1.9k chars of speech (> 10s) ---
+    // --- Stage 8: plausible duration for ~1.9k chars of speech (> 10s) ---
     await expect
       .poll(() => page.locator('#duration').textContent().then((t) => parseTimecode(t) ?? 0), {
         timeout: 30_000,
       })
       .toBeGreaterThan(10);
 
-    // --- Stage 8: waveform canvas actually drew something (non-uniform pixels) ---
+    // --- Stage 9: waveform canvas actually drew something (non-uniform pixels) ---
     const waveformDrawn = await page.locator('#waveform').evaluate((el) => {
       const canvas = el as HTMLCanvasElement;
       const ctx = canvas.getContext('2d');
@@ -177,7 +176,7 @@ test.describe.serial('live TTS smoke', () => {
     });
     expect(waveformDrawn).toBe(true);
 
-    // --- Stage 9: playback starts (elapsed advances past 0:00) ---
+    // --- Stage 10: playback starts (elapsed advances past 0:00) ---
     await page.locator('#play').click();
     await expect
       .poll(() => page.locator('#elapsed').textContent().then((t) => parseTimecode(t) ?? 0), {
@@ -185,7 +184,7 @@ test.describe.serial('live TTS smoke', () => {
       })
       .toBeGreaterThan(0);
 
-    // --- Stage 10: download yields a valid WAV (RIFF magic + > 100KB) ---
+    // --- Stage 11: download yields a valid WAV (RIFF magic + > 100KB) ---
     // The download button builds a blob object-URL anchor and clicks it; the
     // Playwright download event is the inspectable handle on those bytes.
     const downloadPromise = page.waitForEvent('download');
@@ -196,49 +195,13 @@ test.describe.serial('live TTS smoke', () => {
     expect(bytes.length).toBeGreaterThan(100 * 1024);
     expect(bytes.subarray(0, 4).toString('ascii')).toBe('RIFF');
     expect(bytes.subarray(8, 12).toString('ascii')).toBe('WAVE');
-
-    // --- Stage 11: server-job path (POST /web/speech-jobs → poll → decode) ---
-    const create = await page.request.post('/web/speech-jobs', {
-      data: { input: 'Short live smoke line.' },
-    });
-    expect(create.ok()).toBeTruthy();
-    const created = (await create.json()) as { id?: string; status?: string };
-    expect(created.id, 'server job should return an id').toBeTruthy();
-
-    let jobResult: { audio_base64?: string; mime_type?: string; format?: string } | undefined;
-    await expect
-      .poll(
-        async () => {
-          const status = await page.request.get(`/web/speech-jobs/${created.id}`, {
-            headers: { 'cache-control': 'no-store' },
-          });
-          expect(status.ok()).toBeTruthy();
-          const body = (await status.json()) as {
-            status: string;
-            result?: typeof jobResult;
-            error?: unknown;
-          };
-          if (body.status === 'failed') {
-            throw new Error(`server speech job failed: ${JSON.stringify(body.error)}`);
-          }
-          if (body.status === 'complete') jobResult = body.result;
-          return body.status;
-        },
-        { timeout: 120_000, intervals: [1_000] },
-      )
-      .toBe('complete');
-
-    expect(jobResult, 'completed job should carry a result').toBeTruthy();
-    expect((jobResult?.audio_base64 ?? '').length).toBeGreaterThan(2_000);
-    expect(jobResult?.mime_type ?? '').toMatch(/^audio\//);
-    expect((jobResult?.format ?? '').length).toBeGreaterThan(0);
   });
 
   test('elevenlabs leg (opt-in)', async ({ page }) => {
     // A second paid leg, off by default even when LIVE_TTS=1. ElevenLabs bills
     // separately, so it is gated behind its own flag.
     test.skip(
-      !process.env.LIVE_TTS_ELEVENLABS,
+      process.env.LIVE_TTS_ELEVENLABS !== '1',
       'set LIVE_TTS_ELEVENLABS=1 to run the ElevenLabs live leg',
     );
 

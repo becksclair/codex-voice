@@ -145,3 +145,32 @@ test('service worker takes control of /web (offline-capable scope)', async ({ pa
     })
     .toBe(true);
 });
+
+test('app mode removes a legacy /web service worker and sheds its controller', async ({ page }) => {
+  await page.goto('/web');
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await page.reload();
+  await expect
+    .poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null), {
+      timeout: 15_000,
+    })
+    .toBe(true);
+
+  let appModeNavigations = 0;
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame() && new URL(frame.url()).searchParams.get('app') === '1') {
+      appModeNavigations += 1;
+    }
+  });
+  await page.goto('/web?app=1');
+  await expect.poll(() => appModeNavigations, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  await page.waitForLoadState('domcontentloaded');
+  const workerState = await page.evaluate(async () => ({
+    controlled: navigator.serviceWorker.controller !== null,
+    webRegistrations: (await navigator.serviceWorker.getRegistrations()).filter((registration) =>
+      new URL(registration.scope).pathname.startsWith('/web'),
+    ).length,
+  }));
+  expect(workerState).toEqual({ controlled: false, webRegistrations: 0 });
+  await expect(page.locator('#text')).toBeVisible();
+});

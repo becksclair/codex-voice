@@ -403,8 +403,13 @@ mod live_tests {
         let client = GoogleSpeechClient::new(config).expect("client creation failed");
         let request = SpeechRequest {
             input: "Hello from Codex Voice live test.".to_string(),
+            provider_hint: None,
             model_hint: "gpt-4o-mini-tts".to_string(),
             voice_hint: Some("sky".to_string()),
+            speech_prep_enabled: None,
+            speech_prep_model_hint: None,
+            speech_prep_reasoning_effort: None,
+            speech_prep_timeout_ms: None,
             instructions: None,
             format: SpeechFormat::Wav,
             speed: None,
