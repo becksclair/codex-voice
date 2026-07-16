@@ -485,6 +485,13 @@ for (const viewport of [
 }
 
 test('declared favicon loads without a console error', async ({ page }) => {
+  await page.route('**/web/config', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ version: 1, defaultProvider: 'google', providers: {} }),
+    }),
+  );
   const errors: string[] = [];
   page.on('console', (message) => {
     if (message.type() === 'error') errors.push(message.text());

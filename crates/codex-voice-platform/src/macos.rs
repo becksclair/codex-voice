@@ -303,11 +303,7 @@ fn get_focused_element(system_wide: AXUIElementRef) -> PlatformResult<AXUIElemen
 
     let mut focused: AXUIElementRef = std::ptr::null_mut();
     let result = unsafe {
-        AXUIElementCopyAttributeValue(
-            system_wide,
-            attr,
-            &mut focused as *mut AXUIElementRef as *mut *mut c_void,
-        )
+        AXUIElementCopyAttributeValue(system_wide, attr, &mut focused as *mut AXUIElementRef)
     };
 
     if result == 0 && !focused.is_null() {
@@ -333,7 +329,7 @@ fn restore_clipboard(clipboard: &mut arboard::Clipboard, previous: Option<String
 // Hotkey
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MacOSHotkeyService {
     manager: std::sync::Arc<std::sync::Mutex<global_hotkey::GlobalHotKeyManager>>,
 }
@@ -374,26 +370,20 @@ impl HotkeyService for MacOSHotkeyService {
             .name("codex-voice-macos-hotkey".into())
             .spawn(move || {
                 let receiver = GlobalHotKeyEvent::receiver();
-                loop {
-                    match receiver.recv() {
-                        Ok(event) => {
-                            if event.id == dictation_hotkey.id() {
-                                let hotkey_event = match event.state {
-                                    HotKeyState::Pressed => HotkeyEvent::Pressed,
-                                    HotKeyState::Released => HotkeyEvent::Released,
-                                };
-                                if events.blocking_send(hotkey_event).is_err() {
-                                    break;
-                                }
-                            } else if event.id == speak_hotkey.id()
-                                && event.state == HotKeyState::Pressed
-                            {
-                                if events.blocking_send(HotkeyEvent::SpeakSelection).is_err() {
-                                    break;
-                                }
-                            }
+                while let Ok(event) = receiver.recv() {
+                    if event.id == dictation_hotkey.id() {
+                        let hotkey_event = match event.state {
+                            HotKeyState::Pressed => HotkeyEvent::Pressed,
+                            HotKeyState::Released => HotkeyEvent::Released,
+                        };
+                        if events.blocking_send(hotkey_event).is_err() {
+                            break;
                         }
-                        Err(_) => break,
+                    } else if event.id == speak_hotkey.id()
+                        && event.state == HotKeyState::Pressed
+                        && events.blocking_send(HotkeyEvent::SpeakSelection).is_err()
+                    {
+                        break;
                     }
                 }
             })
@@ -410,25 +400,25 @@ impl HotkeyService for MacOSHotkeyService {
 // ---------------------------------------------------------------------------
 
 fn send_cmd_c() {
-    send_cmd_chord(kVK_ANSI_C);
+    send_cmd_chord(K_VK_ANSI_C);
 }
 
 fn send_cmd_v() {
-    send_cmd_chord(kVK_ANSI_V);
+    send_cmd_chord(K_VK_ANSI_V);
 }
 
 fn send_cmd_chord(key: u16) {
-    let source = unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) };
+    let source = unsafe { CGEventSourceCreate(K_CGEVENT_SOURCE_STATE_HID_SYSTEM_STATE) };
     if source.is_null() {
         tracing::warn!("CGEventSourceCreate returned null; keyboard chord will not work");
         return;
     }
     let _source_guard = ReleaseOnDrop(source);
 
-    let cmd_down = unsafe { CGEventCreateKeyboardEvent(source, kVK_Command, true) };
+    let cmd_down = unsafe { CGEventCreateKeyboardEvent(source, K_VK_COMMAND, true) };
     let key_down = unsafe { CGEventCreateKeyboardEvent(source, key, true) };
     let key_up = unsafe { CGEventCreateKeyboardEvent(source, key, false) };
-    let cmd_up = unsafe { CGEventCreateKeyboardEvent(source, kVK_Command, false) };
+    let cmd_up = unsafe { CGEventCreateKeyboardEvent(source, K_VK_COMMAND, false) };
 
     let _cmd_down_guard = ReleaseOnDrop(cmd_down);
     let _key_down_guard = ReleaseOnDrop(key_down);
@@ -441,15 +431,15 @@ fn send_cmd_chord(key: u16) {
     }
 
     unsafe {
-        CGEventSetFlags(cmd_down, kCGEventFlagMaskCommand);
-        CGEventSetFlags(key_down, kCGEventFlagMaskCommand);
-        CGEventSetFlags(key_up, kCGEventFlagMaskCommand);
-        CGEventSetFlags(cmd_up, kCGEventFlagMaskCommand);
+        CGEventSetFlags(cmd_down, K_CGEVENT_FLAG_MASK_COMMAND);
+        CGEventSetFlags(key_down, K_CGEVENT_FLAG_MASK_COMMAND);
+        CGEventSetFlags(key_up, K_CGEVENT_FLAG_MASK_COMMAND);
+        CGEventSetFlags(cmd_up, K_CGEVENT_FLAG_MASK_COMMAND);
 
-        CGEventPost(kCGHIDEventTap, cmd_down);
-        CGEventPost(kCGHIDEventTap, key_down);
-        CGEventPost(kCGHIDEventTap, key_up);
-        CGEventPost(kCGHIDEventTap, cmd_up);
+        CGEventPost(K_CGHID_EVENT_TAP, cmd_down);
+        CGEventPost(K_CGHID_EVENT_TAP, key_down);
+        CGEventPost(K_CGHID_EVENT_TAP, key_up);
+        CGEventPost(K_CGHID_EVENT_TAP, cmd_up);
     }
 }
 
@@ -502,25 +492,35 @@ extern "C" {
     fn CGEventSetFlags(event: *mut c_void, flags: u64);
 }
 
-const kCFStringEncodingUTF8: u32 = 0x08000100;
-const kCGEventSourceStateHIDSystemState: i32 = 1;
-const kCGHIDEventTap: u32 = 0;
-const kCGEventFlagMaskCommand: u64 = 0x00100000;
-const kVK_Command: u16 = 0x37;
-const kVK_ANSI_C: u16 = 0x08;
-const kVK_ANSI_V: u16 = 0x09;
+const K_CFSTRING_ENCODING_UTF8: u32 = 0x08000100;
+const K_CGEVENT_SOURCE_STATE_HID_SYSTEM_STATE: i32 = 1;
+const K_CGHID_EVENT_TAP: u32 = 0;
+const K_CGEVENT_FLAG_MASK_COMMAND: u64 = 0x00100000;
+const K_VK_COMMAND: u16 = 0x37;
+const K_VK_ANSI_C: u16 = 0x08;
+const K_VK_ANSI_V: u16 = 0x09;
 
 fn cfstring_from_static(s: &'static str) -> CFStringRef {
     let cstr = std::ffi::CString::new(s)
         .expect("static string literals must not contain interior nul bytes");
-    unsafe { CFStringCreateWithCString(std::ptr::null_mut(), cstr.as_ptr(), kCFStringEncodingUTF8) }
+    unsafe {
+        CFStringCreateWithCString(
+            std::ptr::null_mut(),
+            cstr.as_ptr(),
+            K_CFSTRING_ENCODING_UTF8,
+        )
+    }
 }
 
 fn cfstring_from_str(s: &str) -> PlatformResult<CFStringRef> {
     let cstr = std::ffi::CString::new(s)
         .map_err(|_| PlatformError::Message("text contains interior nul byte".into()))?;
     let ptr = unsafe {
-        CFStringCreateWithCString(std::ptr::null_mut(), cstr.as_ptr(), kCFStringEncodingUTF8)
+        CFStringCreateWithCString(
+            std::ptr::null_mut(),
+            cstr.as_ptr(),
+            K_CFSTRING_ENCODING_UTF8,
+        )
     };
     if ptr.is_null() {
         return Err(PlatformError::Unavailable(
@@ -536,7 +536,7 @@ fn cfstring_to_string(value: *mut c_void) -> Option<String> {
     if length < 0 {
         return None;
     }
-    let max = unsafe { CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) };
+    let max = unsafe { CFStringGetMaximumSizeForEncoding(length, K_CFSTRING_ENCODING_UTF8) };
     if max < 0 {
         return None;
     }
@@ -546,7 +546,7 @@ fn cfstring_to_string(value: *mut c_void) -> Option<String> {
             cf,
             buffer.as_mut_ptr() as *mut c_char,
             buffer.len() as isize,
-            kCFStringEncodingUTF8,
+            K_CFSTRING_ENCODING_UTF8,
         )
     };
     if !ok {

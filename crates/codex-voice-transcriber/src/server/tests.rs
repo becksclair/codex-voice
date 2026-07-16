@@ -1348,7 +1348,19 @@ async fn speech_route_returns_503_when_tts_not_configured() {
 
 #[tokio::test]
 async fn health_includes_capabilities() {
-    let app = service_router(test_state_with_speech(1024));
+    let override_dir = tempfile::tempdir().expect("temp override");
+    let assets = override_dir.path().join("assets");
+    std::fs::create_dir_all(&assets).expect("assets dir");
+    std::fs::write(
+        override_dir.path().join("index.html"),
+        r#"<script src="/web/assets/app.js"></script>"#,
+    )
+    .expect("index");
+    std::fs::write(assets.join("app.js"), "export{}").expect("js");
+
+    let mut state = test_state_with_speech(1024);
+    state.web_dist_override = Some(override_dir.path().to_path_buf());
+    let app = service_router(state);
     let response = app
         .oneshot(
             axum::http::Request::builder()
