@@ -6,8 +6,8 @@ use clap::Args;
 use codex_voice_core::{SpeechClient, SpeechFormat, SpeechRequest};
 use codex_voice_tts::config::{SpeechPrepConfig, SpeechPrepMode, SpeechPrepProviderKind};
 use codex_voice_tts::{
-    collect_bracket_tags, ConfiguredSpeechClient, ReadAloudConfigLoader, ResolvedTtsConfig,
-    SpeechPrepClient,
+    collect_bracket_tags, ConfiguredSpeechClient, ResolvedTtsConfig, SpeechPrepClient,
+    VoiceConfigLoader,
 };
 
 #[derive(Debug, Args)]
@@ -23,7 +23,7 @@ pub struct TtsDoctor {
     #[arg(long)]
     pub keep: bool,
     #[arg(long)]
-    pub read_aloud_config: Option<PathBuf>,
+    pub config: Option<PathBuf>,
 }
 
 /// Load TTS configuration and build a configured speech client.
@@ -33,28 +33,22 @@ pub struct TtsDoctor {
 pub fn load_speech_client(path: Option<PathBuf>) -> Result<ConfiguredSpeechClient> {
     let config_path = match path {
         Some(p) => p,
-        None => ReadAloudConfigLoader::default_path()
-            .context("failed to resolve default read-aloud config path")?,
+        None => VoiceConfigLoader::default_path()
+            .context("failed to resolve default Codex Voice config path")?,
     };
 
-    let loader = ReadAloudConfigLoader::new(config_path);
-    let config = loader.load().context("failed to load read-aloud config")?;
+    let loader = VoiceConfigLoader::new(config_path);
+    let config = loader.load().context("failed to load Codex Voice config")?;
     let client = ConfiguredSpeechClient::try_new(config)
         .context("failed to create TTS client from config")?;
-    if !client.has_any_provider() {
-        return Err(anyhow::anyhow!(
-            "TTS config parsed but no usable provider is configured"
-        ));
-    }
     Ok(client)
 }
 
-pub fn default_read_aloud_config_path() -> Result<PathBuf> {
-    ReadAloudConfigLoader::default_path()
-        .context("failed to resolve default read-aloud config path")
+pub fn default_voice_config_path() -> Result<PathBuf> {
+    VoiceConfigLoader::default_path().context("failed to resolve default Codex Voice config path")
 }
 
-/// Resolves the default read-aloud config path and loads a speech client from
+/// Resolves the default Codex Voice config path and loads a speech client from
 /// it, logging and degrading gracefully (no client, no config) on failure.
 /// Shared by the `server` subcommand and the self-hosted server path started
 /// from `run()`.
@@ -63,7 +57,7 @@ pub(crate) fn load_tts() -> (
     Option<ResolvedTtsConfig>,
     Option<PathBuf>,
 ) {
-    let tts_config_path = match default_read_aloud_config_path() {
+    let tts_config_path = match default_voice_config_path() {
         Ok(path) => Some(path),
         Err(error) => {
             tracing::warn!(%error, "TTS config path not available; live reload disabled");
@@ -88,19 +82,20 @@ pub(crate) fn load_tts() -> (
 }
 
 pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
-    let client = load_speech_client(args.read_aloud_config.clone())?;
+    let client = load_speech_client(args.config.clone())?;
     let config = client.config();
 
-    if let Some(ref path) = args.read_aloud_config {
+    if let Some(ref path) = args.config {
         println!("config_path: {}", path.display());
-    } else if let Ok(default) = ReadAloudConfigLoader::default_path() {
+    } else if let Ok(default) = VoiceConfigLoader::default_path() {
         println!("config_path: {}", default.display());
     }
 
     println!("config_load: ok");
+    println!("schema_version: 1");
     println!("default_provider: {:?}", config.default_provider);
     if let Some(ref persona) = config.default_persona {
-        println!("default_persona: {persona}");
+        println!("default_voice: {persona}");
     }
     println!("max_text_length: {}", config.max_text_length);
     println!("google_configured: {}", config.google.is_some());
@@ -177,9 +172,8 @@ pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
     Ok(())
 }
 
-/// Fixed long sample used by the speech-prep benchmark. Copied verbatim from
-/// the deprecated `scripts/tts_prep_benchmark.py` so measurements stay
-/// comparable across the Python and Rust harnesses.
+/// Fixed long sample retained by the integrated speech-prep benchmark so
+/// measurements remain comparable with earlier runs.
 const DEFAULT_SAMPLE: &str = r#"Mara had meant to leave before the rain came, but the clouds folded themselves over the roofs with the quiet certainty of a verdict. By the time she reached the old arcade, the gutters were already spilling silver threads onto the pavement, and every shop window trembled with reflections of people hurrying home. She stopped beneath the striped awning of the watchmaker's door and held the letter against her coat as if warmth alone might change what it said.
 
 Inside, somewhere beyond the glass, a hundred clocks disagreed about the hour. Their ticking pressed through the wood like nervous fingertips. Mara laughed once, not because anything was funny, but because the sound was the only thing that kept her from crying. She had read the letter twice on the tram and once again under the station lamp, and each reading had made the words simpler and harder: her brother was alive, he was nearby, and he had waited seven years to ask forgiveness.
@@ -214,8 +208,8 @@ impl BenchProvider {
     }
 }
 
-/// A prep-model benchmark target. Mirrors the `DEFAULT_TARGETS` table from the
-/// deprecated Python benchmark so the default model set stays identical.
+/// A prep-model benchmark target. The default model set is intentionally stable
+/// so measurements remain comparable with earlier runs.
 #[derive(Debug, Clone, Copy)]
 struct BenchTarget {
     name: &'static str,
@@ -280,9 +274,9 @@ pub struct TtsBenchArgs {
     /// Print the planned requests without issuing any network calls.
     #[arg(long)]
     pub dry_run: bool,
-    /// Path to `read-aloud-defaults.json` (defaults to the standard location).
+    /// Path to the Codex Voice config (defaults to the platform config directory).
     #[arg(long)]
-    pub read_aloud_config: Option<PathBuf>,
+    pub config: Option<PathBuf>,
     /// Base URL for Codex-provider targets.
     #[arg(long, default_value = DEFAULT_CODEX_BASE_URL)]
     pub codex_base_url: String,
@@ -376,11 +370,11 @@ fn build_target_config(
                 let key = template
                     .api_key
                     .clone()
-                    .context("Google speech-prep API key not found in read-aloud defaults")?;
+                    .context("Google speech-prep API key not found in Codex Voice config")?;
                 (key, template.base_url.clone())
             } else {
                 anyhow::bail!(
-                    "Google provider is not configured in read-aloud defaults; cannot benchmark target {}",
+                    "Google provider is not configured in Codex Voice config; cannot benchmark target {}",
                     target.name
                 );
             };
@@ -424,18 +418,18 @@ pub async fn run_tts_bench(args: TtsBenchArgs) -> Result<()> {
     }
 
     // Live run: load config for Google credentials and the speech-prep template.
-    let loader = match args.read_aloud_config.clone() {
-        Some(path) => ReadAloudConfigLoader::new(path),
-        None => ReadAloudConfigLoader::new(
-            ReadAloudConfigLoader::default_path()
-                .context("failed to resolve default read-aloud config path")?,
+    let loader = match args.config.clone() {
+        Some(path) => VoiceConfigLoader::new(path),
+        None => VoiceConfigLoader::new(
+            VoiceConfigLoader::default_path()
+                .context("failed to resolve default Codex Voice config path")?,
         ),
     };
     let resolved = loader
         .load()
-        .context("failed to load read-aloud defaults (needed for the benchmark)")?;
+        .context("failed to load Codex Voice config (needed for the benchmark)")?;
     let template = resolved.speech_prep.clone().context(
-        "speech prep is disabled in read-aloud defaults; enable messages.tts.speechPrep to benchmark",
+        "speech prep is disabled in Codex Voice config; enable advanced.speechPrep to benchmark",
     )?;
     let codex_auth_file = match args.codex_auth_file.clone() {
         Some(path) => path,
@@ -553,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn default_targets_match_python_benchmark_set() {
+    fn default_benchmark_targets_remain_stable() {
         let names = DEFAULT_TARGETS.iter().map(|t| t.name).collect::<Vec<_>>();
         assert_eq!(
             names,
@@ -575,7 +569,7 @@ mod tests {
             models: None,
             iterations: 1,
             dry_run: true,
-            read_aloud_config: None,
+            config: None,
             codex_base_url: DEFAULT_CODEX_BASE_URL.into(),
             codex_auth_file: None,
         };
@@ -587,7 +581,7 @@ mod tests {
             models: None,
             iterations: 1,
             dry_run: true,
-            read_aloud_config: None,
+            config: None,
             codex_base_url: DEFAULT_CODEX_BASE_URL.into(),
             codex_auth_file: None,
         };

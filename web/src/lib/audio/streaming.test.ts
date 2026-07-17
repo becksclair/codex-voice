@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BrowserPersonaConfig, BrowserTtsConfig } from "../config.ts";
 import { wavPcmData } from "./wav.ts";
 import type { AudioContextConstructor, StreamState } from "./streaming.ts";
-import { createPcmStreamSink, StreamingPlayback, streamElevenLabsHttp } from "./streaming.ts";
+import {
+  createPcmStreamSink,
+  StreamingPlayback,
+  streamElevenLabs,
+  streamElevenLabsHttp,
+} from "./streaming.ts";
 
 /** A minimal scripted AudioContext for scheduling/accounting tests. */
 class FakeAudioBuffer {
@@ -68,6 +73,33 @@ class DeferredSuspendAudioContext extends FakeAudioContext {
 
   releaseSuspend(): void {
     this.releaseSuspendPromise?.();
+  }
+}
+
+class DeferredResumeAudioContext extends FakeAudioContext {
+  static latest: DeferredResumeAudioContext | null = null;
+  private releaseResumePromise: (() => void) | null = null;
+  private resumePromise = new Promise<void>((resolve) => {
+    this.releaseResumePromise = resolve;
+  });
+
+  constructor() {
+    super();
+    this.state = "suspended";
+    DeferredResumeAudioContext.latest = this;
+  }
+
+  override async resume(): Promise<void> {
+    await this.resumePromise;
+    this.state = "running";
+  }
+
+  releaseResume(): void {
+    this.releaseResumePromise?.();
+  }
+
+  static current(): DeferredResumeAudioContext | null {
+    return DeferredResumeAudioContext.latest;
   }
 }
 
@@ -344,5 +376,53 @@ describe("streamElevenLabsHttp", () => {
       ),
     ).rejects.toThrow("cancelled-midflight");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("streamElevenLabs WebSocket startup", () => {
+  it("preserves and cleans up an abort that fires while playback is starting", async () => {
+    DeferredResumeAudioContext.latest = null;
+    let socketsCreated = 0;
+    vi.stubGlobal("AudioContext", DeferredResumeAudioContext);
+    vi.stubGlobal(
+      "WebSocket",
+      class {
+        constructor() {
+          socketsCreated += 1;
+        }
+      },
+    );
+    const config = {
+      providers: {
+        elevenlabs: {
+          apiKey: "xi",
+          baseUrl: "https://api.elevenlabs.io",
+          modelId: "eleven_flash_v2_5",
+          streamGain: 1,
+          applyTextNormalization: "off",
+        },
+      },
+    } as unknown as BrowserTtsConfig;
+    const persona = {
+      elevenlabs: { voiceId: "voice-1", voiceSettings: { speed: 1.0 } },
+    } as unknown as BrowserPersonaConfig;
+    const controller = new AbortController();
+    const request = streamElevenLabs(config, "hello", persona, {
+      signal: controller.signal,
+      audioContextCtor: () => DeferredResumeAudioContext as unknown as AudioContextConstructor,
+    });
+    await vi.waitFor(() => expect(DeferredResumeAudioContext.current()).not.toBeNull());
+    const context = DeferredResumeAudioContext.current();
+    if (!context) throw new Error("streaming playback did not initialize");
+    const timeout = new Error("TTS provider timed out.");
+    timeout.name = "TimeoutError";
+    controller.abort(timeout);
+    const rejected = expect(request).rejects.toBe(timeout);
+
+    context.releaseResume();
+    await rejected;
+
+    expect(context.state).toBe("closed");
+    expect(socketsCreated).toBe(0);
   });
 });

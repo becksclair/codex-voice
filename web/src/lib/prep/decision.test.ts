@@ -227,5 +227,11 @@ describe("providerMaxTextLength", () => {
     } as unknown as BrowserTtsConfig;
     expect(providerMaxTextLength(config, "elevenlabs", "default")).toBe(5000);
     expect(providerMaxTextLength(config, "elevenlabs", "elevenlabs:eleven_flash_v2_5")).toBe(6000);
+    config.providers.elevenlabs!.maxTextLength = 5000;
+    expect(providerMaxTextLength(config, "elevenlabs", "elevenlabs:eleven_flash_v2_5")).toBe(5000);
+    config.providers.elevenlabs!.maxTextLengthOverridden = false;
+    expect(providerMaxTextLength(config, "elevenlabs", "elevenlabs:eleven_flash_v2_5")).toBe(6000);
+    config.providers.elevenlabs!.maxTextLengthOverridden = true;
+    expect(providerMaxTextLength(config, "elevenlabs", "default")).toBe(5000);
   });
 });

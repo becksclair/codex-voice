@@ -5,8 +5,7 @@ use codex_voice_core::{
 };
 
 use crate::config::{
-    FallbackPolicy, ProviderKind, ResolvedPersona, ResolvedTtsConfig, SpeechPrepMode,
-    SpeechPrepStrategy,
+    ProviderKind, ResolvedPersona, ResolvedTtsConfig, SpeechPrepMode, SpeechPrepStrategy,
 };
 use crate::convert::{concatenate_pcm_chunks, concatenate_wav_chunks, convert_speech};
 use crate::elevenlabs::ElevenLabsSpeechClient;
@@ -46,6 +45,12 @@ impl ConfiguredSpeechClient {
             .transpose()?
             .map(|client| Box::new(client) as Box<dyn TtsProvider>);
 
+        if google.is_none() && elevenlabs.is_none() {
+            return Err(SpeechError::Config(
+                "at least one TTS provider is required".into(),
+            ));
+        }
+
         let speech_prep = config
             .speech_prep
             .as_ref()
@@ -80,9 +85,17 @@ impl ConfiguredSpeechClient {
         };
 
         let provider = match request.provider_hint.as_deref() {
-            Some(name) => ProviderKind::from_name(name).ok_or_else(|| {
-                SpeechError::Config(format!("invalid TTS provider override: {name}"))
-            })?,
+            Some(name) => {
+                let provider = ProviderKind::from_name(name).ok_or_else(|| {
+                    SpeechError::Config(format!("invalid TTS provider override: {name}"))
+                })?;
+                if persona.is_some_and(|voice| !voice.provider_order.contains(&provider)) {
+                    return Err(SpeechError::Config(format!(
+                        "selected voice has no {name} backend"
+                    )));
+                }
+                provider
+            }
             None => persona
                 .map(|p| p.provider)
                 .unwrap_or(self.config.default_provider),
@@ -104,11 +117,6 @@ impl ConfiguredSpeechClient {
             // Config and unsupported requests are terminal.
             SpeechError::Config(_) | SpeechError::Unsupported(_) | SpeechError::Message(_) => false,
         }
-    }
-
-    /// Returns true if at least one provider client was successfully created.
-    pub fn has_any_provider(&self) -> bool {
-        self.google.is_some() || self.elevenlabs.is_some()
     }
 
     /// Access the resolved TTS configuration.
@@ -166,9 +174,9 @@ impl ConfiguredSpeechClient {
         Some(prep.strategy_for_target(&target))
     }
 
-    fn provider_max_text_length(&self, provider: ProviderKind) -> usize {
+    fn provider_max_text_length(&self, provider: ProviderKind, request: &SpeechRequest) -> usize {
         self.provider_opt(provider)
-            .map(|client| client.max_text_length())
+            .map(|client| client.max_text_length(request))
             .unwrap_or(self.config.max_text_length)
     }
 
@@ -197,7 +205,7 @@ impl ConfiguredSpeechClient {
             instructions: request.instructions.as_deref(),
         };
 
-        let provider_limit = self.provider_max_text_length(provider);
+        let provider_limit = self.provider_max_text_length(provider, request);
         let fit_limit = speech_prep_fit_limit(provider_limit);
         let mut request = request.clone();
         if prep.should_shorten_to_fit(&request.input, provider_limit) {
@@ -618,15 +626,23 @@ impl SpeechClient for ConfiguredSpeechClient {
             Err(e) => e,
         };
 
+        // A provider override is strict: use that backend for the selected
+        // voice or return its failure without trying another backend.
+        if request.provider_hint.is_some() {
+            return Err(primary_err);
+        }
+
         tracing::warn!(%primary_err, provider = ?primary_provider, "primary TTS provider failed, attempting fallback");
 
-        // Fallback: try the other provider if persona allows it.
+        // Fallback follows the selected voice's explicit backend order.
         if let Some(persona) = persona {
-            if persona.fallback_policy == FallbackPolicy::PreservePersona {
-                let fallback_provider = match primary_provider {
-                    ProviderKind::Google => ProviderKind::ElevenLabs,
-                    ProviderKind::ElevenLabs => ProviderKind::Google,
-                };
+            if let Some(fallback_provider) = persona
+                .provider_order
+                .iter()
+                .position(|provider| *provider == primary_provider)
+                .and_then(|index| persona.provider_order.get(index + 1))
+                .copied()
+            {
                 let fallback_request = if primary_prepared_input.is_some()
                     && self.provider_speech_prep_strategy(fallback_provider, &primary_request)
                         == Some(SpeechPrepStrategy::InlineTags)
@@ -672,8 +688,10 @@ mod tests {
         should_use_local_tag_coverage, split_index_at_or_before, split_tts_text,
         synthesize_ordered, ConfiguredSpeechClient,
     };
-    use crate::config::{GoogleRuntimeConfig, ProviderKind, ResolvedTtsConfig};
-    use codex_voice_core::SpeechError;
+    use crate::config::{
+        GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, ResolvedTtsConfig,
+    };
+    use codex_voice_core::{SpeechError, SpeechFormat, SpeechRequest};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -689,20 +707,90 @@ mod tests {
                 api_key: "test-key".to_string(),
                 base_url: "https://example.invalid".to_string(),
                 voice: "Sulafat".to_string(),
-                model: "gemini-2.5-flash-preview-tts".to_string(),
-                fallback_models: vec![],
+                models: vec!["gemini-2.5-flash-preview-tts".to_string()],
                 inline_audio_tags: None,
                 max_text_length: 1_000,
                 timeout: Duration::from_secs(120),
-                scene: None,
-                sample_context: None,
-                style: None,
-                pace: None,
-                constraints: vec![],
             }),
             elevenlabs: None,
             personas: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn constructor_rejects_an_empty_provider_set() {
+        let mut config = google_only_config();
+        config.google = None;
+        let error = match ConfiguredSpeechClient::try_new(config) {
+            Ok(_) => panic!("empty provider set should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("at least one TTS provider is required"));
+    }
+
+    fn request(provider: Option<&str>, voice: Option<&str>) -> SpeechRequest {
+        SpeechRequest {
+            input: "hello".to_string(),
+            provider_hint: provider.map(str::to_string),
+            model_hint: String::new(),
+            voice_hint: voice.map(str::to_string),
+            speech_prep_enabled: None,
+            speech_prep_model_hint: None,
+            speech_prep_reasoning_effort: None,
+            speech_prep_timeout_ms: None,
+            instructions: None,
+            format: SpeechFormat::Mp3,
+            speed: None,
+        }
+    }
+
+    fn google_voice() -> ResolvedPersona {
+        ResolvedPersona {
+            label: "Sky".to_string(),
+            description: "Test".to_string(),
+            provider: ProviderKind::Google,
+            provider_order: vec![ProviderKind::Google],
+            prompt_scene: None,
+            prompt_sample_context: None,
+            prompt_style: None,
+            prompt_pacing: None,
+            prompt_constraints: Vec::new(),
+            google: Some(GooglePersonaConfig {
+                voice_name: "Sulafat".to_string(),
+            }),
+            elevenlabs: None,
+        }
+    }
+
+    #[test]
+    fn explicit_provider_requires_backend_on_selected_voice() {
+        let mut config = google_only_config();
+        config.default_persona = Some("sky".to_string());
+        config.personas.insert("sky".to_string(), google_voice());
+        let client = ConfiguredSpeechClient::try_new(config).unwrap();
+
+        let error = client
+            .resolve_request(&request(Some("elevenlabs"), None))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("selected voice has no elevenlabs backend"));
+    }
+
+    #[test]
+    fn native_voice_ids_do_not_substitute_configured_voices() {
+        let mut config = google_only_config();
+        config.default_persona = Some("sky".to_string());
+        config.personas.insert("sky".to_string(), google_voice());
+        let client = ConfiguredSpeechClient::try_new(config).unwrap();
+        let request = request(Some("google"), Some("native-google-voice"));
+
+        let (provider, persona, native_voice) = client.resolve_request(&request).unwrap();
+        assert_eq!(provider, ProviderKind::Google);
+        assert!(persona.is_none());
+        assert_eq!(native_voice, Some("native-google-voice"));
     }
 
     #[test]

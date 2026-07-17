@@ -80,7 +80,7 @@ run = [
 ]
 
 [tasks.test-web-live]
-description = "Run the single-run live TTS smoke (paid; requires real ~/.codex/read-aloud-defaults.json)"
+description = "Run the single-run live TTS smoke (paid; requires real ~/.config/codex-voice/config.json)"
 dir = "{{cwd}}"
 depends = ["web-build"]
 run = [

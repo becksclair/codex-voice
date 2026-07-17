@@ -10,9 +10,8 @@ use axum::{
 use base64::Engine;
 use codex_voice_core::{SpeechClient, SpeechFormat, SpeechRequest};
 use codex_voice_tts::config::{
-    ElevenLabsPersonaConfig, FallbackPolicy, GooglePersonaConfig, ProviderKind, ResolvedPersona,
-    ResolvedTtsConfig, SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies,
-    SpeechPrepStrategy,
+    ElevenLabsPersonaConfig, GooglePersonaConfig, ProviderKind, ResolvedPersona, ResolvedTtsConfig,
+    SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies, SpeechPrepStrategy,
 };
 use codex_voice_tts::{
     read_codex_auth_snapshot, sync_codex_auth_snapshot, CodexAuthSnapshot, CodexAuthSyncResult,
@@ -128,15 +127,6 @@ struct BrowserGoogleConfig {
     inline_audio_tags: Option<bool>,
     max_text_length: usize,
     timeout_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scene: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sample_context: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    style: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pace: Option<String>,
-    constraints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +135,7 @@ struct BrowserElevenLabsConfig {
     api_key: String,
     base_url: String,
     model_id: String,
+    fallback_models: Vec<String>,
     streaming: BrowserElevenLabsStreamingConfig,
     apply_text_normalization: String,
     output_format: String,
@@ -154,6 +145,7 @@ struct BrowserElevenLabsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     inline_audio_tags: Option<bool>,
     max_text_length: usize,
+    max_text_length_overridden: bool,
     timeout_ms: u64,
 }
 
@@ -185,6 +177,7 @@ struct BrowserPersonaConfig {
     description: String,
     provider: String,
     fallback_policy: String,
+    provider_order: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_scene: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,8 +228,8 @@ impl BrowserTtsConfig {
                     api_key: google.api_key.clone(),
                     base_url: google.base_url.clone(),
                     voice: google.voice.clone(),
-                    model: google.model.clone(),
-                    fallback_models: google.fallback_models.clone(),
+                    model: google.models[0].clone(),
+                    fallback_models: google.models[1..].to_vec(),
                     streaming: BrowserGoogleStreamingConfig {
                         transport: "interactions-stream".to_string(),
                         supported_models: vec!["gemini-3.1-flash-tts-preview".to_string()],
@@ -247,11 +240,6 @@ impl BrowserTtsConfig {
                     inline_audio_tags: google.inline_audio_tags,
                     max_text_length: google.max_text_length,
                     timeout_ms: duration_millis(google.timeout),
-                    scene: google.scene.clone(),
-                    sample_context: google.sample_context.clone(),
-                    style: google.style.clone(),
-                    pace: google.pace.clone(),
-                    constraints: google.constraints.clone(),
                 }),
                 elevenlabs: config
                     .elevenlabs
@@ -259,7 +247,8 @@ impl BrowserTtsConfig {
                     .map(|elevenlabs| BrowserElevenLabsConfig {
                         api_key: elevenlabs.api_key.clone(),
                         base_url: elevenlabs.base_url.clone(),
-                        model_id: elevenlabs.model_id.clone(),
+                        model_id: elevenlabs.models[0].clone(),
+                        fallback_models: elevenlabs.models[1..].to_vec(),
                         streaming: BrowserElevenLabsStreamingConfig {
                             transport: "websocket".to_string(),
                             preferred_model: "eleven_flash_v2_5".to_string(),
@@ -274,6 +263,7 @@ impl BrowserTtsConfig {
                         language_code: elevenlabs.language_code.clone(),
                         inline_audio_tags: elevenlabs.inline_audio_tags,
                         max_text_length: elevenlabs.max_text_length,
+                        max_text_length_overridden: elevenlabs.max_text_length_overridden,
                         timeout_ms: duration_millis(elevenlabs.timeout),
                     }),
             },
@@ -385,7 +375,17 @@ fn browser_persona(persona: &ResolvedPersona) -> BrowserPersonaConfig {
         label: persona.label.clone(),
         description: persona.description.clone(),
         provider: provider_name(persona.provider).to_string(),
-        fallback_policy: fallback_policy_name(persona.fallback_policy).to_string(),
+        fallback_policy: if persona.provider_order.len() > 1 {
+            "preserve-persona"
+        } else {
+            "strict"
+        }
+        .to_string(),
+        provider_order: persona
+            .provider_order
+            .iter()
+            .map(|provider| provider_name(*provider).to_string())
+            .collect(),
         prompt_scene: persona.prompt_scene.clone(),
         prompt_sample_context: persona.prompt_sample_context.clone(),
         prompt_style: persona.prompt_style.clone(),
@@ -428,13 +428,6 @@ fn speech_prep_provider_name(provider: SpeechPrepProviderKind) -> &'static str {
     match provider {
         SpeechPrepProviderKind::Google => "google",
         SpeechPrepProviderKind::Codex => "codex",
-    }
-}
-
-fn fallback_policy_name(policy: FallbackPolicy) -> &'static str {
-    match policy {
-        FallbackPolicy::PreservePersona => "preserve-persona",
-        FallbackPolicy::Strict => "strict",
     }
 }
 

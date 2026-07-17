@@ -67,7 +67,7 @@ LIVE_TTS=1 bunx playwright test tests/live.spec.ts
 
 Requirements and cost:
 
-- Needs the operator's real `~/.codex/read-aloud-defaults.json` on the host so
+- Needs the operator's real `~/.config/codex-voice/config.json` on the host so
   `/web/config` returns live provider keys.
 - **Cost per run:** one ~1.9k-character backend-first generation. The input is
   long enough to exercise backend prep and chunked synthesis. That is the
@@ -116,8 +116,8 @@ and context around every insertion.
 
 ## Notes
 
-- The server has no flag to override the TTS defaults path
-  (`~/.codex/read-aloud-defaults.json`); it only *enables* TTS when present.
+- The server uses the platform Codex Voice config path
+  (`~/.config/codex-voice/config.json` on Linux); it only *enables* TTS when present.
   Routine generation coverage intercepts `/web/config` and `/web/speech-jobs`,
   so a missing or real config file does not affect results.
 - Clipboard access works because `127.0.0.1` is a secure context and the

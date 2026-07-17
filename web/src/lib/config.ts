@@ -27,16 +27,11 @@ export interface BrowserGoogleConfig {
   baseUrl: string;
   voice: string;
   model: string;
-  fallbackModels: string[];
+  fallbackModels?: string[];
   streaming: BrowserGoogleStreamingConfig;
   inlineAudioTags?: boolean;
   maxTextLength: number;
   timeoutMs: number;
-  scene?: string;
-  sampleContext?: string;
-  style?: string;
-  pace?: string;
-  constraints: string[];
 }
 
 /** ElevenLabs streaming sub-config (`BrowserElevenLabsStreamingConfig`). */
@@ -54,6 +49,7 @@ export interface BrowserElevenLabsConfig {
   apiKey: string;
   baseUrl: string;
   modelId: string;
+  fallbackModels?: string[];
   streaming: BrowserElevenLabsStreamingConfig;
   applyTextNormalization: string;
   outputFormat: string;
@@ -61,6 +57,7 @@ export interface BrowserElevenLabsConfig {
   languageCode?: string;
   inlineAudioTags?: boolean;
   maxTextLength: number;
+  maxTextLengthOverridden?: boolean;
   timeoutMs: number;
 }
 
@@ -150,6 +147,7 @@ export interface BrowserPersonaConfig {
   description: string;
   provider: string;
   fallbackPolicy: string;
+  providerOrder?: string[];
   promptScene?: string;
   promptSampleContext?: string;
   promptStyle?: string;

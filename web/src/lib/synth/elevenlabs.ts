@@ -24,6 +24,7 @@ import { clamp } from "../util.ts";
 import { TTS_CHUNK_MIN_CHARS, splitTtsText } from "./chunking.ts";
 import { providerError, selectedProviderModel } from "./common.ts";
 import { synthesizeChunksOrdered } from "./pool.ts";
+import { providerTimeoutSignal } from "./timeout.ts";
 
 /** Options for a single ElevenLabs synth request. */
 export interface ElevenLabsSingleOptions {
@@ -183,23 +184,28 @@ export async function synthesizeElevenLabsSingle(
     apply_text_normalization: elevenlabs.applyTextNormalization,
   };
   if (elevenlabs.languageCode) body.language_code = elevenlabs.languageCode;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "xi-api-key": elevenlabs.apiKey,
-    },
-    body: JSON.stringify(body),
-    signal: options.signal ?? null,
-  });
-  if (!response.ok) throw await providerError(response, "ElevenLabs TTS failed");
-  const bytes = await response.arrayBuffer();
-  if ((outputFormat || "").startsWith("pcm") && !options.rawPcm) {
-    return wavBlobFromPcm(new Uint8Array(bytes), elevenLabsSampleRate(outputFormat));
+  const timed = providerTimeoutSignal(elevenlabs.timeoutMs, input, options.signal);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "xi-api-key": elevenlabs.apiKey,
+      },
+      body: JSON.stringify(body),
+      signal: timed.signal,
+    });
+    if (!response.ok) throw await providerError(response, "ElevenLabs TTS failed");
+    const bytes = await response.arrayBuffer();
+    if ((outputFormat || "").startsWith("pcm") && !options.rawPcm) {
+      return wavBlobFromPcm(new Uint8Array(bytes), elevenLabsSampleRate(outputFormat));
+    }
+    return new Blob([bytes], {
+      type: response.headers.get("content-type") || elevenLabsMimeType(outputFormat),
+    });
+  } finally {
+    timed.dispose();
   }
-  return new Blob([bytes], {
-    type: response.headers.get("content-type") || elevenLabsMimeType(outputFormat),
-  });
 }
 
 /**

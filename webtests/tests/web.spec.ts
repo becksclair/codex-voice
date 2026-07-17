@@ -60,7 +60,7 @@ test('paste button fills the textarea without stealing focus', async ({ page }) 
   // focus from wherever the user had it.
 
   // Disable "generate on paste" so the paste flow does not attempt TTS
-  // generation (TTS is disabled without ~/.codex/read-aloud-defaults.json).
+  // generation (TTS is disabled without ~/.config/codex-voice/config.json).
   await page.locator('#settings-toggle').click();
   const generateOnPaste = page.locator('#generate-on-paste');
   await expect(generateOnPaste).toBeVisible();

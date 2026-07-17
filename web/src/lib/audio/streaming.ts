@@ -37,6 +37,7 @@ import {
   elevenLabsWebSocketModelSupported,
   websocketBaseUrl,
 } from "../synth/elevenlabs.ts";
+import { providerTimeoutSignal } from "../synth/timeout.ts";
 import {
   buildGoogleTtsPrompt,
   canStreamGoogle,
@@ -410,6 +411,10 @@ export function streamAbortError(message = "Generation was cancelled."): Error {
   return error;
 }
 
+function signalAbortError(signal: AbortSignal | null | undefined): Error {
+  return signal?.reason instanceof Error ? signal.reason : streamAbortError();
+}
+
 /** Result of a streaming synthesis. */
 export interface StreamResult {
   blob: Blob;
@@ -438,7 +443,7 @@ export interface StreamOptions {
 }
 
 function ensureNotCancelled(options: StreamOptions): void {
-  if (options.signal?.aborted) throw streamAbortError();
+  if (options.signal?.aborted) throw signalAbortError(options.signal);
   options.throwIfCancelled?.();
 }
 
@@ -701,6 +706,10 @@ export async function streamElevenLabs(
   const sink = createPcmStreamSink(sinkOptionsFrom(config, options));
   options.onPlaybackReady?.(sink.playback);
   await sink.start();
+  if (options.signal?.aborted) {
+    sink.fail();
+    throw signalAbortError(options.signal);
+  }
   options.onProgress?.(0.48, "Connecting");
 
   return new Promise<StreamResult>((resolve, reject) => {
@@ -709,14 +718,23 @@ export async function streamElevenLabs(
     let receivedAudio = false;
     const socket = new WebSocket(url.toString());
     const signal = options.signal ?? null;
-    const abort = (): void => {
+    function fail(error: unknown): void {
+      if (settled) return;
+      signal?.removeEventListener("abort", abort);
+      settled = true;
+      sink.fail();
+      reject(
+        error instanceof Error ? error : new Error(String(error || "ElevenLabs stream failed.")),
+      );
+    }
+    function abort(): void {
       try {
         socket.close();
       } catch {
         // Ignored.
       }
-      fail(streamAbortError());
-    };
+      fail(signalAbortError(signal));
+    }
     if (signal?.aborted) {
       abort();
       return;
@@ -732,15 +750,6 @@ export async function streamElevenLabs(
       } catch (error) {
         fail(error);
       }
-    };
-    const fail = (error: unknown): void => {
-      if (settled) return;
-      signal?.removeEventListener("abort", abort);
-      settled = true;
-      sink.fail();
-      reject(
-        error instanceof Error ? error : new Error(String(error || "ElevenLabs stream failed.")),
-      );
     };
     socket.addEventListener("open", () => {
       opened = true;
@@ -801,10 +810,27 @@ export async function tryStreamProvider(
   options: StreamOptions = {},
 ): Promise<StreamResult | null> {
   if (provider === "elevenlabs" && canStreamElevenLabs(config, persona, options.settingsModel)) {
-    return streamElevenLabs(config, input, persona, options);
+    const timed = providerTimeoutSignal(
+      config.providers.elevenlabs!.timeoutMs,
+      input,
+      options.signal,
+    );
+    try {
+      return await streamElevenLabs(config, input, persona, { ...options, signal: timed.signal });
+    } finally {
+      timed.dispose();
+    }
   }
   if (provider === "google" && canStreamGoogle(config, options.settingsModel)) {
-    return streamGoogle(config, input, persona, instructions, options);
+    const timed = providerTimeoutSignal(config.providers.google!.timeoutMs, input, options.signal);
+    try {
+      return await streamGoogle(config, input, persona, instructions, {
+        ...options,
+        signal: timed.signal,
+      });
+    } finally {
+      timed.dispose();
+    }
   }
   return null;
 }

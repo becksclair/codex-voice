@@ -83,7 +83,7 @@ test.describe.serial('live TTS smoke', () => {
     const configRes = await page.request.get('/web/config', { headers: { 'cache-control': 'no-store' } });
     test.skip(
       configRes.status() === 503,
-      '/web/config returned 503 — no real TTS config on this host (add ~/.codex/read-aloud-defaults.json)',
+      '/web/config returned 503 — no real TTS config on this host (add ~/.config/codex-voice/config.json)',
     );
     expect(configRes.ok()).toBeTruthy();
     const config = (await configRes.json()) as { providers?: Record<string, unknown> };

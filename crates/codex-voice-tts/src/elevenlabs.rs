@@ -7,6 +7,9 @@ use crate::provider::TtsProvider;
 use crate::provider_timeout::tts_timeout_for_input;
 use crate::sanitize::sanitize_for_tts;
 
+const ELEVENLABS_DEFAULT_MAX_TEXT_LENGTH: usize = 6_000;
+const ELEVENLABS_V3_MAX_TEXT_LENGTH: usize = 5_000;
+
 pub struct ElevenLabsSpeechClient {
     config: ElevenLabsRuntimeConfig,
     client: Client,
@@ -23,18 +26,28 @@ impl ElevenLabsSpeechClient {
     pub fn supports_inline_audio_tags(&self, request: &SpeechRequest) -> bool {
         let model_id = self
             .resolved_model_id(request)
-            .unwrap_or_else(|_| self.config.model_id.clone());
+            .unwrap_or_else(|_| self.config.models[0].clone());
         self.config
             .inline_audio_tags
             .unwrap_or_else(|| elevenlabs_model_supports_inline_audio_tags(&model_id))
     }
 
     pub fn resolved_model_id(&self, request: &SpeechRequest) -> SpeechResult<String> {
-        resolve_model_id(&request.model_hint, &self.config.model_id)
+        resolve_model_id(&request.model_hint, &self.config.models)
     }
 
-    pub fn max_text_length(&self) -> usize {
-        self.config.max_text_length
+    pub fn max_text_length(&self, request: &SpeechRequest) -> usize {
+        if self.config.max_text_length_overridden {
+            return self.config.max_text_length;
+        }
+        let model = self
+            .resolved_model_id(request)
+            .unwrap_or_else(|_| self.config.models[0].clone());
+        if elevenlabs_model_is_v3(&model) {
+            ELEVENLABS_V3_MAX_TEXT_LENGTH
+        } else {
+            ELEVENLABS_DEFAULT_MAX_TEXT_LENGTH
+        }
     }
 
     pub async fn synthesize(
@@ -43,7 +56,7 @@ impl ElevenLabsSpeechClient {
         persona: Option<&ResolvedPersona>,
         native_voice: Option<&str>,
     ) -> SpeechResult<SynthesizedSpeech> {
-        let sanitized = sanitize_for_tts(&request.input, self.config.max_text_length)?;
+        let sanitized = sanitize_for_tts(&request.input, self.max_text_length(request))?;
 
         let voice_id = persona
             .and_then(|p| p.elevenlabs.as_ref())
@@ -158,8 +171,8 @@ impl TtsProvider for ElevenLabsSpeechClient {
         ElevenLabsSpeechClient::resolved_model_id(self, request)
     }
 
-    fn max_text_length(&self) -> usize {
-        ElevenLabsSpeechClient::max_text_length(self)
+    fn max_text_length(&self, request: &SpeechRequest) -> usize {
+        ElevenLabsSpeechClient::max_text_length(self, request)
     }
 
     async fn synthesize(
@@ -230,27 +243,28 @@ fn build_request_body(
     body
 }
 
-fn resolve_model_id(model_hint: &str, configured: &str) -> SpeechResult<String> {
-    if model_hint.is_empty()
-        || model_hint == configured
-        || model_hint.starts_with("tts-")
-        || model_hint.starts_with("gpt-")
-    {
-        return Ok(configured.to_string());
+fn resolve_model_id(model_hint: &str, configured: &[String]) -> SpeechResult<String> {
+    let default = &configured[0];
+    if model_hint.is_empty() || model_hint.starts_with("tts-") || model_hint.starts_with("gpt-") {
+        return Ok(default.clone());
     }
 
-    if model_hint.starts_with("eleven_") {
+    if configured.iter().any(|model| model == model_hint) {
         return Ok(model_hint.to_string());
     }
 
     Err(SpeechError::Unsupported(format!(
-        "unsupported ElevenLabs model override {model_hint:?}; use an ElevenLabs model id or omit model to use configured {configured:?}"
+        "unsupported ElevenLabs model override {model_hint:?}; use a configured model or omit model to use {default:?}"
     )))
 }
 
 fn elevenlabs_model_supports_inline_audio_tags(model_id: &str) -> bool {
     let normalized = model_id.to_ascii_lowercase();
     normalized == "eleven_v3" || normalized.starts_with("eleven_v3_")
+}
+
+fn elevenlabs_model_is_v3(model_id: &str) -> bool {
+    elevenlabs_model_supports_inline_audio_tags(model_id)
 }
 
 fn format_from_elevenlabs_output(output_format: &str) -> SpeechFormat {
@@ -289,10 +303,74 @@ mod tests {
     use super::{
         build_request_body, elevenlabs_model_supports_inline_audio_tags,
         format_from_elevenlabs_output, mime_type_from_elevenlabs_output, normalize_speed,
-        output_format_for_request,
+        output_format_for_request, ElevenLabsSpeechClient,
     };
-    use crate::config::{ElevenLabsPersonaConfig, ElevenLabsVoiceSettings};
-    use codex_voice_core::SpeechFormat;
+    use crate::config::{
+        ElevenLabsPersonaConfig, ElevenLabsRuntimeConfig, ElevenLabsVoiceSettings,
+    };
+    use codex_voice_core::{SpeechFormat, SpeechRequest};
+    use std::time::Duration;
+
+    fn request(model: &str) -> SpeechRequest {
+        SpeechRequest {
+            input: "hello".to_string(),
+            provider_hint: None,
+            model_hint: model.to_string(),
+            voice_hint: None,
+            speech_prep_enabled: None,
+            speech_prep_model_hint: None,
+            speech_prep_reasoning_effort: None,
+            speech_prep_timeout_ms: None,
+            instructions: None,
+            format: SpeechFormat::Mp3,
+            speed: None,
+        }
+    }
+
+    fn test_client(
+        max_text_length_overridden: bool,
+        models: Vec<String>,
+    ) -> ElevenLabsSpeechClient {
+        ElevenLabsSpeechClient::new(ElevenLabsRuntimeConfig {
+            api_key: "test".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            models,
+            apply_text_normalization: "auto".to_string(),
+            output_format: "mp3_44100_128".to_string(),
+            stream_gain: 1.0,
+            language_code: None,
+            inline_audio_tags: None,
+            max_text_length: 6_000,
+            max_text_length_overridden,
+            timeout: Duration::from_secs(30),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn max_text_length_is_model_aware_unless_explicitly_overridden() {
+        let client = test_client(
+            false,
+            vec!["eleven_flash_v2_5".to_string(), "eleven_v3".to_string()],
+        );
+        assert_eq!(client.max_text_length(&request("eleven_flash_v2_5")), 6_000);
+        assert_eq!(client.max_text_length(&request("eleven_v3")), 5_000);
+
+        let reversed = test_client(
+            false,
+            vec!["eleven_v3".to_string(), "eleven_flash_v2_5".to_string()],
+        );
+        assert_eq!(
+            reversed.max_text_length(&request("eleven_flash_v2_5")),
+            6_000
+        );
+
+        let overridden = test_client(
+            true,
+            vec!["eleven_flash_v2_5".to_string(), "eleven_v3".to_string()],
+        );
+        assert_eq!(overridden.max_text_length(&request("eleven_v3")), 6_000);
+    }
 
     #[test]
     fn normalize_speed_serializes_upper_bound_without_f32_artifact() {

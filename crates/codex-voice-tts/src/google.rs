@@ -28,15 +28,11 @@ impl GoogleSpeechClient {
     }
 
     pub fn resolved_model_id<'a>(&'a self, request: &'a SpeechRequest) -> &'a str {
-        if self.config.model == request.model_hint || request.model_hint.is_empty() {
-            &self.config.model
-        } else {
-            self.config
-                .fallback_models
-                .iter()
-                .find(|m| *m == &request.model_hint)
-                .unwrap_or(&self.config.model)
-        }
+        self.config
+            .models
+            .iter()
+            .find(|model| *model == &request.model_hint)
+            .unwrap_or(&self.config.models[0])
     }
 
     pub fn max_text_length(&self) -> usize {
@@ -200,7 +196,7 @@ impl TtsProvider for GoogleSpeechClient {
         Ok(GoogleSpeechClient::resolved_model_id(self, request).to_string())
     }
 
-    fn max_text_length(&self) -> usize {
+    fn max_text_length(&self, _request: &SpeechRequest) -> usize {
         GoogleSpeechClient::max_text_length(self)
     }
 
@@ -384,20 +380,10 @@ mod live_tests {
             api_key,
             base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
             voice: "Sulafat".to_string(),
-            model: "gemini-2.5-flash-preview-tts".to_string(),
-            fallback_models: vec![],
+            models: vec!["gemini-2.5-flash-preview-tts".to_string()],
             inline_audio_tags: None,
             max_text_length: 1000,
             timeout: std::time::Duration::from_secs(120),
-            scene: Some(
-                "Lying by your side at home, chatting and daydreaming together.".to_string(),
-            ),
-            sample_context: Some("Sassy, sexy, enthusiastic, flirty.".to_string()),
-            style: Some("Warm, sassy, playful, and flirtatious.".to_string()),
-            pace: Some("Conversational and relaxed.".to_string()),
-            constraints: vec![
-                "Do not explain the persona or read configuration values aloud.".to_string(),
-            ],
         };
 
         let client = GoogleSpeechClient::new(config).expect("client creation failed");

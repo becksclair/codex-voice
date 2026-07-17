@@ -69,7 +69,7 @@ The main window loads `{base}/web?app=1`; the settings window loads
 | `mise run web-fmt` | Format in place with oxfmt |
 | `mise run web-test` | vitest unit/component suite |
 | `mise run test-web` | Playwright e2e suite (builds the frontend first, spawns the real Rust server) |
-| `mise run test-web-live` | Single-run live TTS smoke — **paid** (~2k characters); needs real `~/.codex/read-aloud-defaults.json`; ElevenLabs leg opt-in via `LIVE_TTS_ELEVENLABS=1` |
+| `mise run test-web-live` | Single-run live TTS smoke — **paid** (~2k characters); needs real `~/.config/codex-voice/config.json`; ElevenLabs leg opt-in via `LIVE_TTS_ELEVENLABS=1` |
 | `mise run setup` | Builds the frontend, then the release binary (embedding it), installs, and enables user services |
 
 Typical development loop: `mise run dev`, edit under `web/src/`, changes hot-reload instantly; the Rust server only needs a restart when Rust code changes. To point HMR at the deployed Tailscale instance instead of a local server: `CODEX_VOICE_BACKEND=http://<tailscale-ip>:3845 mise run web-dev`.
@@ -88,7 +88,7 @@ Typical development loop: `mise run dev`, edit under `web/src/`, changes hot-rel
 
 - Never print or commit access tokens, refresh tokens, full account IDs, full transcripts, or private audio.
 - Codex auth is read from `~/.codex/auth.json`; do not write this file directly.
-- TTS secrets are read from `~/.codex/read-aloud-defaults.json`; never log API keys.
+- TTS provider secrets are read from environment variables; never log API keys. The XDG config may name a nonstandard variable but never stores secret values.
 - Diagnostics may print token presence, redacted account IDs, transcript length, and short previews only.
 - Temp WAV files must be deleted unless the user explicitly asks to keep a diagnostic recording.
 
@@ -118,7 +118,7 @@ rg -n "DictationEngine|HotkeyEvent|TextInjector|AudioRecorder|TranscriptionClien
 rg -n "doctor|Parser|Subcommand" crates/codex-voice-app/src
 rg -n "cpal|WavWriter|RecordedAudio" crates/codex-voice-audio/src
 rg -n "auth|transcribe|TRANSCRIBE_URL|account/read" crates/codex-voice-codex/src
-rg -n "tts|speech|synthesize|ProviderKind|FallbackPolicy|ReadAloudConfig" crates/codex-voice-tts/src
+rg -n "tts|speech|synthesize|ProviderKind|VoiceConfigLoader" crates/codex-voice-tts/src
 rg -n "GlobalShortcuts|RemoteDesktop|Clipboard|PortalTokenStore|PortalPaste" crates/codex-voice-platform/src
 find crates -name '*test*' -o -name '*.rs'
 ```

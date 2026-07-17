@@ -3,7 +3,7 @@
  *
  * Ports the run lifecycle and provider selection of app.html:
  * - persona/provider resolution (`selectedPersonaName`, `resolvePersona`,
- *   `resolveProvider`, `fallbackProvider`, `personaSupportsProvider`,
+ *   `resolveProvider`, `personaSupportsProvider`,
  *   `firstPersonaForProvider`) — lines ~955-1875
  * - `synthesizeProvider` / `generateDirect` / `generateViaServer` — lines
  *   ~3409-3559
@@ -27,7 +27,13 @@ import {
 import { audioBlobFromBase64 } from "./audio/wav.ts";
 import type { BrowserPersonaConfig, BrowserTtsConfig } from "./config.ts";
 import { saveCachedConfig, syncCodexAuthToServer } from "./config.ts";
-import { resolvePersona, resolveProvider, selectedPersonaName } from "./personas.ts";
+import {
+  nextVoiceProvider,
+  personaSupportsProvider,
+  resolvePersona,
+  resolveProvider,
+  selectedPersonaName,
+} from "./personas.ts";
 import {
   prepareForProvider,
   providerMaxTextLength,
@@ -164,11 +170,6 @@ export function isBackendUnavailable(error: StatusError | null | undefined): boo
   );
 }
 
-/** The other provider. Ports `fallbackProvider`. */
-export function fallbackProvider(provider: string): string {
-  return provider === "google" ? "elevenlabs" : "google";
-}
-
 /** Whether a provider supports streaming for the current config/persona/settings. Ports `canStreamProvider`. */
 export function canStreamProvider(
   config: BrowserTtsConfig,
@@ -196,8 +197,8 @@ export function canStreamSelectedProvider(
   if (!config) return false;
   const selectedProvider = settings.provider !== "auto" ? settings.provider : null;
   const provider =
-    selectedProvider || resolveProvider(config, resolvePersona(config, null, settings), settings);
-  const persona = resolvePersona(config, provider, settings);
+    selectedProvider || resolveProvider(config, resolvePersona(config, settings), settings);
+  const persona = resolvePersona(config, settings);
   return canStreamProvider(config, provider, persona, settings.model);
 }
 
@@ -206,11 +207,18 @@ export function serverJobOptions(
   settings: WebSettings,
 ): WebSpeechJobOptions {
   const provider = settings.provider === "auto" ? undefined : settings.provider;
-  const voice = config
-    ? (selectedPersonaName(config, provider ?? null, settings) ?? undefined)
-    : settings.voice.startsWith("persona:")
-      ? settings.voice.slice("persona:".length)
-      : undefined;
+  let voice: string | undefined;
+  if (config && settings.voice === "provider-default") {
+    const effectiveProvider = provider || config.defaultProvider;
+    if (effectiveProvider !== "google") {
+      throw new Error("Provider-default voice is only available for Google.");
+    }
+    voice = config.providers.google?.voice;
+  } else if (config) {
+    voice = selectedPersonaName(config, settings) ?? undefined;
+  } else if (settings.voice.startsWith("persona:")) {
+    voice = settings.voice.slice("persona:".length);
+  }
   const model = settings.model === "default" ? undefined : settings.model.split(":", 2)[1];
   const speechPrepEnabled =
     config?.speechPrep?.mode === "shorten" ? settings.summarization : settings.emotionPreprocessing;
@@ -341,6 +349,11 @@ export class GenerationController {
     settings: GenerationSettingsSnapshot,
     streamOnly = false,
   ): Promise<SynthesisResult> {
+    if (persona && !personaSupportsProvider(persona, provider)) {
+      const error = new Error(`Selected voice has no ${provider} backend.`) as StatusError;
+      error.retryable = false;
+      throw error;
+    }
     this.status(0.32, "Preparing");
     const throwIfCancelled = (): void => this.ensureNotCancelled(signal, runId);
     const onCodexAuthRefreshed = (refreshed: EffectiveSpeechPrep): void => {
@@ -499,8 +512,8 @@ export class GenerationController {
     const prepCache = new Map<string, PrepResult>();
     const selectedProvider = settings.provider !== "auto" ? settings.provider : null;
     const primary =
-      selectedProvider || resolveProvider(config, resolvePersona(config, null, settings), settings);
-    const persona = resolvePersona(config, primary, settings);
+      selectedProvider || resolveProvider(config, resolvePersona(config, settings), settings);
+    const persona = resolvePersona(config, settings);
     try {
       return await this.synthesizeProvider(
         config,
@@ -515,9 +528,11 @@ export class GenerationController {
       );
     } catch (error) {
       if (streamOnly) throw error;
+      if (selectedProvider) throw error;
       if (!isRetryable(error as StatusError) || persona?.fallbackPolicy !== "preserve-persona")
         throw error;
-      const fallback = fallbackProvider(primary);
+      const fallback = nextVoiceProvider(persona, primary);
+      if (!fallback) throw error;
       if (!config.providers?.[fallback as "google" | "elevenlabs"]) throw error;
       return await this.synthesizeProvider(
         config,

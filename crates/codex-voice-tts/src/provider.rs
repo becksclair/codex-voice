@@ -12,7 +12,7 @@ use crate::config::ResolvedPersona;
 pub(crate) trait TtsProvider: Send + Sync {
     fn supports_inline_audio_tags(&self, request: &SpeechRequest) -> bool;
     fn resolved_model_id(&self, request: &SpeechRequest) -> SpeechResult<String>;
-    fn max_text_length(&self) -> usize;
+    fn max_text_length(&self, request: &SpeechRequest) -> usize;
     async fn synthesize(
         &self,
         request: &SpeechRequest,

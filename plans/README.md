@@ -50,7 +50,7 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 | 019 | PWA test harness (Playwright/bun against /web) | DONE — landed; 7 behavioral tests incl. real-clipboard focus regression; run via `mise run test-web`; CI wiring deliberately deferred (browser download weight) |
 | 020 | Windows packaging script + headless devbox verification | DONE — landed (build-dist.ps1 + SMOKE.md); zip built+verified on devbox (SHA256 6BE205…, exe runs); dist at `C:\Users\bex\codex-voice\dist\` |
 | 021 | Small-wins basket: cargo-deny CI gate, browser-JS concurrent TTS chunks, speech_prep split, refresh mutex | DONE — landed as 4 commits (`d20ccba`,`e1f41ba`,`e3a0e70`,`f3fdaec`); deny licenses/sources verified locally, advisories enforced in CI; JS concurrency syntax-verified only (no runtime harness exercised it) |
-| 022 | `tts bench` subcommand (retire Python benchmark drift) | DONE — landed; reuses production SpeechPrepClient/CodexLlmClient, `--dry-run` verified; Python script deprecated in place; live bench is operator-run |
+| 022 | `tts bench` subcommand (retire Python benchmark drift) | DONE — landed; reuses production SpeechPrepClient/CodexLlmClient, `--dry-run` verified; duplicate Python script removed; live bench is operator-run |
 
 ## Standalone web frontend migration (2026-07-07)
 
@@ -92,7 +92,7 @@ Replacing the embedded single-file PWA (`crates/codex-voice-transcriber/assets/w
 - **Web PWA trajectory**: browser-side JS still synthesizes chunks serially (plan 009 fixes only the Rust path); a JS test harness (e.g. Playwright against `/web`) and a web *transcription* surface (record → upload → transcript, closing the PWA's TTS-only asymmetry) are natural next steps after plan 006's asset extraction. Design spike, not planned.
 - **Windows completion**: compile + full test suite + clippy verified on the devbox VM (2026-07-07, commit `456ee71`). Remaining: interactive runtime smoke (tray, `SendInput` paste vs UIPI — needs a human at the VM desktop) and packaging.
 - **macOS: ON HOLD (2026-07-07)** — no macOS hardware available. All macOS work is frozen: the tray/shim/error edits from plans 012/013/014 are mechanically mirrored but uncompiled and unverified; Phase-5 completion gates (Info.plist, mic permission, packaging) untouched. Revisit when a Mac is available; until then treat macOS code as best-effort-maintained, not shipped.
-- **`tts bench` CLI subcommand**: `scripts/tts_prep_benchmark.py` re-implements auth/config surfaces the Rust crates own; parity with `transcriber probe-limits` would end the drift. Optional.
+- **`tts bench` CLI subcommand**: completed in Rust; the duplicate Python benchmark has been removed.
 - **speech_prep.rs (1,693 lines) split** into `speech_prep/{prompts,shorten,tag_repair,validate}.rs` — real but lower-leverage than the server.rs split; do it opportunistically when next editing that file.
 - **Serialized double-refresh guard in codex_llm `tokens()`** (concurrent refreshes both hit the token endpoint) — harmless waste; noted in plan 003's maintenance notes.
 - **Retry-per-chunk policy for chunked transcription** — plan 008 keeps fail-fast semantics; revisit if long jobs abort late in practice.

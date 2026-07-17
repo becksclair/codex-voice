@@ -26,6 +26,7 @@ import type { BrowserGoogleConfig, BrowserPersonaConfig, BrowserTtsConfig } from
 import { TTS_CHUNK_MIN_CHARS, splitTtsText } from "./chunking.ts";
 import { providerError, selectedProviderModel } from "./common.ts";
 import { synthesizeChunksOrdered } from "./pool.ts";
+import { providerTimeoutSignal } from "./timeout.ts";
 
 /** Options shared by the Google synth entry points. */
 export interface GoogleSynthOptions {
@@ -148,40 +149,45 @@ export async function fetchGoogleAudio(
   if (!google) throw new Error("Google TTS is not configured.");
   const model = options.model ?? google.model;
   const voiceName = persona?.google?.voiceName || google.voice;
-  const response = await fetch(
-    `${google.baseUrl}/models/${encodeURIComponent(model)}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": google.apiKey,
-      },
-      body: JSON.stringify({
-        contents: [
-          { role: "user", parts: [{ text: buildGoogleTtsPrompt(input, persona, instructions) }] },
-        ],
-        generationConfig: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
+  const timed = providerTimeoutSignal(google.timeoutMs, input, options.signal);
+  try {
+    const response = await fetch(
+      `${google.baseUrl}/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": google.apiKey,
+        },
+        body: JSON.stringify({
+          contents: [
+            { role: "user", parts: [{ text: buildGoogleTtsPrompt(input, persona, instructions) }] },
+          ],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName },
+              },
             },
           },
-        },
-      }),
-      signal: options.signal ?? null,
-    },
-  );
-  if (!response.ok) throw await providerError(response, "Google TTS failed");
-  const json = (await response.json()) as {
-    candidates?: { content?: { parts?: GoogleInlinePart[] } }[];
-  };
-  const parts = json?.candidates?.[0]?.content?.parts || [];
-  const inline = parts.map((part) => part.inlineData || part.inline_data).find(Boolean);
-  if (!inline?.data) throw new Error("Google TTS returned no audio.");
-  const mimeType = inline.mimeType || inline.mime_type || "audio/L16;codec=pcm;rate=24000";
-  const bytes = base64ToBytes(inline.data);
-  return { bytes, mimeType };
+        }),
+        signal: timed.signal,
+      },
+    );
+    if (!response.ok) throw await providerError(response, "Google TTS failed");
+    const json = (await response.json()) as {
+      candidates?: { content?: { parts?: GoogleInlinePart[] } }[];
+    };
+    const parts = json?.candidates?.[0]?.content?.parts || [];
+    const inline = parts.map((part) => part.inlineData || part.inline_data).find(Boolean);
+    if (!inline?.data) throw new Error("Google TTS returned no audio.");
+    const mimeType = inline.mimeType || inline.mime_type || "audio/L16;codec=pcm;rate=24000";
+    const bytes = base64ToBytes(inline.data);
+    return { bytes, mimeType };
+  } finally {
+    timed.dispose();
+  }
 }
 
 interface GoogleInlineData {

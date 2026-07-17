@@ -52,6 +52,7 @@ const persona: BrowserPersonaConfig = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -156,5 +157,25 @@ describe("synthesizeElevenLabsSingle", () => {
     await expect(synthesizeElevenLabsSingle(config, "x", noVoice)).rejects.toThrow(
       "ElevenLabs voice_id is not configured for this persona.",
     );
+  });
+
+  it("aborts a stalled provider request at the configured timeout", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      ),
+    );
+
+    const request = synthesizeElevenLabsSingle(config, "hello", persona);
+    const rejected = expect(request).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejected;
   });
 });

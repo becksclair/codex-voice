@@ -885,7 +885,7 @@ fn strip_ascii_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'
 
 /// Unicode-aware case-insensitive prefix strip.
 ///
-/// User-supplied palette phrases (e.g. from `read-aloud-defaults.json`) can
+/// User-supplied palette phrases (e.g. from `codex-voice/config.json`) can
 /// contain non-ASCII letters, so a plain byte-length prefix strip is not
 /// safe: `char::to_lowercase()` can change the byte (and even char) length
 /// of a folded string (e.g. Turkish `İ` folds to the two-character `i̇`).

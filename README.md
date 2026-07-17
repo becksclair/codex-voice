@@ -177,12 +177,11 @@ non-older bundles are the only accepted updates.
 
 ## Text-to-Speech (TTS)
 
-`server` includes TTS when `~/.codex/read-aloud-defaults.json` is present and
-valid. If TTS config is absent, transcription still works and the speech endpoint
-returns `503`. See `docs/read-aloud-defaults.example.json` for an example
-config with a persona, both provider backends, and a `speechPrep` block
-(placeholder API keys only — replace them with real values or env-sourced
-secrets before use).
+`server` includes TTS when `${XDG_CONFIG_HOME:-~/.config}/codex-voice/config.json`
+is present and valid. If the config is absent, transcription still works and the
+speech endpoint returns `503`. See `docs/codex-voice-config.example.json` for the
+strict version-1 schema. Provider keys are environment-only (`GEMINI_API_KEY` or
+`GOOGLE_API_KEY`, and `ELEVENLABS_API_KEY` or `ELEVEN_API_KEY`).
 
 The TTS endpoint accepts standard OpenAI TTS JSON requests:
 
@@ -201,11 +200,12 @@ Google Gemini TTS currently returns raw `audio/L16;codec=pcm;rate=24000`, so
 `wav` is wrapped locally and compressed/container formats require `ffmpeg` on
 `PATH`.
 
-`voice` is optional. When omitted, the configured default persona/provider voice
-is used. When present, it can be a configured persona name (e.g. `"sky"`) or a
-provider-native voice identifier for the selected/default provider. If a persona
-is configured, the service uses the persona's primary provider and preserves
-persona context (scene, style, pace) across fallback to the other provider.
+`voice` is optional. When omitted, `defaultVoice` is used. A named voice owns an
+ordered `backends` list: the first backend is primary and later entries are
+retry fallbacks. When present, `voice` can be a configured voice name (e.g.
+`"sky"`) or a provider-native identifier for the selected/default provider.
+Structured scene, sample context, style, pace, and constraints stay attached to
+the same voice across fallback; Codex Voice never substitutes a different voice.
 
 Google Gemini TTS voice names use star/planet identifiers such as `zephyr`,
 `aoede`, `callirrhoe`, `charon`, `gacrux`, `orion`, and `puck`. OpenAI-style
@@ -222,26 +222,47 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello world
 fixed sample across the default Codex and Google prep-model set, reusing the same
 `SpeechPrepClient`/Codex clients the service uses. Use `--dry-run` to print the
 planned requests without any network calls; `--models`, `--text`/`--file`, and
-`--iterations` tune the run. It replaces the deprecated
-`scripts/tts_prep_benchmark.py`.
+`--iterations` tune the run.
 
 ```bash
 cargo run -p codex-voice-app --bin codex-voice -- tts bench --dry-run
 cargo run -p codex-voice-app --bin codex-voice -- tts bench --models gemini-3.5-flash
 ```
 
-The `read-aloud-defaults.json` config is read from `~/.codex/read-aloud-defaults.json`
-and supports Google Gemini TTS and ElevenLabs backends with persona-aware
-provider fallback. Optional `messages.tts.speechPrep` uses a configured Codex or
-Google generation model before synthesis. Codex prep defaults to `gpt-5.6-luna`
-with no reasoning. Its default mode is `performance-tags`, which
+The version-1 config is strict: unknown, misplaced, and wrongly typed fields are
+rejected with their JSON path. Provider `models` are ordered with the default
+first and selectable alternatives after it; they are not automatic model
+fallbacks.
+
+The optional `advanced` object is separate from the normal voice contract and
+should be omitted unless a deployment needs a nondefault override:
+
+- `advanced.providers.google`: `baseUrl`, `apiKeyEnv`, `timeoutMs`,
+  `maxInputChars`, and `inlineAudioTags`.
+- `advanced.providers.elevenlabs`: the same fields plus `outputFormat` and
+  `languageCode`.
+- `advanced.speechPrep`: `enabled`, `provider`, ordered `models`, `mode`,
+  `reasoningEffort`, `baseUrl`, `authFile`, `thresholdChars`, `maxInputChars`,
+  `maxOutputChars`, `attemptTimeoutMs`, `totalTimeoutMs`, `strategies`,
+  `tagPalette`, and `capPerformanceTags`.
+
+Provider timeouts default to 30 seconds. Google defaults to 6,000 input
+characters and ElevenLabs v3 to 5,000; `maxInputChars` explicitly overrides
+the model default. Speech prep defaults to Codex with `gpt-5.6-luna`, no
+reasoning, `performance-tags` mode, a 120-character threshold, 12,000-character
+input, 6,000-character output, and 30-second attempt/total budgets. Its default
+strategy and tag palette are the built-in Codex/Luna performance-tag policy.
+The default Codex endpoint and auth path are
+`https://chatgpt.com/backend-api/codex` and `~/.codex/auth.json`; provider
+endpoints and ElevenLabs output format retain their built-in defaults.
+
+Performance-tag prep
 preserves the original wording and inserts sparse inline bracketed audio tags
 such as `[tender]`, `[sigh]`, or `[light chuckle]` only when the selected speech
-model supports them. Set `"mode": "shorten"` explicitly for the older over-limit
+model supports them. Set `advanced.speechPrep.mode` to `"shorten"` for the older over-limit
 shortening behavior. Model support is inferred for known tag-aware models and can
-be overridden per provider with `"inlineAudioTags": true` or `false`. Set
-`speechPrep.provider`, `speechPrep.model`, and `speechPrep.reasoningEffort` to
-override the Codex defaults; Google prep models must support `generateContent`.
+be overridden per provider with `"inlineAudioTags": true` or `false`. Google
+prep models must support `generateContent`.
 
 ## User Service Setup
 

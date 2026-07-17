@@ -9,16 +9,19 @@ use axum::{
     Json,
 };
 use codex_voice_core::{SpeechClient, SpeechFormat, SpeechRequest};
-use codex_voice_tts::{config::ResolvedTtsConfig, ConfiguredSpeechClient, ReadAloudConfigLoader};
+use codex_voice_tts::{config::ResolvedTtsConfig, ConfiguredSpeechClient, VoiceConfigLoader};
 use serde::Deserialize;
 use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
     path::{Path as FsPath, PathBuf},
     sync::{Arc, RwLock},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 const TTS_CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const TTS_CONFIG_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
+const TTS_CONFIG_FAILED_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(crate) struct TtsServiceState {
@@ -46,37 +49,50 @@ impl TtsServiceState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ConfigFingerprint {
+pub(crate) struct ConfigFingerprint {
     modified: SystemTime,
     len: u64,
+    content_hash: u64,
 }
 
 pub(crate) async fn watch_tts_config(tts: Arc<RwLock<TtsServiceState>>, path: PathBuf) {
     tracing::info!(path = %path.display(), "watching TTS config for live reload");
     let mut last_seen = None;
+    let mut retry_at = None;
 
     loop {
         let current = config_fingerprint(&path).await;
-        if current != last_seen {
+        let retry_due = retry_at.is_some_and(|deadline| Instant::now() >= deadline);
+        if current != last_seen || retry_due {
             tokio::time::sleep(TTS_CONFIG_RELOAD_DEBOUNCE).await;
             let stable = config_fingerprint(&path).await;
             if stable == current {
                 match stable {
                     Some(_) => match reload_tts_config_once(&tts, &path).await {
-                        Ok(()) => tracing::info!(
-                            path = %path.display(),
-                            "TTS config reloaded successfully"
-                        ),
-                        Err(error) => tracing::warn!(
-                            path = %path.display(),
-                            %error,
-                            "TTS config reload failed; keeping previous working config"
-                        ),
+                        Ok(()) => {
+                            retry_at = None;
+                            tracing::info!(
+                                path = %path.display(),
+                                "TTS config reloaded successfully"
+                            );
+                        }
+                        Err(error) => {
+                            retry_at = Some(Instant::now() + TTS_CONFIG_FAILED_RETRY_INTERVAL);
+                            tracing::warn!(
+                                path = %path.display(),
+                                %error,
+                                retry_seconds = TTS_CONFIG_FAILED_RETRY_INTERVAL.as_secs(),
+                                "TTS config reload failed; keeping previous working config"
+                            );
+                        }
                     },
-                    None => tracing::warn!(
-                        path = %path.display(),
-                        "TTS config disappeared; keeping previous working config"
-                    ),
+                    None => {
+                        retry_at = None;
+                        tracing::warn!(
+                            path = %path.display(),
+                            "TTS config disappeared; keeping previous working config"
+                        );
+                    }
                 }
                 last_seen = stable;
             }
@@ -86,11 +102,15 @@ pub(crate) async fn watch_tts_config(tts: Arc<RwLock<TtsServiceState>>, path: Pa
     }
 }
 
-async fn config_fingerprint(path: &FsPath) -> Option<ConfigFingerprint> {
+pub(crate) async fn config_fingerprint(path: &FsPath) -> Option<ConfigFingerprint> {
+    let contents = tokio::fs::read(path).await.ok()?;
     let metadata = tokio::fs::metadata(path).await.ok()?;
+    let mut hasher = DefaultHasher::new();
+    contents.hash(&mut hasher);
     Some(ConfigFingerprint {
         modified: metadata.modified().ok()?,
-        len: metadata.len(),
+        len: contents.len() as u64,
+        content_hash: hasher.finish(),
     })
 }
 
@@ -100,13 +120,10 @@ pub(crate) async fn reload_tts_config_once(
 ) -> Result<()> {
     let path = path.to_path_buf();
     let (speech, config) = tokio::task::spawn_blocking(move || {
-        let loader = ReadAloudConfigLoader::new(path);
-        let config = loader.load().context("failed to load read-aloud config")?;
+        let loader = VoiceConfigLoader::new(path);
+        let config = loader.load().context("failed to load Codex Voice config")?;
         let client = ConfiguredSpeechClient::try_new(config.clone())
             .context("failed to create TTS client from config")?;
-        if !client.has_any_provider() {
-            anyhow::bail!("TTS config parsed but no usable provider is configured");
-        }
         Ok::<_, anyhow::Error>((Arc::new(client) as Arc<dyn SpeechClient>, config))
     })
     .await

@@ -179,13 +179,17 @@ export function providerMaxTextLength(
   const configured =
     Number(providerConfig?.maxTextLength) || Number(config?.maxTextLength) || Infinity;
   if (provider === "elevenlabs") {
-    const model = resolveElevenLabsModel(
-      config?.providers?.elevenlabs,
-      settingsModel,
-    ).toLowerCase();
-    if (model === "eleven_v3" || model.startsWith("eleven_v3_")) {
-      return Math.min(configured, 5000);
+    const elevenlabs = config?.providers?.elevenlabs;
+    if (!elevenlabs || elevenlabs.maxTextLengthOverridden === true) return configured;
+    const model = resolveElevenLabsModel(elevenlabs, settingsModel).toLowerCase();
+    const isV3 = model === "eleven_v3" || model.startsWith("eleven_v3_");
+    if (elevenlabs.maxTextLengthOverridden === undefined) {
+      return isV3 ? Math.min(configured, 5000) : configured;
     }
+    if (isV3) {
+      return 5000;
+    }
+    return 6000;
   }
   return configured;
 }

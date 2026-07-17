@@ -4,7 +4,6 @@ import type { AudioContextConstructor, StreamingPlayback } from "./audio/streami
 import {
   canGenerateDirectWithConfiguredPrep,
   canStreamSelectedProvider,
-  fallbackProvider,
   GenerationController,
   isBackendUnavailable,
   isRetryable,
@@ -167,11 +166,6 @@ describe("pure decision helpers", () => {
     expect(isRetryable({ status: 404 } as Error & { status: number })).toBe(false);
   });
 
-  it("fallbackProvider flips provider", () => {
-    expect(fallbackProvider("google")).toBe("elevenlabs");
-    expect(fallbackProvider("elevenlabs")).toBe("google");
-  });
-
   it("classifies network and gateway failures as backend unavailability", () => {
     expect(isBackendUnavailable(new TypeError("Failed to fetch"))).toBe(true);
     for (const status of [502, 503, 504]) {
@@ -224,6 +218,16 @@ describe("pure decision helpers", () => {
       model: "eleven_v3",
       speechPrepEnabled: false,
     });
+  });
+
+  it("maps provider-default Google selection to the configured native voice", () => {
+    expect(
+      serverJobOptions(directConfig(), {
+        ...DEFAULT_SETTINGS,
+        provider: "google",
+        voice: "provider-default",
+      }).voice,
+    ).toBe("Kore");
   });
 });
 
@@ -804,6 +808,65 @@ describe("GenerationController — provider fallback ordering", () => {
     });
     await controller.generate("Hello there");
     expect(providers).toEqual(["elevenlabs"]);
+  });
+
+  it("does not fallback when the provider is explicitly selected", async () => {
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url === "/web/speech-jobs") throw new TypeError("Failed to fetch");
+      if (url.includes(":generateContent")) return new Response("boom", { status: 500 });
+      if (url.includes("/v1/text-to-speech/")) {
+        throw new Error("explicit Google selection must not fallback to ElevenLabs");
+      }
+      throw new Error(`unrouted fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new GenerationController({
+      config: directConfig(),
+      settings: {
+        ...settings,
+        provider: "google",
+        voice: "persona:narrator",
+      },
+    });
+
+    await controller.generate("Hello there");
+    expect(urls.some((url) => url.includes(":generateContent"))).toBe(true);
+    expect(urls.some((url) => url.includes("/v1/text-to-speech/"))).toBe(false);
+  });
+
+  it("fails before synthesis when an explicit provider lacks the selected voice backend", async () => {
+    const config = directConfig();
+    config.defaultProvider = "elevenlabs";
+    config.personas.narrator.provider = "elevenlabs";
+    config.personas.narrator.providerOrder = ["elevenlabs"];
+    config.personas.narrator.google = undefined;
+    const urls: string[] = [];
+    const errors: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url === "/web/speech-jobs") throw new TypeError("Failed to fetch");
+        throw new Error(`provider request must not be sent: ${url}`);
+      }),
+    );
+    const controller = new GenerationController({
+      config,
+      settings: {
+        ...settings,
+        provider: "google",
+        voice: "persona:narrator",
+      },
+      callbacks: { onError: (message) => errors.push(message) },
+    });
+
+    await controller.generate("Hello there");
+    expect(urls).toEqual(["/web/speech-jobs"]);
+    expect(errors).toEqual(["Selected voice has no google backend."]);
   });
 });
 

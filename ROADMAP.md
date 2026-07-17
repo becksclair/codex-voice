@@ -45,11 +45,11 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
   - 24 MiB Codex backend limit, 512 MiB client upload limit
   - Returns `413 Payload Too Large` when chunking is unavailable
 - [x] Implement TTS with Google Gemini and ElevenLabs backends
-  - Config loaded from `~/.codex/read-aloud-defaults.json`
-  - Persona-aware provider fallback
+  - Strict versioned config loaded from `${XDG_CONFIG_HOME:-~/.config}/codex-voice/config.json`
+  - Ordered voice-backend fallback
   - PCM → WAV wrapping in-process; compressed formats via `ffmpeg`
 - [x] Add `doctor tts` diagnostic
-- [x] Add `tts bench` speech-prep benchmark (replaces `scripts/tts_prep_benchmark.py`)
+- [x] Add the integrated `tts bench` speech-prep benchmark
 - [x] Add `transcriber probe-limits` for backend stress testing
 - [x] Add `mise run setup` for Linux systemd user service install
 - [x] Serve an installable TTS web app (PWA) from the same listener

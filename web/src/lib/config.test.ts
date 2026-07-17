@@ -32,12 +32,12 @@ function fixture(): BrowserTtsConfig {
         },
         maxTextLength: 5000,
         timeoutMs: 30000,
-        constraints: [],
       },
       elevenlabs: {
         apiKey: "el-key",
         baseUrl: "https://api.elevenlabs.io",
         modelId: "eleven_v3",
+        fallbackModels: [],
         streaming: {
           transport: "websocket",
           preferredModel: "eleven_flash_v2_5",

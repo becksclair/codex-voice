@@ -18,7 +18,8 @@ export function personaSupportsProvider(
   provider: string,
 ): boolean {
   if (provider === "elevenlabs") return Boolean(persona?.elevenlabs?.voiceId);
-  return true;
+  if (provider === "google") return Boolean(persona?.google?.voiceName);
+  return false;
 }
 
 /** First persona supporting a provider. Ports `firstPersonaForProvider`. */
@@ -35,27 +36,19 @@ export function firstPersonaForProvider(
 /** Resolve the selected persona name for a provider. Ports `selectedPersonaName`. */
 export function selectedPersonaName(
   config: BrowserTtsConfig,
-  provider: string | null,
   settings: WebSettings,
 ): string | null {
   if (settings.voice === "provider-default") return null;
   if (settings.voice?.startsWith("persona:")) return settings.voice.slice("persona:".length);
-  if (provider === "elevenlabs") {
-    const defaultPersona = config?.defaultPersona ? config.personas?.[config.defaultPersona] : null;
-    return personaSupportsProvider(defaultPersona, "elevenlabs")
-      ? config.defaultPersona || null
-      : firstPersonaForProvider(config, "elevenlabs");
-  }
   return config?.defaultPersona || null;
 }
 
 /** Resolve the persona object for a provider. Ports `resolvePersona`. */
 export function resolvePersona(
   config: BrowserTtsConfig,
-  provider: string | null,
   settings: WebSettings,
 ): BrowserPersonaConfig | null {
-  const name = selectedPersonaName(config, provider, settings);
+  const name = selectedPersonaName(config, settings);
   return name && config.personas ? config.personas[name] || null : null;
 }
 
@@ -67,4 +60,16 @@ export function resolveProvider(
 ): string {
   if (settings.provider !== "auto") return settings.provider;
   return persona?.provider || config.defaultProvider;
+}
+
+/** Next configured backend after `provider`, preserving legacy cached v1 configs. */
+export function nextVoiceProvider(
+  persona: BrowserPersonaConfig | null | undefined,
+  provider: string,
+): string | null {
+  if (!persona || persona.fallbackPolicy !== "preserve-persona") return null;
+  const order = persona.providerOrder;
+  if (!order?.length) return provider === "google" ? "elevenlabs" : "google";
+  const index = order.indexOf(provider);
+  return index >= 0 ? order[index + 1] || null : null;
 }

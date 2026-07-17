@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "defaultVoice": "sky",
+  "providers": {
+    "elevenlabs": {
+      "models": ["eleven_v3"],
+      "textNormalization": "on",
+      "streamGain": 1.7
+    },
+    "google": {
+      "models": [
+        "gemini-3.1-flash-tts-preview",
+        "gemini-2.5-flash-preview-tts"
+      ]
+    }
+  },
+  "voices": {
+    "sky": {
+      "label": "Sky",
+      "description": "Warm, incisive default voice.",
+      "prompt": {
+        "scene": "A private voice note from someone close by.",
+        "sampleContext": "Crisp, confident, cheerful delivery.",
+        "style": "Warm, witty, and emotionally attentive.",
+        "pace": "Conversational and relaxed.",
+        "constraints": [
+          "Do not explain the voice configuration or read it aloud.",
+          "Preserve the written meaning."
+        ]
+      },
+      "backends": [
+        {
+          "provider": "elevenlabs",
+          "voiceId": "YOUR_ELEVENLABS_VOICE_ID",
+          "settings": {
+            "stability": 0.5,
+            "similarityBoost": 0.75,
+            "style": 0.3,
+            "speakerBoost": true,
+            "speed": 1.0
+          }
+        },
+        {
+          "provider": "google",
+          "voice": "Sulafat"
+        }
+      ]
+    }
+  }
+}

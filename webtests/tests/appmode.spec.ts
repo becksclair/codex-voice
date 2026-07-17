@@ -32,7 +32,7 @@ test('#intent= consumes selected text, clears the hash, and fires a generation a
   expect(created.status()).toBe(201);
   const { id } = (await created.json()) as { id: string };
 
-  // A host with real `~/.codex/read-aloud-defaults.json` credentials would
+  // A host with real `~/.config/codex-voice/config.json` provider configuration would
   // otherwise let this test place a real (billed) synthesis call — this repo's
   // paid live smoke is deliberately opt-in (see live.spec.ts). Block every
   // request that isn't page-origin static content, INCLUDING same-origin

@@ -43,7 +43,9 @@ function providerModelValues(config: BrowserTtsConfig | null, provider: string):
     push(google?.model);
     for (const model of google?.fallbackModels || []) push(model);
   } else if (provider === "elevenlabs") {
-    push(config?.providers?.elevenlabs?.modelId);
+    const elevenlabs = config?.providers?.elevenlabs;
+    push(elevenlabs?.modelId);
+    for (const model of elevenlabs?.fallbackModels || []) push(model);
   }
   return values;
 }
@@ -103,7 +105,8 @@ interface Reconciled {
 function reconcile(settings: WebSettings, config: BrowserTtsConfig | null): Reconciled {
   const providerOptions = providerOptionsFor(config);
   const provider = has(providerOptions, settings.provider) ? settings.provider : "auto";
-  const voiceOptions = voiceOptionsFor(config, provider);
+  const voiceProvider = provider === "auto" ? config?.defaultProvider || "google" : provider;
+  const voiceOptions = voiceOptionsFor(config, voiceProvider);
   const voice = has(voiceOptions, settings.voice) ? settings.voice : "default";
   const modelOptions = modelOptionsFor(config, provider);
   const model = has(modelOptions, settings.model) ? settings.model : "default";

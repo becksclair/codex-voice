@@ -24,7 +24,6 @@ const google: BrowserGoogleConfig = {
   },
   maxTextLength: 5000,
   timeoutMs: 30000,
-  constraints: [],
 };
 
 const config = { providers: { google } } as BrowserTtsConfig;
@@ -54,6 +53,7 @@ function googleAudioResponse(mimeType: string, dataBase64: string): Response {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -147,6 +147,26 @@ describe("fetchGoogleAudio", () => {
     await expect(fetchGoogleAudio(config, "x", null, null)).rejects.toThrow(
       "Google TTS returned no audio.",
     );
+  });
+
+  it("aborts a stalled provider request at the configured timeout", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      ),
+    );
+
+    const request = fetchGoogleAudio(config, "hello", null, null);
+    const rejected = expect(request).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejected;
   });
 });
 

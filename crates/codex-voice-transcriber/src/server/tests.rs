@@ -1,4 +1,4 @@
-use super::speech::{reload_tts_config_once, TtsServiceState};
+use super::speech::{config_fingerprint, reload_tts_config_once, TtsServiceState};
 use super::transcribe::transcribe_chunk_paths;
 use super::web::{
     prune_web_speech_jobs_at, BrowserTtsConfig, WebSpeechJobRecord, WebSpeechJobState,
@@ -359,6 +359,17 @@ async fn web_config_is_public_and_exports_browser_tts_config() {
         120
     );
     assert_eq!(config["providers"]["elevenlabs"]["streamGain"], 2.0);
+    assert_eq!(config["providers"]["elevenlabs"]["maxTextLength"], 4000);
+    assert_eq!(
+        config["providers"]["elevenlabs"]["maxTextLengthOverridden"],
+        true
+    );
+    assert_eq!(
+        config["providers"]["elevenlabs"]["fallbackModels"],
+        serde_json::json!([])
+    );
+    assert_eq!(config["speechPrep"]["attemptTimeoutMs"], 4000);
+    assert_eq!(config["speechPrep"]["timeoutMs"], 20000);
     assert!(config["providers"]["elevenlabs"]
         .get("languageCode")
         .is_none());
@@ -366,6 +377,8 @@ async fn web_config_is_public_and_exports_browser_tts_config() {
         config["personas"]["sky"]["fallbackPolicy"],
         "preserve-persona"
     );
+    assert_eq!(config["personas"]["sky"]["providerOrder"][0], "google");
+    assert_eq!(config["personas"]["sky"]["providerOrder"][1], "elevenlabs");
     assert_eq!(
         config["personas"]["sky"]["elevenlabs"]["voiceId"],
         "eleven-voice"
@@ -660,16 +673,23 @@ fn write_reload_test_config(path: &FsPath, env_name: &str, voice: &str) {
         path,
         format!(
             r#"{{
-                "messages": {{
-                    "tts": {{
-                        "provider": "google",
-                        "providers": {{
-                            "google": {{
-                                "apiKey": {{ "source": "env", "id": "{env_name}" }},
-                                "voice": "{voice}",
-                                "model": "gemini-2.5-flash-preview-tts"
-                            }}
-                        }}
+                "version": 1,
+                "defaultVoice": "test",
+                "providers": {{
+                    "google": {{
+                        "models": ["gemini-2.5-flash-preview-tts"]
+                    }}
+                }},
+                "voices": {{
+                    "test": {{
+                        "label": "Test",
+                        "description": "Test voice",
+                        "backends": [{{ "provider": "google", "voice": "{voice}" }}]
+                    }}
+                }},
+                "advanced": {{
+                    "providers": {{
+                        "google": {{ "apiKeyEnv": "{env_name}" }}
                     }}
                 }}
             }}"#
@@ -681,7 +701,7 @@ fn write_reload_test_config(path: &FsPath, env_name: &str, voice: &str) {
 #[tokio::test]
 async fn tts_config_reload_updates_swappable_service_state() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("read-aloud-defaults.json");
+    let path = temp.path().join("config.json");
     std::env::set_var("TEST_TTS_RELOAD_KEY", "test-google-key");
     write_reload_test_config(&path, "TEST_TTS_RELOAD_KEY", "Sulafat");
     let tts = Arc::new(RwLock::new(TtsServiceState::from_parts(None, None)));
@@ -702,7 +722,7 @@ async fn tts_config_reload_updates_swappable_service_state() {
 #[tokio::test]
 async fn tts_config_reload_keeps_previous_state_when_new_config_is_invalid() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("read-aloud-defaults.json");
+    let path = temp.path().join("config.json");
     std::env::set_var("TEST_TTS_RELOAD_KEEP_KEY", "test-google-key");
     write_reload_test_config(&path, "TEST_TTS_RELOAD_KEEP_KEY", "Sulafat");
     let tts = Arc::new(RwLock::new(TtsServiceState::from_parts(None, None)));
@@ -724,7 +744,7 @@ async fn tts_config_reload_keeps_previous_state_when_new_config_is_invalid() {
         .expect_err("invalid config should fail");
     assert!(error
         .to_string()
-        .contains("failed to load read-aloud config"));
+        .contains("failed to load Codex Voice config"));
 
     let after = serde_json::to_value(
         tts.read()
@@ -735,6 +755,72 @@ async fn tts_config_reload_keeps_previous_state_when_new_config_is_invalid() {
     )
     .expect("serializes");
     assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn tts_config_reload_survives_disappearance_and_atomic_replacement() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("config.json");
+    std::env::set_var("TEST_TTS_RELOAD_ATOMIC_KEY", "test-google-key");
+    write_reload_test_config(&path, "TEST_TTS_RELOAD_ATOMIC_KEY", "Sulafat");
+    let tts = Arc::new(RwLock::new(TtsServiceState::from_parts(None, None)));
+    reload_tts_config_once(&tts, &path)
+        .await
+        .expect("initial config loads");
+
+    std::fs::remove_file(&path).expect("config removed");
+    assert!(config_fingerprint(&path).await.is_none());
+    assert!(tts
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .speech
+        .is_some());
+
+    let replacement = temp.path().join("config.next.json");
+    write_reload_test_config(&replacement, "TEST_TTS_RELOAD_ATOMIC_KEY", "Aoede");
+    std::fs::rename(&replacement, &path).expect("replacement renamed atomically");
+    assert!(config_fingerprint(&path).await.is_some());
+    reload_tts_config_once(&tts, &path)
+        .await
+        .expect("replacement config loads");
+    let config = tts
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .web_tts_config
+        .clone()
+        .expect("web config remains available");
+    let json = serde_json::to_value(config).expect("serializes");
+    assert_eq!(json["providers"]["google"]["voice"], "Sulafat");
+    assert_eq!(json["personas"]["test"]["google"]["voiceName"], "Aoede");
+}
+
+#[tokio::test]
+async fn tts_config_fingerprint_detects_same_metadata_content_replacement() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("config.json");
+    std::fs::write(&path, "alpha").expect("initial config written");
+    let original_modified = std::fs::metadata(&path)
+        .expect("initial metadata")
+        .modified()
+        .expect("initial modified time");
+    let original = config_fingerprint(&path)
+        .await
+        .expect("initial fingerprint");
+
+    let replacement = temp.path().join("config.next.json");
+    std::fs::write(&replacement, "bravo").expect("replacement written");
+    std::fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .expect("replacement opened")
+        .set_modified(original_modified)
+        .expect("replacement mtime preserved");
+    std::fs::rename(&replacement, &path).expect("replacement renamed atomically");
+
+    let replaced = config_fingerprint(&path)
+        .await
+        .expect("replacement fingerprint");
+    assert_ne!(replaced, original);
 }
 
 #[test]
