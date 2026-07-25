@@ -92,7 +92,7 @@ fn referenced_web_assets_available(index: &str, mut exists: impl FnMut(&Path) ->
     saw_script
 }
 
-/// Self-destructing service worker served at the legacy `/web-sw.js` URL.
+/// Self-destructing service worker served at both retired worker URLs.
 ///
 /// The previous single-file PWA registered a service worker here. Installed
 /// clients still request it on update, so this unregisters itself and reloads
@@ -167,6 +167,21 @@ pub(crate) async fn legacy_service_worker() -> Response {
         .into_response()
 }
 
+pub(crate) async fn legacy_scoped_service_worker() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (
+                header::HeaderName::from_static("service-worker-allowed"),
+                "/web",
+            ),
+        ],
+        LEGACY_SERVICE_WORKER_JS,
+    )
+        .into_response()
+}
+
 async fn load_asset(state: &ServiceState, rel: &str) -> Option<Vec<u8>> {
     match state.web_dist_override.as_deref() {
         Some(root) => read_override_asset(root, rel).await,
@@ -189,25 +204,14 @@ async fn read_override_asset(root: &Path, rel: &str) -> Option<Vec<u8>> {
 }
 
 fn asset_response(path: &str, body: Vec<u8>) -> Response {
-    let mut response = (
+    (
         [
             (header::CONTENT_TYPE, content_type_for(path)),
             (header::CACHE_CONTROL, cache_control_for(path).to_string()),
         ],
         body,
     )
-        .into_response();
-    // The app's canonical URL is /web (no trailing slash). A worker script at
-    // /web/sw.js may only claim /web/ by default, which does not cover /web
-    // itself; this header authorizes the wider registration scope /web used by
-    // the frontend so the installed PWA is controlled (and works offline).
-    if path == "sw.js" {
-        response.headers_mut().insert(
-            header::HeaderName::from_static("service-worker-allowed"),
-            header::HeaderValue::from_static("/web"),
-        );
-    }
-    response
+        .into_response()
 }
 
 fn content_type_for(path: &str) -> String {

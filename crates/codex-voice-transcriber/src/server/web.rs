@@ -2,26 +2,23 @@ use super::speech::web_speech_client;
 use super::{ApiError, ServiceState};
 
 use axum::{
-    extract::{FromRequest, Path, Request, State},
+    body::Body,
+    extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use base64::Engine;
 use codex_voice_core::{SpeechClient, SpeechFormat, SpeechRequest};
 use codex_voice_tts::config::{
     ElevenLabsPersonaConfig, GooglePersonaConfig, ProviderKind, ResolvedPersona, ResolvedTtsConfig,
-    SpeechPrepMode, SpeechPrepProviderKind, SpeechPrepStrategies, SpeechPrepStrategy,
-};
-use codex_voice_tts::{
-    read_codex_auth_snapshot, sync_codex_auth_snapshot, CodexAuthSnapshot, CodexAuthSyncResult,
-    CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL,
+    SpeechPrepMode,
 };
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::json;
 use std::{
     collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
@@ -32,7 +29,6 @@ const WEB_SPEECH_MAX_TERMINAL_JOBS: usize = 16;
 const WEB_SPEECH_MAX_TERMINAL_BYTES: usize = 128 * 1024 * 1024;
 const WEB_SPEECH_ADMISSION_LIMIT: usize = 3;
 const WEB_SPEECH_WORKER_LIMIT: usize = 1;
-const BROWSER_CODEX_BASE_URL: &str = "/_codex";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,13 +37,10 @@ pub(crate) struct BrowserTtsConfig {
     default_provider: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_persona: Option<String>,
-    max_text_length: usize,
     providers: BrowserProviders,
     #[serde(skip_serializing_if = "Option::is_none")]
     speech_prep: Option<BrowserSpeechPrepConfig>,
     personas: HashMap<String, BrowserPersonaConfig>,
-    #[serde(skip)]
-    codex_auth_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,70 +55,19 @@ struct BrowserProviders {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserSpeechPrepConfig {
-    provider: String,
     mode: String,
-    strategies: BrowserSpeechPrepStrategies,
-    tag_palette: Vec<String>,
-    cap_performance_tags: bool,
-    browser_supported: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    codex_auth: Option<BrowserCodexAuth>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    browser_fallback: Option<BrowserSpeechPrepFallbackConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api_key: Option<String>,
-    base_url: String,
     model: String,
-    fallback_models: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<String>,
-    threshold: usize,
-    max_input_length: usize,
-    max_length: usize,
-    attempt_timeout_ms: u64,
-    timeout_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserCodexAuth {
-    access_token: String,
-    refresh_token: String,
-    account_id: String,
-    token_url: String,
-    client_id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserSpeechPrepFallbackConfig {
-    provider: String,
-    api_key: String,
-    base_url: String,
-    model: String,
-    fallback_models: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserSpeechPrepStrategies {
-    google: String,
-    elevenlabs: String,
-    default: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserGoogleConfig {
+    #[serde(skip)]
     api_key: String,
+    #[serde(skip)]
     base_url: String,
     voice: String,
-    model: String,
-    fallback_models: Vec<String>,
-    streaming: BrowserGoogleStreamingConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inline_audio_tags: Option<bool>,
-    max_text_length: usize,
+    models: Vec<String>,
     timeout_ms: u64,
 }
 
@@ -134,40 +76,12 @@ struct BrowserGoogleConfig {
 struct BrowserElevenLabsConfig {
     api_key: String,
     base_url: String,
-    model_id: String,
-    fallback_models: Vec<String>,
-    streaming: BrowserElevenLabsStreamingConfig,
+    models: Vec<String>,
     apply_text_normalization: String,
-    output_format: String,
     stream_gain: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     language_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inline_audio_tags: Option<bool>,
-    max_text_length: usize,
-    max_text_length_overridden: bool,
     timeout_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserGoogleStreamingConfig {
-    transport: String,
-    supported_models: Vec<String>,
-    output_format: String,
-    sample_rate: u32,
-    channels: u16,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserElevenLabsStreamingConfig {
-    transport: String,
-    preferred_model: String,
-    output_format: String,
-    sample_rate: u32,
-    channels: u16,
-    chunk_length_schedule: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,17 +90,7 @@ struct BrowserPersonaConfig {
     label: String,
     description: String,
     provider: String,
-    fallback_policy: String,
     provider_order: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_scene: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_sample_context: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_style: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_pacing: Option<String>,
-    prompt_constraints: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     google: Option<BrowserGooglePersonaConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,26 +123,15 @@ struct BrowserElevenLabsVoiceSettings {
 impl BrowserTtsConfig {
     pub(crate) fn from_resolved(config: &ResolvedTtsConfig) -> Self {
         Self {
-            version: 1,
+            version: 2,
             default_provider: provider_name(config.default_provider).to_string(),
             default_persona: config.default_persona.clone(),
-            max_text_length: config.max_text_length,
             providers: BrowserProviders {
                 google: config.google.as_ref().map(|google| BrowserGoogleConfig {
                     api_key: google.api_key.clone(),
                     base_url: google.base_url.clone(),
                     voice: google.voice.clone(),
-                    model: google.models[0].clone(),
-                    fallback_models: google.models[1..].to_vec(),
-                    streaming: BrowserGoogleStreamingConfig {
-                        transport: "interactions-stream".to_string(),
-                        supported_models: vec!["gemini-3.1-flash-tts-preview".to_string()],
-                        output_format: "pcm_24000".to_string(),
-                        sample_rate: 24_000,
-                        channels: 1,
-                    },
-                    inline_audio_tags: google.inline_audio_tags,
-                    max_text_length: google.max_text_length,
+                    models: google.models.clone(),
                     timeout_ms: duration_millis(google.timeout),
                 }),
                 elevenlabs: config
@@ -247,126 +140,26 @@ impl BrowserTtsConfig {
                     .map(|elevenlabs| BrowserElevenLabsConfig {
                         api_key: elevenlabs.api_key.clone(),
                         base_url: elevenlabs.base_url.clone(),
-                        model_id: elevenlabs.models[0].clone(),
-                        fallback_models: elevenlabs.models[1..].to_vec(),
-                        streaming: BrowserElevenLabsStreamingConfig {
-                            transport: "websocket".to_string(),
-                            preferred_model: "eleven_flash_v2_5".to_string(),
-                            output_format: "pcm_24000".to_string(),
-                            sample_rate: 24_000,
-                            channels: 1,
-                            chunk_length_schedule: vec![120, 160, 250, 290],
-                        },
+                        models: elevenlabs.models.clone(),
                         apply_text_normalization: elevenlabs.apply_text_normalization.clone(),
-                        output_format: elevenlabs.output_format.clone(),
                         stream_gain: elevenlabs.stream_gain,
                         language_code: elevenlabs.language_code.clone(),
-                        inline_audio_tags: elevenlabs.inline_audio_tags,
-                        max_text_length: elevenlabs.max_text_length,
-                        max_text_length_overridden: elevenlabs.max_text_length_overridden,
                         timeout_ms: duration_millis(elevenlabs.timeout),
                     }),
             },
-            speech_prep: config.speech_prep.as_ref().map(|prep| {
-                let codex_auth = (prep.provider == SpeechPrepProviderKind::Codex)
-                    .then_some(prep.auth_file.as_deref())
-                    .flatten()
-                    .and_then(|path| read_codex_auth_snapshot(path).ok())
-                    .map(|auth| BrowserCodexAuth {
-                        access_token: auth.access_token,
-                        refresh_token: auth.refresh_token,
-                        account_id: auth.account_id,
-                        token_url: CODEX_OAUTH_TOKEN_URL.to_string(),
-                        client_id: CODEX_OAUTH_CLIENT_ID.to_string(),
-                    });
-                BrowserSpeechPrepConfig {
-                    provider: speech_prep_provider_name(prep.provider).to_string(),
+            speech_prep: config
+                .speech_prep
+                .as_ref()
+                .map(|prep| BrowserSpeechPrepConfig {
                     mode: speech_prep_mode_name(prep.mode).to_string(),
-                    strategies: browser_speech_prep_strategies(prep.strategies),
-                    tag_palette: prep.tag_palette.clone(),
-                    cap_performance_tags: prep.cap_performance_tags,
-                    browser_supported: prep.provider == SpeechPrepProviderKind::Google
-                        || codex_auth.is_some(),
-                    codex_auth,
-                    browser_fallback: browser_speech_prep_fallback(prep, config),
-                    api_key: prep.api_key.clone(),
-                    base_url: if prep.provider == SpeechPrepProviderKind::Codex {
-                        BROWSER_CODEX_BASE_URL.to_string()
-                    } else {
-                        prep.base_url.clone()
-                    },
                     model: prep.model.clone(),
-                    fallback_models: prep.fallback_models.clone(),
-                    reasoning_effort: prep.reasoning_effort.clone(),
-                    threshold: prep.threshold,
-                    max_input_length: prep.max_input_length,
-                    max_length: prep.max_length,
-                    attempt_timeout_ms: duration_millis(prep.attempt_timeout),
-                    timeout_ms: duration_millis(prep.timeout),
-                }
-            }),
+                }),
             personas: config
                 .personas
                 .iter()
                 .map(|(name, persona)| (name.clone(), browser_persona(persona)))
                 .collect(),
-            codex_auth_file: config.speech_prep.as_ref().and_then(|prep| {
-                (prep.provider == SpeechPrepProviderKind::Codex)
-                    .then(|| prep.auth_file.clone())
-                    .flatten()
-            }),
         }
-    }
-
-    pub(crate) async fn refresh_codex_auth(mut self) -> Self {
-        let Some(auth_file) = self.codex_auth_file.clone() else {
-            return self;
-        };
-        let auth = tokio::task::spawn_blocking(move || read_codex_auth_snapshot(&auth_file))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .map(|auth| BrowserCodexAuth {
-                access_token: auth.access_token,
-                refresh_token: auth.refresh_token,
-                account_id: auth.account_id,
-                token_url: CODEX_OAUTH_TOKEN_URL.to_string(),
-                client_id: CODEX_OAUTH_CLIENT_ID.to_string(),
-            });
-        if let Some(prep) = self.speech_prep.as_mut() {
-            prep.browser_supported = auth.is_some();
-            prep.codex_auth = auth;
-        }
-        self
-    }
-
-    fn codex_auth_file(&self) -> Option<PathBuf> {
-        self.codex_auth_file.clone()
-    }
-}
-
-fn browser_speech_prep_fallback(
-    prep: &codex_voice_tts::config::SpeechPrepConfig,
-    config: &ResolvedTtsConfig,
-) -> Option<BrowserSpeechPrepFallbackConfig> {
-    if prep.provider != SpeechPrepProviderKind::Codex {
-        return None;
-    }
-    let google = config.google.as_ref()?;
-    Some(BrowserSpeechPrepFallbackConfig {
-        provider: "google".to_string(),
-        api_key: google.api_key.clone(),
-        base_url: google.base_url.clone(),
-        model: "google/gemini-3.5-flash".to_string(),
-        fallback_models: Vec::new(),
-    })
-}
-
-fn browser_speech_prep_strategies(strategies: SpeechPrepStrategies) -> BrowserSpeechPrepStrategies {
-    BrowserSpeechPrepStrategies {
-        google: speech_prep_strategy_name(strategies.google).to_string(),
-        elevenlabs: speech_prep_strategy_name(strategies.elevenlabs).to_string(),
-        default: speech_prep_strategy_name(strategies.default).to_string(),
     }
 }
 
@@ -375,22 +168,11 @@ fn browser_persona(persona: &ResolvedPersona) -> BrowserPersonaConfig {
         label: persona.label.clone(),
         description: persona.description.clone(),
         provider: provider_name(persona.provider).to_string(),
-        fallback_policy: if persona.provider_order.len() > 1 {
-            "preserve-persona"
-        } else {
-            "strict"
-        }
-        .to_string(),
         provider_order: persona
             .provider_order
             .iter()
             .map(|provider| provider_name(*provider).to_string())
             .collect(),
-        prompt_scene: persona.prompt_scene.clone(),
-        prompt_sample_context: persona.prompt_sample_context.clone(),
-        prompt_style: persona.prompt_style.clone(),
-        prompt_pacing: persona.prompt_pacing.clone(),
-        prompt_constraints: persona.prompt_constraints.clone(),
         google: persona.google.as_ref().map(browser_google_persona),
         elevenlabs: persona.elevenlabs.as_ref().map(browser_elevenlabs_persona),
     }
@@ -417,17 +199,14 @@ fn browser_elevenlabs_persona(
     }
 }
 
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn provider_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Google => "google",
         ProviderKind::ElevenLabs => "elevenlabs",
-    }
-}
-
-fn speech_prep_provider_name(provider: SpeechPrepProviderKind) -> &'static str {
-    match provider {
-        SpeechPrepProviderKind::Google => "google",
-        SpeechPrepProviderKind::Codex => "codex",
     }
 }
 
@@ -436,14 +215,6 @@ fn speech_prep_mode_name(mode: SpeechPrepMode) -> &'static str {
         SpeechPrepMode::Shorten => "shorten",
         SpeechPrepMode::PerformanceTags => "performance-tags",
     }
-}
-
-fn speech_prep_strategy_name(strategy: SpeechPrepStrategy) -> &'static str {
-    strategy.as_name()
-}
-
-fn duration_millis(duration: std::time::Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 pub(crate) type WebSpeechJobStore = Arc<WebSpeechJobManager>;
@@ -543,9 +314,7 @@ pub(crate) async fn web_config(
             .as_ref()
             .cloned()
             .ok_or_else(|| ApiError::service_unavailable("TTS service is not configured"))?
-    }
-    .refresh_codex_auth()
-    .await;
+    };
 
     Ok((
         [
@@ -558,60 +327,90 @@ pub(crate) async fn web_config(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct BrowserCodexAuthSyncRequest {
-    access_token: String,
-    refresh_token: String,
-    account_id: String,
+pub(crate) struct BrowserGoogleStreamRequest {
+    input: String,
+    model: String,
+    voice: String,
 }
 
-pub(crate) async fn web_codex_auth_sync(
+pub(crate) async fn web_google_stream(
     State(state): State<ServiceState>,
-    request: Request,
-) -> Result<StatusCode, ApiError> {
-    authorize_web_config_origin(request.headers())?;
-    let Json(request) = Json::<BrowserCodexAuthSyncRequest>::from_request(request, &state)
-        .await
-        .map_err(ApiError::json_rejection)?;
-    if request.access_token.trim().is_empty()
-        || request.refresh_token.trim().is_empty()
-        || request.account_id.trim().is_empty()
-    {
-        return Err(ApiError::bad_request(
-            "Codex auth synchronization requires a complete credential bundle",
-        ));
+    Json(body): Json<BrowserGoogleStreamRequest>,
+) -> Result<Response, ApiError> {
+    if body.input.trim().is_empty() {
+        return Err(ApiError::bad_request("input is required"));
     }
-    let auth_file = {
+    let google = {
         let tts = state
             .tts
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         tts.web_tts_config
             .as_ref()
-            .and_then(BrowserTtsConfig::codex_auth_file)
-            .ok_or_else(|| ApiError::service_unavailable("Codex browser auth is not configured"))?
+            .and_then(|config| config.providers.google.clone())
+            .ok_or_else(|| ApiError::service_unavailable("Google TTS is not configured"))?
     };
-    let incoming = CodexAuthSnapshot {
-        access_token: request.access_token,
-        refresh_token: request.refresh_token,
-        account_id: request.account_id,
-    };
-    let result =
-        tokio::task::spawn_blocking(move || sync_codex_auth_snapshot(&auth_file, &incoming))
-            .await
-            .map_err(|error| ApiError::internal(format!("Codex auth sync task failed: {error}")))?
-            .map_err(|_| ApiError::service_unavailable("Codex auth synchronization failed"))?;
-    match result {
-        CodexAuthSyncResult::Updated | CodexAuthSyncResult::Unchanged => Ok(StatusCode::NO_CONTENT),
-        CodexAuthSyncResult::RejectedOlder => Err(ApiError::conflict(
-            "Browser Codex auth is older than the configured credentials",
-        )),
-        CodexAuthSyncResult::RejectedAccount => Err(ApiError::conflict(
-            "Browser Codex auth belongs to a different account",
-        )),
-        CodexAuthSyncResult::RejectedInvalid => Err(ApiError::bad_request(
-            "Browser Codex auth access token is invalid",
-        )),
+    if !google.models.iter().any(|model| model == &body.model)
+        || !body.model.to_ascii_lowercase().starts_with("gemini-3.1-")
+    {
+        return Err(ApiError::bad_request(
+            "selected Google model does not support direct streaming",
+        ));
     }
+    let upstream = google_stream_client()
+        .post(format!(
+            "{}/interactions",
+            google
+                .base_url
+                .trim_end_matches('/')
+                .trim_end_matches("/models")
+        ))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("Api-Revision", "2026-05-20")
+        .header("x-goog-api-key", &google.api_key)
+        .json(&json!({
+            "model": body.model,
+            "input": google_stream_prompt(&body.input),
+            "response_format": { "type": "audio" },
+            "generation_config": {
+                "speech_config": [{ "voice": body.voice }]
+            },
+            "stream": true
+        }))
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::service_unavailable(format!("Google streaming request failed: {error}"))
+        })?;
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = upstream
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("text/event-stream")
+        .to_string();
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(upstream.bytes_stream()))
+        .map_err(|error| {
+            ApiError::service_unavailable(format!("Google streaming response failed: {error}"))
+        })
+}
+
+fn google_stream_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
+fn google_stream_prompt(input: &str) -> String {
+    format!(
+        "Read the following text aloud exactly as written.\n\
+         Do not add narration or commentary. Do not paraphrase.\n\n\
+         Text:\n\"\"\"{input}\"\"\""
+    )
 }
 
 fn authorize_web_config_origin(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -644,6 +443,8 @@ pub(crate) struct WebSpeechRequest {
     model: Option<String>,
     #[serde(default)]
     speech_prep_enabled: Option<bool>,
+    #[serde(default)]
+    speech_prep_shorten_enabled: Option<bool>,
     #[serde(default)]
     speech_prep_model: Option<String>,
     #[serde(default)]
@@ -923,6 +724,7 @@ fn web_speech_request(body: WebSpeechRequest) -> Result<SpeechRequest, ApiError>
         model_hint: body.model.unwrap_or_else(|| "gpt-4o-mini-tts".to_string()),
         voice_hint: body.voice,
         speech_prep_enabled: body.speech_prep_enabled,
+        speech_prep_shorten_enabled: body.speech_prep_shorten_enabled,
         speech_prep_model_hint: body.speech_prep_model,
         speech_prep_reasoning_effort: body.speech_prep_reasoning_effort,
         speech_prep_timeout_ms: body.speech_prep_timeout_ms,

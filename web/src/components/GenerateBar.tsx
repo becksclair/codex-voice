@@ -11,6 +11,7 @@ const GLASS_ICON_BUTTON =
 interface GenerateBarProps {
   generating: boolean;
   generationActive: boolean;
+  generateDisabled: boolean;
   progress: number;
   label: string;
   onGenerate: () => void;
@@ -39,6 +40,7 @@ export function GenerateBar(props: GenerateBarProps) {
         className={props.generating ? `${generateClass} generating` : generateClass}
         style={{ "--generate-progress": props.progress } as CSSProperties}
         aria-label={props.generationActive ? "Stop generation" : undefined}
+        disabled={props.generateDisabled && !props.generationActive}
         onClick={props.onGenerate}
       >
         <span className="relative z-[1] inline-flex w-full min-w-0 items-center justify-center">

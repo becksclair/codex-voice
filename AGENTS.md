@@ -29,13 +29,13 @@ cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"
 - Keep crates small and boundary-focused; shared contracts live in `crates/codex-voice-core`.
 - Prefer typed errors in library crates and `anyhow::Result` only at app/CLI boundaries.
 - Keep generated/runtime artifacts out of git; `target/` is ignored.
-- For PWA/web assets, never reference immutable assets through bare stable URLs. This is now enforced structurally: only content-hashed `/web/assets/*` paths are served with immutable caching, and the app shell, service worker, manifests, and icons are served `no-cache`. Workbox content-hash revisions handle service-worker precache versioning, so keep new long-lived assets under the hashed `assets/` directory rather than reintroducing a build-revision query string.
+- For web assets, never reference immutable assets through bare stable URLs. Only content-hashed `/web/assets/*` paths are served with immutable caching; the app shell, manifests, and icons are `no-cache`.
 - Update `README.md` and `ROADMAP.md` when command contracts change.
 - Preserve Linux-first scope until portal hotkey/paste proof is complete.
 
 ## Web Frontend (`web/`)
 
-The TTS web PWA is a standalone React app at `web/`, decoupled from the Rust service. Deep reference: `web/README.md` (stack decisions, PWA/manifest details, route-shadowing constraint) and `web/PERFORMANCE.md` (bundle budget rationale, measured numbers).
+The installable TTS web UI is a standalone React app at `web/`, backed by the Rust service. Deep reference: `web/README.md` (stack decisions, manifests, backend-only contract, route-shadowing constraint) and `web/PERFORMANCE.md` (bundle budget rationale).
 
 ### Architecture in one paragraph
 
@@ -43,11 +43,12 @@ The TTS web PWA is a standalone React app at `web/`, decoupled from the Rust ser
 
 ### Desktop app URL contract
 
-`codex-voice run` opens Tauri webview windows pointed at the same PWA over
-HTTP — there is no Tauri IPC, so the desktop integration is entirely
-query-string/hash driven:
+`codex-voice run` opens Tauri webview windows pointed at the same web app over
+HTTP. Desktop integration is query-string/hash driven except for the official
+Tauri clipboard-manager plugin, which supplies native clipboard reads when the
+webview clipboard API is unavailable:
 
-- `?app=1` — desktop app mode; the PWA skips service-worker registration.
+- `?app=1` — desktop app mode.
 - `?view=settings` — the settings drawer starts open.
 - `#intent=<128-bit hex id>` — consumes a short-lived, one-shot selected-text
   intent from the local service and starts speech generation automatically.
@@ -80,7 +81,7 @@ Typical development loop: `mise run dev`, edit under `web/src/`, changes hot-rel
 - Layout: pure logic in `web/src/lib/` (storage, config, settings, theme, synthesis, prep, streaming, generation — DOM-free and unit-tested), hooks in `web/src/hooks/`, components in `web/src/components/`. Keep new logic in `lib/` with tests; keep components thin.
 - The React Compiler is enabled: do not add `useMemo`/`useCallback`/`memo` for performance — write plain code and let the compiler memoize.
 - Styling is Tailwind 4 utilities plus a small themed-token layer in `web/src/index.css`. Theming works via `data-theme` on `<html>` (set pre-paint by an inline script in `index.html`). The CSS custom properties read by JS at runtime (e.g. `--waveform-*`) are load-bearing names — do not rename.
-- **Frozen test contracts** (Playwright and component tests assert on these; do not rename): the 23 element IDs (`#text`, `#generate`, `#count`, `#paste`, `#settings-toggle`, `#generate-on-paste`, `#theme`, `#waveform`, …), the localStorage keys `codex-voice.web.{text,config.v1,settings.v1,generation.v1}`, and the IndexedDB names `codex-voice-web-audio`/`generated`/`last`.
+- **Frozen test contracts** (Playwright and component tests assert on these; do not rename): the 23 element IDs (`#text`, `#generate`, `#count`, `#paste`, `#settings-toggle`, `#generate-on-paste`, `#theme`, `#waveform`, …) and the localStorage keys `codex-voice.web.{text,settings.v1}`.
 - An initial-load JS budget (80 kB gzip) is enforced by `bun run build`; if a change trips it, prefer moving code behind the generation-boundary dynamic import (see `web/PERFORMANCE.md`) over raising the budget.
 - Cache policy is structural: only content-hashed `/web/assets/*` paths are immutable; keep long-lived assets under the hashed `assets/` directory.
 

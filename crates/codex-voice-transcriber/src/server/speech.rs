@@ -202,6 +202,7 @@ pub(crate) async fn speech(
         model_hint: body.model,
         voice_hint: voice,
         speech_prep_enabled: None,
+        speech_prep_shorten_enabled: None,
         speech_prep_model_hint: None,
         speech_prep_reasoning_effort: None,
         speech_prep_timeout_ms: None,

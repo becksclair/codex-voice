@@ -17,9 +17,7 @@ export function personaSupportsProvider(
   persona: BrowserPersonaConfig | null | undefined,
   provider: string,
 ): boolean {
-  if (provider === "elevenlabs") return Boolean(persona?.elevenlabs?.voiceId);
-  if (provider === "google") return Boolean(persona?.google?.voiceName);
-  return false;
+  return Boolean(persona?.providerOrder?.includes(provider));
 }
 
 /** First persona supporting a provider. Ports `firstPersonaForProvider`. */
@@ -62,12 +60,12 @@ export function resolveProvider(
   return persona?.provider || config.defaultProvider;
 }
 
-/** Next configured backend after `provider`, preserving legacy cached v1 configs. */
+/** Next configured backend after `provider`. */
 export function nextVoiceProvider(
   persona: BrowserPersonaConfig | null | undefined,
   provider: string,
 ): string | null {
-  if (!persona || persona.fallbackPolicy !== "preserve-persona") return null;
+  if (!persona) return null;
   const order = persona.providerOrder;
   if (!order?.length) return provider === "google" ? "elevenlabs" : "google";
   const index = order.indexOf(provider);

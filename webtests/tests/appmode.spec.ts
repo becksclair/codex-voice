@@ -3,15 +3,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 // URL contract for Tauri app-mode webviews (see web/src/lib/appMode.ts):
-// `?app=1` (app mode, not exercised here — see the SW specs in web.spec.ts for
-// its one observable effect), `?view=settings` (settings-only window), and
+// `?app=1` (app mode), `?view=settings` (settings-only window), and
 // `#intent=<id>` (one-shot selected-text handoff + auto-generate).
 
 const discoveryPath = path.resolve(__dirname, '../../target/webtests-state/codex-voice/transcriber.json');
 
-// The billed-call firewall below relies on page.route, which cannot intercept
-// requests issued through a service worker. SW behavior is covered by
-// web.spec.ts; block SWs here so the firewall guarantee holds unconditionally.
+// Block service workers left over in a reused browser profile so the
+// billed-call firewall below remains unconditional.
 test.use({ serviceWorkers: 'block' });
 
 test.beforeEach(async ({ page }) => {
@@ -86,7 +84,16 @@ test('consecutive button and native pastes generate the newly pasted text', asyn
   await page.route('**/*', async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname === '/web/config') {
-      return route.fulfill({ status: 503, contentType: 'application/json', body: '{}' });
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          version: 2,
+          defaultProvider: 'google',
+          providers: { google: { voice: 'Sulafat', models: ['test-model'] } },
+          personas: {},
+        }),
+      });
     }
     if (pathname.startsWith('/web/speech-jobs') && route.request().method() === 'POST') {
       return route.abort();

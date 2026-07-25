@@ -1,11 +1,29 @@
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "./App.tsx";
-import { markWorkerUpdateNotice } from "./pwa.ts";
 
-// The mount effect fetches /web/config and reads IndexedDB. Stub fetch to an
-// offline reject (fetchConfig swallows it and returns null) so tests exercise
-// the shell without a backend.
+function configResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      version: 2,
+      defaultProvider: "google",
+      defaultPersona: "sky",
+      providers: { google: { voice: "Sulafat", models: ["gemini-3.1-flash-tts-preview"] } },
+      speechPrep: { mode: "performance-tags", model: "google/gemini-3.5-flash" },
+      personas: {
+        sky: {
+          label: "Sky",
+          description: "Test voice",
+          provider: "google",
+          providerOrder: ["google"],
+        },
+      },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+// Stub config fetch to an offline reject so shell tests run without a backend.
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
@@ -17,6 +35,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  delete (window as typeof window & { __TAURI__?: unknown }).__TAURI__;
   delete document.documentElement.dataset.theme;
   // Restore the URL even when a test failed mid-assertion, so a leftover
   // ?view=settings or #intent= fragment can't leak into the next render.
@@ -56,20 +75,6 @@ test("renders every element ID in the frozen test contract", () => {
   for (const id of REQUIRED_IDS) {
     expect(document.getElementById(id), `missing #${id}`).not.toBeNull();
   }
-});
-
-test("shows the update toast only after a worker-triggered reload", () => {
-  const first = render(<App />);
-  expect(document.getElementById("update-toast")).toBeNull();
-  first.unmount();
-
-  markWorkerUpdateNotice();
-  render(<App />);
-
-  expect(document.getElementById("update-toast")?.textContent).toContain(
-    "Updated to latest version",
-  );
-  expect(sessionStorage.length).toBe(0);
 });
 
 test("character count updates as the user types", () => {
@@ -112,10 +117,15 @@ test("theme select persists to localStorage and sets data-theme", () => {
   expect(JSON.parse(raw as string).theme).toBe("light");
 });
 
-test("generate with empty text surfaces the error banner", () => {
+test("generate with empty text surfaces the error banner", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.resolve(configResponse())),
+  );
   render(<App />);
   const generate = document.getElementById("generate") as HTMLButtonElement;
   const banner = document.getElementById("error-banner") as HTMLElement;
+  await waitFor(() => expect(generate.disabled).toBe(false));
   expect(banner.textContent).toBe("");
   expect(banner.classList.contains("hidden")).toBe(true);
 
@@ -125,12 +135,24 @@ test("generate with empty text surfaces the error banner", () => {
   expect(banner.classList.contains("hidden")).toBe(false);
 });
 
+test("backend failure disables generation without calling a provider", async () => {
+  render(<App />);
+  const text = document.getElementById("text") as HTMLTextAreaElement;
+  const generate = document.getElementById("generate") as HTMLButtonElement;
+  fireEvent.input(text, { target: { value: "Backend-only speech" } });
+
+  await waitFor(() => expect(generate.disabled).toBe(true));
+  expect(
+    (global.fetch as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => String(input)),
+  ).toEqual(["/web/config"]);
+});
+
 test("generate button remains enabled and cancels an active generation", async () => {
   let generationSignal: AbortSignal | undefined;
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input) === "/web/config") return Promise.reject(new Error("offline"));
+      if (String(input) === "/web/config") return Promise.resolve(configResponse());
       if (String(input) === "/web/speech-jobs" && init?.method === "POST") {
         generationSignal = init.signal ?? undefined;
         return new Promise<Response>((_resolve, reject) => {
@@ -144,6 +166,11 @@ test("generate button remains enabled and cancels an active generation", async (
   );
 
   render(<App />);
+  await waitFor(() =>
+    expect(
+      (document.getElementById("provider") as HTMLSelectElement).options.length,
+    ).toBeGreaterThan(1),
+  );
   const text = document.getElementById("text") as HTMLTextAreaElement;
   const generate = document.getElementById("generate") as HTMLButtonElement;
   const label = document.getElementById("generate-label") as HTMLElement;
@@ -159,6 +186,34 @@ test("generate button remains enabled and cancels an active generation", async (
 
   expect(generationSignal?.aborted).toBe(true);
   await waitFor(() => expect(label.textContent).toBe("Generate"));
+});
+
+test("provider default sends the configured Google voice instead of the default persona", async () => {
+  let requestBody: Record<string, unknown> | undefined;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/web/config") return Promise.resolve(configResponse());
+      if (String(input) === "/web/speech-jobs" && init?.method === "POST") {
+        requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Promise<Response>(() => {});
+      }
+      return Promise.reject(new Error("offline"));
+    }),
+  );
+
+  render(<App />);
+  const voice = document.getElementById("voice") as HTMLSelectElement;
+  await waitFor(() =>
+    expect(Array.from(voice.options).map((option) => option.value)).toContain("provider-default"),
+  );
+  fireEvent.change(voice, { target: { value: "provider-default" } });
+  fireEvent.input(document.getElementById("text") as HTMLTextAreaElement, {
+    target: { value: "Use the provider voice" },
+  });
+  fireEvent.click(document.getElementById("generate") as HTMLButtonElement);
+
+  await waitFor(() => expect(requestBody?.voice).toBe("Sulafat"));
 });
 
 test("toggling a settings checkbox persists to localStorage", () => {
@@ -191,6 +246,7 @@ test("#intent= intake consumes text, clears the hash, and fires generation once"
   const intentId = "a".repeat(32);
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    if (url === "/web/config") return configResponse();
     if (url.includes(`/web/desktop-intents/${intentId}`)) {
       return new Response(JSON.stringify({ text: sample }), {
         status: 200,
@@ -339,6 +395,46 @@ test("an empty clipboard paste is a complete no-op", async () => {
   expect(localStorage.getItem("codex-voice.web.text")).toBe("keep this draft");
 });
 
+test("clipboard button explains the HTTPS requirement when the API is unavailable", async () => {
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: undefined,
+  });
+
+  render(<App />);
+  fireEvent.click(document.getElementById("paste") as HTMLButtonElement);
+
+  await waitFor(() =>
+    expect(document.getElementById("error-banner")?.textContent).toBe(
+      "Clipboard paste requires HTTPS and clipboard permission.",
+    ),
+  );
+});
+
+test("desktop clipboard button falls back to the Tauri command", async () => {
+  window.history.pushState(null, "", "/web?app=1");
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: undefined,
+  });
+  const readText = vi.fn(async () => "desktop clipboard text");
+  (
+    window as typeof window & {
+      __TAURI__?: { clipboardManager: { readText: typeof readText } };
+    }
+  ).__TAURI__ = { clipboardManager: { readText } };
+
+  render(<App />);
+  fireEvent.click(document.getElementById("paste") as HTMLButtonElement);
+
+  await waitFor(() =>
+    expect((document.getElementById("text") as HTMLTextAreaElement).value).toBe(
+      "desktop clipboard text",
+    ),
+  );
+  expect(readText).toHaveBeenCalledOnce();
+});
+
 test("consecutive clipboard-button pastes generate the newly pasted text", async () => {
   const clipboard = { readText: vi.fn<() => Promise<string>>() };
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
@@ -346,7 +442,7 @@ test("consecutive clipboard-button pastes generate the newly pasted text", async
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input) === "/web/config") throw new Error("offline");
+      if (String(input) === "/web/config") return configResponse();
       if (String(input) === "/web/speech-jobs" && init?.method === "POST") {
         generated.push((JSON.parse(String(init.body)) as { input: string }).input);
       }
@@ -355,6 +451,11 @@ test("consecutive clipboard-button pastes generate the newly pasted text", async
   );
 
   render(<App />);
+  await waitFor(() =>
+    expect(
+      (document.getElementById("provider") as HTMLSelectElement).options.length,
+    ).toBeGreaterThan(1),
+  );
   const paste = document.getElementById("paste") as HTMLButtonElement;
   const text = document.getElementById("text") as HTMLTextAreaElement;
 

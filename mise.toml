@@ -98,13 +98,9 @@ run = [
 ]
 
 [tasks.test-web-enrichment-benchmark]
-description = "Compare prep-only literary enrichment across selected models (paid, no audio)"
+description = "Benchmark the fixed speech-prep sample through direct Rust provider clients (paid, no audio)"
 dir = "{{cwd}}"
-depends = ["web-build"]
-run = [
-  "cargo build -q -p codex-voice-app --bin codex-voice",
-  "cd webtests && LIVE_ENRICHMENT_BENCHMARK=1 ENRICHMENT_MODELS=gpt-5.6-luna,gpt-5.6-terra ENRICHMENT_BENCHMARK_LABEL=tuned-luna-terra bunx playwright test tests/enrichment-review.spec.ts",
-]
+run = "cargo run -q -p codex-voice-app --bin codex-voice -- tts bench --iterations 3"
 
 [tasks.serve]
 description = "Run the audio server in the foreground (default bind 127.0.0.1:3845)"

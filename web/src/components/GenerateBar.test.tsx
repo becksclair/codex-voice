@@ -5,6 +5,7 @@ import { GenerateBar } from "./GenerateBar.tsx";
 const baseProps = {
   generating: false,
   generationActive: false,
+  generateDisabled: false,
   progress: 0,
   label: "Generate",
   onGenerate: () => {},

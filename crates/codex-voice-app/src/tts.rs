@@ -122,6 +122,7 @@ pub async fn doctor_tts(args: TtsDoctor) -> Result<()> {
         model_hint: "gpt-4o-mini-tts".to_string(),
         voice_hint: args.voice,
         speech_prep_enabled: None,
+        speech_prep_shorten_enabled: None,
         speech_prep_model_hint: None,
         speech_prep_reasoning_effort: None,
         speech_prep_timeout_ms: None,
@@ -221,23 +222,16 @@ struct BenchTarget {
 
 const DEFAULT_TARGETS: &[BenchTarget] = &[
     BenchTarget {
-        name: "gpt-5.3-codex-spark-normal",
+        name: "gpt-5.6-luna-none",
         provider: BenchProvider::Codex,
-        model: "gpt-5.3-codex-spark",
-        reasoning_effort: Some("medium"),
+        model: "gpt-5.6-luna",
+        reasoning_effort: None,
         timeout_secs: 120,
     },
     BenchTarget {
         name: "gpt-5.4-mini-none",
         provider: BenchProvider::Codex,
         model: "gpt-5.4-mini",
-        reasoning_effort: None,
-        timeout_secs: 120,
-    },
-    BenchTarget {
-        name: "gpt-5.5-none",
-        provider: BenchProvider::Codex,
-        model: "gpt-5.5",
         reasoning_effort: None,
         timeout_secs: 120,
     },
@@ -252,6 +246,13 @@ const DEFAULT_TARGETS: &[BenchTarget] = &[
         name: "gemini-3.5-flash",
         provider: BenchProvider::Google,
         model: "google/gemini-3.5-flash",
+        reasoning_effort: None,
+        timeout_secs: 30,
+    },
+    BenchTarget {
+        name: "gemini-3.6-flash",
+        provider: BenchProvider::Google,
+        model: "google/gemini-3.6-flash",
         reasoning_effort: None,
         timeout_secs: 30,
     },
@@ -511,11 +512,11 @@ mod tests {
     fn select_targets_filters_by_name_preserving_order() {
         let targets = select_targets(&Some(vec![
             "gemini-3.5-flash".into(),
-            "gpt-5.5-none".into(),
+            "gpt-5.6-luna-none".into(),
         ]))
         .unwrap();
         let names = targets.iter().map(|t| t.name).collect::<Vec<_>>();
-        assert_eq!(names, vec!["gemini-3.5-flash", "gpt-5.5-none"]);
+        assert_eq!(names, vec!["gemini-3.5-flash", "gpt-5.6-luna-none"]);
     }
 
     #[test]
@@ -526,9 +527,9 @@ mod tests {
 
     #[test]
     fn select_targets_ignores_blank_entries() {
-        let targets = select_targets(&Some(vec!["".into(), "gpt-5.5-none".into()])).unwrap();
+        let targets = select_targets(&Some(vec!["".into(), "gpt-5.6-luna-none".into()])).unwrap();
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].name, "gpt-5.5-none");
+        assert_eq!(targets[0].name, "gpt-5.6-luna-none");
     }
 
     #[test]
@@ -552,11 +553,11 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "gpt-5.3-codex-spark-normal",
+                "gpt-5.6-luna-none",
                 "gpt-5.4-mini-none",
-                "gpt-5.5-none",
                 "gemini-3-flash-preview",
                 "gemini-3.5-flash",
+                "gemini-3.6-flash",
             ]
         );
     }

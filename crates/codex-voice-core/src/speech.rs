@@ -54,6 +54,7 @@ pub struct SpeechRequest {
     pub model_hint: String,
     pub voice_hint: Option<String>,
     pub speech_prep_enabled: Option<bool>,
+    pub speech_prep_shorten_enabled: Option<bool>,
     pub speech_prep_model_hint: Option<String>,
     pub speech_prep_reasoning_effort: Option<String>,
     pub speech_prep_timeout_ms: Option<u64>,

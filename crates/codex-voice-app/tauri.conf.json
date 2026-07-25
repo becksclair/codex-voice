@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "identifier": "com.heliasar.CodexVoice",
   "build": { "frontendDist": "./tauri-frontend" },
-  "app": { "withGlobalTauri": false, "windows": [], "security": { "csp": null } },
+  "app": { "withGlobalTauri": true, "windows": [], "security": { "csp": null } },
   "bundle": {
     "active": true,
     "targets": ["nsis"],

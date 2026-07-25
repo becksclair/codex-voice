@@ -1,40 +1,33 @@
 import { useEffect, useState } from "react";
-import {
-  fetchConfig,
-  loadCachedConfig,
-  reconcileBrowserConfig,
-  saveCachedConfig,
-  syncCodexAuthToServer,
-  type BrowserTtsConfig,
-} from "../lib/index.ts";
+import { fetchConfig, type BrowserTtsConfig } from "../lib/index.ts";
 
 /**
- * The live browser-TTS config: cached value first, then a background refresh.
- *
- * Ports the `directConfig = loadCachedConfig()` seed and the `refreshConfig`
- * fetch from the legacy mount effect. The fetched config is cached and becomes
- * the new state; downstream hooks react to the change (settings repopulate, the
- * generation controller updates).
+ * Fetch the live browser-TTS config once at mount. It is deliberately not
+ * cached; downstream hooks reconcile settings when the request completes.
  */
-export function useServerConfig(): BrowserTtsConfig | null {
-  const [config, setConfig] = useState<BrowserTtsConfig | null>(loadCachedConfig);
+export interface ServerConfigState {
+  config: BrowserTtsConfig | null;
+  error: string;
+}
+
+export function useServerConfig(): ServerConfigState {
+  const [config, setConfig] = useState<BrowserTtsConfig | null>(null);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const fresh = await fetchConfig();
-      if (cancelled || !fresh) return;
-      setConfig((current) => {
-        const reconciled = reconcileBrowserConfig(fresh, current);
-        saveCachedConfig(reconciled);
-        void syncCodexAuthToServer(reconciled);
-        return reconciled;
-      });
+      try {
+        const fresh = await fetchConfig();
+        if (!cancelled) setConfig(fresh);
+      } catch (cause) {
+        if (!cancelled) setError((cause as Error).message);
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  return config;
+  return { config, error };
 }

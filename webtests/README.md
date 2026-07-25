@@ -1,11 +1,11 @@
-# Web PWA behavioral tests
+# Web app behavioral tests
 
-Playwright suite exercising the Codex Voice web PWA — the standalone React app
+Playwright suite exercising the installable Codex Voice web app — the standalone React app
 built from `web/` (see `web/README.md`) and served at `GET /web/` by
 `codex-voice server` from the dist embedded in the binary.
 
-These tests drive real browser behavior: persistence, clipboard handling,
-responsive settings, cancellation/resume, service-worker routes, and the full
+These tests drive real browser behavior: draft/settings persistence, clipboard
+handling, responsive settings, cancellation, and the full
 waveform/playback/seek/download path. Routine generation tests intercept the
 speech-job API and return a deterministic in-memory WAV fixture, so they never
 contact a provider or spend API credits. The web shell and its config endpoints
@@ -68,7 +68,7 @@ LIVE_TTS=1 bunx playwright test tests/live.spec.ts
 Requirements and cost:
 
 - Needs the operator's real `~/.config/codex-voice/config.json` on the host so
-  `/web/config` returns live provider keys.
+  `/web/config` returns live provider metadata.
 - **Cost per run:** one ~1.9k-character backend-first generation. The input is
   long enough to exercise backend prep and chunked synthesis. That is the
   entire default spend.
@@ -85,7 +85,7 @@ non-blank waveform canvas, playback advances, and the download is a valid WAV
 ### Emotion-enrichment quality gate (paid, no audio)
 
 `tests/enrichment-review.spec.ts` sends a public-domain passage from Mary
-Shelley's *Frankenstein* through the real browser HTTP → backend Codex-prep
+Shelley's *Frankenstein* through the real browser HTTP → backend speech-prep
 path using the configured model and reasoning effort. It calls the strict
 prep-only endpoint and never invokes synthesis or generates audio:
 
@@ -93,8 +93,8 @@ prep-only endpoint and never invokes synthesis or generates audio:
 mise run test-web-enrichment
 ```
 
-The quality gate requires Luna with reasoning `none`, exact wording
-preservation, 8–13 tags per 1,000 source characters, at least 75% unique tag
+The quality gate requires Gemini 3.5 Flash, exact wording
+preservation, 8–16 tags per 1,000 source characters, at least 75% unique tag
 vocabulary, no single tag occupying more than 25% of insertions, at least two
 tags in every third, a maximum 400-character cue gap (the fixture's final
 sentence is long and semicolon-linked), clean insertion boundaries, and
@@ -109,10 +109,10 @@ For exploratory model comparison without richness thresholds, run:
 mise run test-web-enrichment-benchmark
 ```
 
-That task compares Luna and Terra by default. `ENRICHMENT_MODELS` can supply a
-different comma-separated set, and the report includes latency, tag count,
-unique tags, normalized positions, thirds distribution, maximum untagged gap,
-and context around every insertion.
+The canonical direct-client model comparison is `codex-voice tts bench
+--iterations 3`; it covers Luna with no reasoning, GPT-5.4 Mini, Gemini 3 Flash
+Preview, Gemini 3.5 Flash, and Gemini 3.6 Flash. The Playwright benchmark remains
+an optional HTTP-path comparison.
 
 ## Notes
 

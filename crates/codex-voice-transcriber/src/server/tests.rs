@@ -9,9 +9,7 @@ use super::*;
 use crate::test_support::*;
 use axum::body;
 use axum::http::{header, StatusCode};
-use base64::Engine;
 use codex_voice_core::{SpeechFormat, TranscriptionClient};
-use codex_voice_tts::config::SpeechPrepProviderKind;
 use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -294,95 +292,36 @@ async fn web_config_is_public_and_exports_browser_tts_config() {
         .await
         .expect("body reads");
     let config: serde_json::Value = serde_json::from_slice(&bytes).expect("json response");
-    assert_eq!(config["version"], 1);
+    assert_eq!(config["version"], 2);
     assert_eq!(config["defaultProvider"], "google");
     assert_eq!(config["defaultPersona"], "sky");
-    assert_eq!(config["speechPrep"]["model"], "google/gemini-3.5-flash");
-    assert_eq!(config["speechPrep"]["browserSupported"], true);
-    assert_eq!(config["speechPrep"]["strategies"]["google"], "inline-tags");
+    assert_eq!(config["providers"]["google"]["voice"], "Sulafat");
     assert_eq!(
-        config["speechPrep"]["strategies"]["elevenlabs"],
-        "inline-tags"
-    );
-    assert_eq!(config["speechPrep"]["tagPalette"][0], "tender");
-    assert_eq!(config["speechPrep"]["capPerformanceTags"], false);
-    assert!(config["speechPrep"]["fallbackModels"]
-        .as_array()
-        .is_some_and(Vec::is_empty));
-    assert_eq!(config["speechPrep"]["attemptTimeoutMs"], 4000);
-    assert_eq!(config["speechPrep"]["apiKey"], "google-prep-key");
-    assert_eq!(config["providers"]["google"]["apiKey"], "google-tts-key");
-    assert_eq!(
-        config["providers"]["google"]["model"],
+        config["providers"]["google"]["models"][0],
         "gemini-3.1-flash-tts-preview"
     );
-    assert_eq!(
-        config["providers"]["google"]["streaming"]["transport"],
-        "interactions-stream"
-    );
-    assert_eq!(
-        config["providers"]["google"]["streaming"]["supportedModels"][0],
-        "gemini-3.1-flash-tts-preview"
-    );
-    assert_eq!(
-        config["providers"]["google"]["streaming"]["outputFormat"],
-        "pcm_24000"
-    );
-    assert_eq!(
-        config["providers"]["google"]["streaming"]["sampleRate"],
-        24000
-    );
-    assert_eq!(config["providers"]["google"]["streaming"]["channels"], 1);
+    assert_eq!(config["providers"]["elevenlabs"]["models"][0], "eleven_v3");
     assert_eq!(config["providers"]["elevenlabs"]["apiKey"], "eleven-key");
     assert_eq!(
-        config["providers"]["elevenlabs"]["streaming"]["transport"],
-        "websocket"
+        config["providers"]["elevenlabs"]["baseUrl"],
+        "https://api.elevenlabs.io"
     );
-    assert_eq!(
-        config["providers"]["elevenlabs"]["streaming"]["preferredModel"],
-        "eleven_flash_v2_5"
-    );
-    assert_eq!(
-        config["providers"]["elevenlabs"]["streaming"]["outputFormat"],
-        "pcm_24000"
-    );
-    assert_eq!(
-        config["providers"]["elevenlabs"]["streaming"]["sampleRate"],
-        24000
-    );
-    assert_eq!(
-        config["providers"]["elevenlabs"]["streaming"]["channels"],
-        1
-    );
-    assert_eq!(
-        config["providers"]["elevenlabs"]["streaming"]["chunkLengthSchedule"][0],
-        120
-    );
-    assert_eq!(config["providers"]["elevenlabs"]["streamGain"], 2.0);
-    assert_eq!(config["providers"]["elevenlabs"]["maxTextLength"], 4000);
-    assert_eq!(
-        config["providers"]["elevenlabs"]["maxTextLengthOverridden"],
-        true
-    );
-    assert_eq!(
-        config["providers"]["elevenlabs"]["fallbackModels"],
-        serde_json::json!([])
-    );
-    assert_eq!(config["speechPrep"]["attemptTimeoutMs"], 4000);
-    assert_eq!(config["speechPrep"]["timeoutMs"], 20000);
-    assert!(config["providers"]["elevenlabs"]
-        .get("languageCode")
-        .is_none());
-    assert_eq!(
-        config["personas"]["sky"]["fallbackPolicy"],
-        "preserve-persona"
-    );
-    assert_eq!(config["personas"]["sky"]["providerOrder"][0], "google");
-    assert_eq!(config["personas"]["sky"]["providerOrder"][1], "elevenlabs");
     assert_eq!(
         config["personas"]["sky"]["elevenlabs"]["voiceId"],
         "eleven-voice"
     );
+    assert_eq!(config["speechPrep"]["model"], "google/gemini-3.5-flash");
+    assert_eq!(config["speechPrep"]["mode"], "performance-tags");
+    assert_eq!(config["personas"]["sky"]["provider"], "google");
+    assert_eq!(config["personas"]["sky"]["providerOrder"][0], "google");
+    assert_eq!(config["personas"]["sky"]["providerOrder"][1], "elevenlabs");
+    let serialized = String::from_utf8(bytes.to_vec()).expect("config is utf-8");
+    for forbidden in ["accessToken", "refreshToken", "accountId", "authFile"] {
+        assert!(
+            !serialized.contains(forbidden),
+            "browser config leaked unrelated credential field {forbidden}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -437,219 +376,22 @@ async fn web_config_rejects_untrusted_browser_origins() {
     assert_eq!(unrelated_loopback.status(), StatusCode::FORBIDDEN);
 }
 
-fn test_access_token(exp: u64) -> String {
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(serde_json::to_vec(&serde_json::json!({ "exp": exp })).unwrap());
-    format!("header.{payload}.signature")
-}
-
 #[tokio::test]
-async fn web_codex_auth_sync_updates_only_same_account_non_older_credentials() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let auth_file = temp.path().join("auth.json");
-    let current_access = test_access_token(100);
-    std::fs::write(
-        &auth_file,
-        serde_json::to_string(&serde_json::json!({"tokens": {
-            "access_token": current_access,
-            "refresh_token": "current-refresh",
-            "account_id": "account-id"
-        }}))
-        .unwrap(),
-    )
-    .expect("auth written");
-    let mut config = sample_tts_config();
-    let prep = config.speech_prep.as_mut().expect("speech prep exists");
-    prep.provider = SpeechPrepProviderKind::Codex;
-    prep.api_key = None;
-    prep.auth_file = Some(auth_file.clone());
-    let app = service_router(test_state_with_speech_and_config(1024, Some(config)));
-
-    let newer_access = test_access_token(200);
-    let updated = app
-        .clone()
+async fn web_codex_auth_route_is_removed() {
+    let app = service_router(test_state_with_web_tts_config(1024));
+    let response = app
         .oneshot(
             axum::http::Request::builder()
                 .method("POST")
                 .uri("/web/codex-auth")
                 .header(header::ORIGIN, "https://voice.heliasar.com")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(body::Body::from(
-                    serde_json::to_vec(&serde_json::json!({
-                        "accessToken": newer_access,
-                        "refreshToken": "rotated-refresh",
-                        "accountId": "account-id"
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(updated.status(), StatusCode::NO_CONTENT);
-    let synced = codex_voice_tts::read_codex_auth_snapshot(&auth_file).unwrap();
-    assert_eq!(synced.refresh_token, "rotated-refresh");
-    assert_eq!(synced.access_token, newer_access);
-
-    for (access_token, account_id) in [
-        (test_access_token(100), "account-id"),
-        (test_access_token(300), "different-account"),
-    ] {
-        let rejected = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/web/codex-auth")
-                    .header(header::ORIGIN, "https://voice.heliasar.com")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(body::Body::from(
-                        serde_json::to_vec(&serde_json::json!({
-                            "accessToken": access_token,
-                            "refreshToken": "rejected-refresh",
-                            "accountId": account_id
-                        }))
-                        .unwrap(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(rejected.status(), StatusCode::CONFLICT);
-    }
-    assert_eq!(
-        codex_voice_tts::read_codex_auth_snapshot(&auth_file)
-            .unwrap()
-            .refresh_token,
-        "rotated-refresh"
-    );
-
-    let untrusted = app
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/web/codex-auth")
-                .header(header::ORIGIN, "https://attacker.example")
-                .header(header::CONTENT_TYPE, "application/json")
                 .body(body::Body::from("{}"))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(untrusted.status(), StatusCode::FORBIDDEN);
-}
-
-#[test]
-fn browser_config_exports_codex_speech_prep_with_cached_auth() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let auth_file = temp.path().join("auth.json");
-    std::fs::write(
-        &auth_file,
-        r#"{"tokens":{"access_token":"access-token","refresh_token":"refresh-token","account_id":"account-id"}}"#,
-    )
-    .expect("auth written");
-    let mut config = sample_tts_config();
-    let prep = config.speech_prep.as_mut().expect("speech prep exists");
-    prep.provider = SpeechPrepProviderKind::Codex;
-    prep.api_key = None;
-    prep.auth_file = Some(auth_file);
-    prep.base_url = "https://chatgpt.com/backend-api/codex".to_string();
-    prep.model = "gpt-5.3-codex-spark".to_string();
-    prep.fallback_models = Vec::new();
-    prep.reasoning_effort = Some("medium".to_string());
-
-    let browser_config = BrowserTtsConfig::from_resolved(&config);
-    let json = serde_json::to_value(browser_config).expect("serializes");
-
-    assert_eq!(json["speechPrep"]["provider"], "codex");
-    assert_eq!(json["speechPrep"]["browserSupported"], true);
-    assert_eq!(json["speechPrep"]["browserFallback"]["provider"], "google");
-    assert_eq!(
-        json["speechPrep"]["browserFallback"]["apiKey"],
-        "google-tts-key"
-    );
-    assert_eq!(
-        json["speechPrep"]["browserFallback"]["baseUrl"],
-        "https://generativelanguage.googleapis.com/v1beta"
-    );
-    assert_eq!(
-        json["speechPrep"]["browserFallback"]["model"],
-        "google/gemini-3.5-flash"
-    );
-    assert_eq!(json["speechPrep"]["baseUrl"], "/_codex");
-    assert_eq!(json["speechPrep"]["model"], "gpt-5.3-codex-spark");
-    assert!(json["speechPrep"]["fallbackModels"]
-        .as_array()
-        .is_some_and(Vec::is_empty));
-    assert_eq!(json["speechPrep"]["reasoningEffort"], "medium");
-    assert_eq!(
-        json["speechPrep"]["codexAuth"]["accessToken"],
-        "access-token"
-    );
-    assert_eq!(
-        json["speechPrep"]["codexAuth"]["refreshToken"],
-        "refresh-token"
-    );
-    assert_eq!(json["speechPrep"]["codexAuth"]["accountId"], "account-id");
-    assert_eq!(
-        json["speechPrep"]["codexAuth"]["tokenUrl"],
-        "https://auth.openai.com/oauth/token"
-    );
-    assert!(json["speechPrep"].get("apiKey").is_none());
-}
-
-#[tokio::test]
-async fn browser_config_refreshes_codex_auth_from_disk() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let auth_file = temp.path().join("auth.json");
-    std::fs::write(
-        &auth_file,
-        r#"{"tokens":{"access_token":"old-access","refresh_token":"old-refresh","account_id":"account-id"}}"#,
-    )
-    .expect("auth written");
-    let mut config = sample_tts_config();
-    let prep = config.speech_prep.as_mut().expect("speech prep exists");
-    prep.provider = SpeechPrepProviderKind::Codex;
-    prep.api_key = None;
-    prep.auth_file = Some(auth_file.clone());
-    let browser_config = BrowserTtsConfig::from_resolved(&config);
-
-    std::fs::write(
-        &auth_file,
-        r#"{"tokens":{"access_token":"new-access","refresh_token":"new-refresh","account_id":"account-id"}}"#,
-    )
-    .expect("rotated auth written");
-    let json = serde_json::to_value(browser_config.refresh_codex_auth().await)
-        .expect("browser config serializes");
-
-    assert_eq!(json["speechPrep"]["codexAuth"]["accessToken"], "new-access");
-    assert_eq!(
-        json["speechPrep"]["codexAuth"]["refreshToken"],
-        "new-refresh"
-    );
-}
-
-#[test]
-fn browser_config_omits_incomplete_codex_auth() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let auth_file = temp.path().join("auth.json");
-    std::fs::write(
-        &auth_file,
-        r#"{"tokens":{"access_token":"access-token","account_id":"account-id"}}"#,
-    )
-    .expect("auth written");
-    let mut config = sample_tts_config();
-    let prep = config.speech_prep.as_mut().expect("speech prep exists");
-    prep.provider = SpeechPrepProviderKind::Codex;
-    prep.api_key = None;
-    prep.auth_file = Some(auth_file);
-    prep.base_url = "https://chatgpt.com/backend-api/codex".to_string();
-
-    let json = serde_json::to_value(BrowserTtsConfig::from_resolved(&config))
-        .expect("browser config serializes");
-
-    assert_eq!(json["speechPrep"]["browserSupported"], false);
-    assert!(json["speechPrep"].get("codexAuth").is_none());
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]
@@ -790,8 +532,8 @@ async fn tts_config_reload_survives_disappearance_and_atomic_replacement() {
         .clone()
         .expect("web config remains available");
     let json = serde_json::to_value(config).expect("serializes");
-    assert_eq!(json["providers"]["google"]["voice"], "Sulafat");
-    assert_eq!(json["personas"]["test"]["google"]["voiceName"], "Aoede");
+    assert_eq!(json["version"], 2);
+    assert!(json["providers"]["google"].is_object());
 }
 
 #[tokio::test]
@@ -830,9 +572,9 @@ fn browser_config_export_omits_absent_providers() {
     let exported = BrowserTtsConfig::from_resolved(&config);
     let json = serde_json::to_value(exported).expect("serializes");
 
-    assert_eq!(json["providers"]["google"]["apiKey"], "google-tts-key");
+    assert_eq!(json["providers"]["google"]["voice"], "Sulafat");
     assert!(json["providers"].get("elevenlabs").is_none());
-    assert_eq!(json["personas"]["sky"]["google"]["voiceName"], "Sulafat");
+    assert_eq!(json["personas"]["sky"]["provider"], "google");
 }
 
 #[tokio::test]
@@ -856,6 +598,40 @@ async fn legacy_service_worker_self_destructs() {
     assert_eq!(
         response.headers().get(header::CACHE_CONTROL).unwrap(),
         "no-cache"
+    );
+    let bytes = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    let script = std::str::from_utf8(&bytes).expect("script is utf-8");
+    assert!(script.contains("self.registration"));
+    assert!(script.contains("unregister"));
+}
+
+#[tokio::test]
+async fn retired_vite_service_worker_self_destructs_with_its_original_scope() {
+    let app = service_router(test_state_with_speech(1024));
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/web/sw.js")
+                .body(body::Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/javascript; charset=utf-8"
+    );
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache"
+    );
+    assert_eq!(
+        response.headers().get("service-worker-allowed").unwrap(),
+        "/web"
     );
     let bytes = body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -1142,7 +918,7 @@ async fn web_speech_prep_returns_enriched_text_without_synthesis() {
     let response = app
         .oneshot(speech_request(
             "/web/speech-prep",
-            r#"{"input":"hello from prep","provider":"google","speechPrepEnabled":true}"#,
+            r#"{"input":"hello from prep","provider":"google","speechPrepEnabled":true,"speechPrepShortenEnabled":true}"#,
             None,
         ))
         .await
@@ -1160,6 +936,7 @@ async fn web_speech_prep_returns_enriched_text_without_synthesis() {
     assert_eq!(seen[0].input, "hello from prep");
     assert_eq!(seen[0].provider_hint.as_deref(), Some("google"));
     assert_eq!(seen[0].speech_prep_enabled, Some(true));
+    assert_eq!(seen[0].speech_prep_shorten_enabled, Some(true));
 }
 
 #[test]

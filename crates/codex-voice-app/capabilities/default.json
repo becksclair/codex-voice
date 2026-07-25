@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Desktop window access to the native clipboard reader",
+  "windows": ["main", "settings"],
+  "remote": {
+    "urls": ["http://localhost:3846/*", "http://127.0.0.1:3846/*"]
+  },
+  "permissions": ["core:default", "clipboard-manager:allow-read-text"]
+}

@@ -1,9 +1,7 @@
 import { test, expect } from '@playwright/test';
 
-// Storage keys used by the PWA (see assets/web/app.html).
 const TEXT_KEY = 'codex-voice.web.text';
 const SETTINGS_KEY = 'codex-voice.web.settings.v1';
-const UPDATE_NOTICE_KEY = 'codex-voice.web.worker-update-notice';
 
 // Start every test from a clean slate so persisted localStorage from a prior
 // test never leaks in and masks a real regression.
@@ -17,24 +15,6 @@ test('shell loads with title, textarea, and generate button', async ({ page }) =
   await expect(page).toHaveTitle('Codex Voice');
   await expect(page.locator('#text')).toBeVisible();
   await expect(page.locator('#generate')).toBeVisible();
-});
-
-test('worker update toast appears at the top and can be dismissed', async ({ page }) => {
-  await page.evaluate((key) => sessionStorage.setItem(key, '1'), UPDATE_NOTICE_KEY);
-  await page.reload();
-
-  const toast = page.locator('#update-toast');
-  await expect(toast).toBeVisible();
-  await expect(toast).toContainText('Updated to latest version');
-  const box = await toast.boundingBox();
-  const computedTop = await toast.evaluate((element) =>
-    Number.parseFloat(getComputedStyle(element).top),
-  );
-  expect(box).not.toBeNull();
-  expect(box!.y).toBeCloseTo(computedTop, 1);
-
-  await toast.getByRole('button', { name: 'Dismiss update notice' }).click();
-  await expect(toast).toHaveCount(0);
 });
 
 test('typed text persists across a reload', async ({ page }) => {
@@ -110,16 +90,6 @@ test('manifest route returns JSON with the app name', async ({ request }) => {
   expect(manifest.name).toBe('Codex Voice');
 });
 
-test('service worker route serves javascript', async ({ request }) => {
-  const res = await request.get('/web/sw.js');
-  expect(res.status()).toBe(200);
-  expect(res.headers()['content-type']).toContain('javascript');
-  const body = await res.text();
-  expect(body.length).toBeGreaterThan(0);
-  expect(body).toContain('self.skipWaiting()');
-  expect(body).toMatch(/\.clientsClaim\(\)/);
-});
-
 test('theme setting persists across a reload', async ({ page }) => {
   await page.locator('#settings-toggle').click();
   const theme = page.locator('#theme');
@@ -137,61 +107,4 @@ test('theme setting persists across a reload', async ({ page }) => {
   await page.reload();
   await page.locator('#settings-toggle').click();
   await expect(page.locator('#theme')).toHaveValue('light');
-});
-
-test('service worker takes control of /web (offline-capable scope)', async ({ page }) => {
-  // Regression guard for the scope mismatch: the app's canonical URL is /web
-  // (no trailing slash) while the worker script lives at /web/sw.js, whose
-  // default scope /web/ does NOT cover /web. The app registers with an explicit
-  // scope of /web, authorized by the Service-Worker-Allowed header. If either
-  // side regresses, navigator.serviceWorker.ready never resolves here because
-  // no registration's scope matches the document URL.
-  await page.goto('/web');
-  const scope = await page.evaluate(async () => {
-    const registration = await Promise.race([
-      navigator.serviceWorker.ready,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('no service worker registration matched /web')), 15_000),
-      ),
-    ]);
-    return registration.scope;
-  });
-  expect(new URL(scope).pathname).toBe('/web');
-
-  // After a reload the (now active) worker must actually control the page.
-  await page.reload();
-  await expect
-    .poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null), {
-      timeout: 15_000,
-    })
-    .toBe(true);
-});
-
-test('app mode removes a legacy /web service worker and sheds its controller', async ({ page }) => {
-  await page.goto('/web');
-  await page.evaluate(() => navigator.serviceWorker.ready);
-  await page.reload();
-  await expect
-    .poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null), {
-      timeout: 15_000,
-    })
-    .toBe(true);
-
-  let appModeNavigations = 0;
-  page.on('framenavigated', (frame) => {
-    if (frame === page.mainFrame() && new URL(frame.url()).searchParams.get('app') === '1') {
-      appModeNavigations += 1;
-    }
-  });
-  await page.goto('/web?app=1');
-  await expect.poll(() => appModeNavigations, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
-  await page.waitForLoadState('domcontentloaded');
-  const workerState = await page.evaluate(async () => ({
-    controlled: navigator.serviceWorker.controller !== null,
-    webRegistrations: (await navigator.serviceWorker.getRegistrations()).filter((registration) =>
-      new URL(registration.scope).pathname.startsWith('/web'),
-    ).length,
-  }));
-  expect(workerState).toEqual({ controlled: false, webRegistrations: 0 });
-  await expect(page.locator('#text')).toBeVisible();
 });

@@ -16,6 +16,7 @@ codex-voice-tts = { path = "../codex-voice-tts" }
 codex-voice-transcriber = { path = "../codex-voice-transcriber" }
 dirs.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-clipboard-manager = "2"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

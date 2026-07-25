@@ -58,16 +58,16 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
     built with `bun`). `web/dist` is embedded at build time; `server --web-dist
     <dir>` serves a dist from disk for binary-independent web deploys. Only
     content-hashed `/web/assets/*` is immutable-cached. See `web/README.md`.
-  - **Offline Codex prep 2026-07-15:** the PWA caches refresh-capable Codex
-    auth from `/web/config` and uses Saga's scoped same-origin Responses relay
-    plus direct TTS when backend job creation is unreachable or returns a
-    gateway availability error. Browser-rotated bundles remain pending while
-    offline and synchronize atomically to the canonical auth file after backend
-    recovery without invoking the Codex CLI.
-  - **Streaming/update recovery 2026-07-15:** stream-capable selections prefer
-    browser-direct playback with durable server-job fallback. Installed PWAs
-    perform a no-cache update check on launch and immediately activate/claim a
-    new worker so Android cannot indefinitely reopen an old precached shell.
+  - **Streaming cutover 2026-07-25:** ElevenLabs v3 streams MP3 directly from
+    the provider. Google Gemini 3.1 uses its native PCM-over-SSE stream through
+    a same-origin relay because the upstream endpoint is not browser-CORS
+    enabled; Google 2.5 and other unsupported models retain backend jobs.
+    Cached config, service-worker/offline execution, job recovery, and
+    persistent audio remain removed.
+  - **Faster enrichment 2026-07-25:** Google deployments default speech prep to
+    Gemini 3.5 Flash with 10-second attempt and 20-second total bounds. Direct
+    Codex prep remains an explicit server-side option and the no-Google
+    fallback.
 - [x] Add bounded speech-job admission and cancellation
   - At most three nonterminal jobs, one active synthesis, `429 Retry-After` on overload
   - `DELETE /web/speech-jobs/{id}` is idempotent and aborts active work

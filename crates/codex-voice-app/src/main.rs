@@ -282,7 +282,7 @@ async fn resolve_server() -> Result<ResolvedServer> {
     }
 
     // Keep the embedded desktop origin stable across launches so browser
-    // localStorage and IndexedDB remain attached to the same origin.
+    // draft and settings localStorage remain attached to the same origin.
     let config = embedded_serve_config();
     let (speech, tts_config, tts_config_path) = tts::load_tts();
     let embedded =
@@ -458,6 +458,7 @@ fn run() -> Result<()> {
 
     let context = tauri::generate_context!();
     let app = match tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

@@ -40,12 +40,10 @@ function providerModelValues(config: BrowserTtsConfig | null, provider: string):
   };
   if (provider === "google") {
     const google = config?.providers?.google;
-    push(google?.model);
-    for (const model of google?.fallbackModels || []) push(model);
+    for (const model of google?.models || []) push(model);
   } else if (provider === "elevenlabs") {
     const elevenlabs = config?.providers?.elevenlabs;
-    push(elevenlabs?.modelId);
-    for (const model of elevenlabs?.fallbackModels || []) push(model);
+    for (const model of elevenlabs?.models || []) push(model);
   }
   return values;
 }

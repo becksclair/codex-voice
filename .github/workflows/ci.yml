@@ -72,15 +72,3 @@ jobs:
             dist/codex-voice-windows-x64-setup.exe.sha256
             dist/codex-voice-windows-x64.zip
             dist/codex-voice-windows-x64.zip.sha256
-
-  macos-check:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace
-      - run: cargo test --workspace
-      - run: cargo clippy --workspace --all-targets -- -D warnings

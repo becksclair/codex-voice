@@ -1,13 +1,10 @@
 /**
  * Vitest global setup for the lib modules.
  *
- * happy-dom does not provide `localStorage`, and no DOM env provides IndexedDB,
- * so this installs an in-memory `localStorage` and the `fake-indexeddb` polyfill
- * before any test runs. Pure browser APIs (`fetch`/`Response`, `atob`/`btoa`,
+ * happy-dom does not provide `localStorage`, so this installs an in-memory
+ * implementation before any test runs. Pure browser APIs (`fetch`/`Response`, `atob`/`btoa`,
  * `AudioContext`) are provided by the runtime/happy-dom and are not touched.
  */
-
-import "fake-indexeddb/auto";
 
 class MemoryStorage implements Storage {
   private store = new Map<string, string>();

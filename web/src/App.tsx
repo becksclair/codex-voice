@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type ClipboardEvent } from "react";
 import {
-  clearPendingGeneration,
   consumeDesktopIntent,
-  deleteLastGeneratedAudio,
+  isAppMode,
   settingsView,
   speakIntentId,
   TEXT_STORAGE_KEY,
@@ -10,7 +9,6 @@ import {
 import { GenerateBar } from "./components/GenerateBar.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { TextEditor } from "./components/TextEditor.tsx";
-import { UpdateToast } from "./components/UpdateToast.tsx";
 import { WaveformPlayer } from "./components/WaveformPlayer.tsx";
 import { useGeneration } from "./hooks/useGeneration.ts";
 import { useLatest } from "./hooks/useLatest.ts";
@@ -21,32 +19,23 @@ import { useServerConfig } from "./hooks/useServerConfig.ts";
 import { useSettings } from "./hooks/useSettings.ts";
 import { useVisualViewport } from "./hooks/useVisualViewport.ts";
 import { useWaveform } from "./hooks/useWaveform.ts";
-import { clearWorkerUpdateNotice, hasWorkerUpdateNotice } from "./pwa.ts";
 
 /**
  * The Codex Voice web shell.
  *
  * Composes the settings/config/text/playback/generation hooks and the shell
  * components. Each subsystem (audio element, canvas waveform, generation
- * controller, service worker, visual viewport, storage) is owned by its hook;
+ * controller, visual viewport, storage) is owned by its hook;
  * this component wires them together and holds the small amount of cross-cutting
  * UI state (the error banner and the settings drawer).
  */
 export function App() {
-  const [showUpdateToast] = useState(hasWorkerUpdateNotice);
-  useEffect(() => clearWorkerUpdateNotice(), []);
-
-  return (
-    <>
-      {showUpdateToast && <UpdateToast />}
-      {settingsView(location.search) ? <SettingsWindowApp /> : <MainWindowApp />}
-    </>
-  );
+  return settingsView(location.search) ? <SettingsWindowApp /> : <MainWindowApp />;
 }
 
 function SettingsWindowApp() {
-  const config = useServerConfig();
-  const settings = useSettings(config);
+  const server = useServerConfig();
+  const settings = useSettings(server.config);
   return (
     <main className="mx-auto h-dvh max-w-[520px] overflow-y-auto p-4">
       <SettingsPanel open settings={settings} />
@@ -67,14 +56,14 @@ function MainWindowApp() {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const config = useServerConfig();
-  const settings = useSettings(config);
+  const server = useServerConfig();
+  const settings = useSettings(server.config);
   const [text, setText] = usePersistedText();
 
   const waveformRef = useWaveform(canvasRef, sliderRef);
   const playback = usePlayback(waveformRef, errorApi.show, errorApi.clear);
   const generation = useGeneration({
-    config,
+    config: server.config,
     settings: settings.settings,
     textRef,
     setText,
@@ -96,6 +85,7 @@ function MainWindowApp() {
 
   useEffect(() => {
     const handleSpeakIntake = async (): Promise<void> => {
+      if (!server.config && !server.error) return;
       const intentId = speakIntentId(location.hash);
       if (intentId === null) return;
       const sequence = ++speakIntakeSequence.current;
@@ -115,7 +105,7 @@ function MainWindowApp() {
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
     // Refs are stable across renders, so this still mounts exactly once.
-  }, [setTextRef, generateRef, showErrorRef]);
+  }, [server.config, server.error, setTextRef, generateRef, showErrorRef]);
 
   const charCount = Array.from(text).length;
 
@@ -133,13 +123,38 @@ function MainWindowApp() {
 
   const handlePasteClick = async (): Promise<void> => {
     try {
-      const value = await navigator.clipboard.readText();
+      let value: string | undefined;
+      if (navigator.clipboard?.readText) {
+        try {
+          value = await navigator.clipboard.readText();
+        } catch {
+          // Tauri's Linux webview may expose the API without granting reads.
+        }
+      }
+      if (value === undefined && isAppMode(location.search)) {
+        const tauri = (
+          window as typeof window & {
+            __TAURI__?: { clipboardManager?: { readText?: () => Promise<string | null> } };
+          }
+        ).__TAURI__;
+        if (tauri?.clipboardManager?.readText) {
+          value = (await tauri.clipboardManager.readText()) ?? "";
+        }
+      }
+      if (value === undefined) {
+        errorApi.show(
+          isAppMode(location.search)
+            ? "Desktop clipboard access is unavailable."
+            : "Clipboard paste requires HTTPS and clipboard permission.",
+        );
+        return;
+      }
       if (!value) return;
       setText(value);
       errorApi.clear();
       if (settings.settings.generateOnPaste !== false) await generation.generate(value);
-    } catch (error) {
-      errorApi.show((error as Error).message || "Clipboard paste failed.");
+    } catch {
+      errorApi.show("Clipboard access failed.");
     }
   };
 
@@ -147,9 +162,7 @@ function MainWindowApp() {
     generation.cancelActive();
     setText("", { persist: false });
     localStorage.removeItem(TEXT_STORAGE_KEY);
-    clearPendingGeneration();
     playback.api.resetAudio();
-    await deleteLastGeneratedAudio();
     errorApi.clear();
     textRef.current?.focus();
   };
@@ -180,6 +193,14 @@ function MainWindowApp() {
       >
         {error}
       </div>
+      {server.error && !error && (
+        <div
+          className="flex min-h-11 items-center rounded-2xl border border-[var(--error-border)] bg-[var(--error-bg)] px-3 py-2.5 text-[0.95rem] text-[var(--error-text)]"
+          role="status"
+        >
+          {server.error}
+        </div>
+      )}
       <TextEditor
         textRef={textRef}
         value={text}
@@ -200,6 +221,7 @@ function MainWindowApp() {
         <GenerateBar
           generating={generation.generating}
           generationActive={generation.busy}
+          generateDisabled={!server.config}
           progress={generation.progress}
           label={generation.label}
           onGenerate={generation.toggleActive}

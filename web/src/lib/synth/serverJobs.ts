@@ -48,6 +48,36 @@ export interface WebSpeechJobOptions {
   voice?: string;
   model?: string;
   speechPrepEnabled?: boolean;
+  speechPrepShortenEnabled?: boolean;
+}
+
+export interface WebSpeechPrepResult {
+  input: string;
+  input_changed: boolean;
+}
+
+export async function prepareWebSpeech(
+  input: string,
+  signal: AbortSignal,
+  options: WebSpeechJobOptions,
+): Promise<WebSpeechPrepResult> {
+  const response = await fetch("/web/speech-prep", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({ input, ...options }),
+  });
+  if (!response.ok) {
+    let message = `Speech preparation failed (${response.status})`;
+    try {
+      const json = (await response.json()) as { error?: { message?: string } };
+      message = json.error?.message || message;
+    } catch {
+      // Preserve the status-based message.
+    }
+    throw new Error(message);
+  }
+  return (await response.json()) as WebSpeechPrepResult;
 }
 
 /** Cancel a queued/running job or release a completed server result. */

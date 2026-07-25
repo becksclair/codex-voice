@@ -26,6 +26,7 @@ interface WaveformState {
   currentTime: number;
   sampleRate: number;
   channels: number;
+  seekable: boolean;
   finished: boolean;
   drawing: boolean;
   decodeId: number;
@@ -40,6 +41,7 @@ function newWaveformState(mode: WaveformMode = "empty"): WaveformState {
     currentTime: 0,
     sampleRate: 24000,
     channels: 1,
+    seekable: false,
     finished: false,
     drawing: false,
     decodeId: 0,
@@ -95,11 +97,12 @@ export class WaveformController {
   }
 
   /** Ports `resetStreamingWaveform`. */
-  resetStreaming(sampleRate = 24000, channels = 1): void {
+  resetStreaming(sampleRate = 24000, channels = 1, seekable = true): void {
     this.decodeIdCounter += 1;
     this.state = newWaveformState("streaming");
     this.state.sampleRate = sampleRate;
     this.state.channels = channels;
+    this.state.seekable = seekable;
     this.setSeekable(false);
     this.setProgress(0);
     this.scheduleDraw();
@@ -122,7 +125,13 @@ export class WaveformController {
     if (!w || w.mode !== "streaming") return 1;
     if (w.finished) return 1;
     if (w.bufferedDuration <= 0) return 0;
-    return clamp(w.bufferedDuration / (w.bufferedDuration + 8), 0.12, 0.72);
+    const width = this.canvas.getBoundingClientRect().width;
+    if (width <= 0) return 0;
+    // Grow a live waveform from the left at a stable visual rate. The previous
+    // asymptotic 72% window continually resampled the whole prefix, which made
+    // new audio appear near the center-right and push existing peaks left.
+    const pixelsPerSecond = 48;
+    return clamp((w.bufferedDuration * pixelsPerSecond) / width, 0, 1);
   }
 
   /** Ports `waveformPositionRatio`. */
@@ -153,7 +162,9 @@ export class WaveformController {
       "aria-valuetext",
       `${formatTime(now)} of ${max > 0 ? formatTime(max) : "0:00"}`,
     );
-    this.setSeekable((w?.mode === "complete" && max > 0) || (w?.mode === "streaming" && max > 0));
+    this.setSeekable(
+      (w?.mode === "complete" && max > 0) || (w?.mode === "streaming" && w.seekable && max > 0),
+    );
   }
 
   /** Ports `setWaveformCurrent`. */
@@ -321,7 +332,17 @@ export class WaveformController {
     for (const peak of peaks) this.state.peaks.push(peak);
     this.state.bufferedDuration += durationDelta;
     this.state.duration = this.state.bufferedDuration;
-    this.setSeekable(this.state.bufferedDuration > 0);
+    this.setSeekable(this.state.seekable && this.state.bufferedDuration > 0);
+    this.scheduleDraw();
+  }
+
+  /** Replace the live waveform with a newer decode of the accumulated stream. */
+  replaceStreamingPeaks(peaks: number[], duration: number): void {
+    if (!this.state || this.state.mode !== "streaming") this.resetStreaming();
+    this.state.peaks = peaks;
+    this.state.bufferedDuration = duration;
+    this.state.duration = duration;
+    this.setSeekable(this.state.seekable && duration > 0);
     this.scheduleDraw();
   }
 

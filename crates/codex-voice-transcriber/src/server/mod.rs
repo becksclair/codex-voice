@@ -38,10 +38,12 @@ pub(crate) use speech::TtsServiceState;
 use speech::{speech, watch_tts_config};
 use transcribe::transcribe;
 use web::{
-    web_codex_auth_sync, web_config, web_speech, web_speech_job_create, web_speech_job_delete,
+    web_config, web_google_stream, web_speech, web_speech_job_create, web_speech_job_delete,
     web_speech_job_status, web_speech_prep, WebSpeechJobManager, WebSpeechJobStore,
 };
-use web_assets::{legacy_service_worker, serve_web_asset, serve_web_index};
+use web_assets::{
+    legacy_scoped_service_worker, legacy_service_worker, serve_web_asset, serve_web_index,
+};
 
 const SPEECH_BODY_LIMIT_BYTES: usize = 64 * 1024;
 const MULTIPART_OVERHEAD_BYTES: u64 = 64 * 1024;
@@ -261,6 +263,8 @@ fn service_router(state: ServiceState) -> Router {
     let web_speech_routes = post(web_speech).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
     let web_speech_prep_routes =
         post(web_speech_prep).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
+    let web_google_stream_routes =
+        post(web_google_stream).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
     let web_speech_job_routes =
         post(web_speech_job_create).layer(DefaultBodyLimit::max(SPEECH_BODY_LIMIT_BYTES));
 
@@ -269,15 +273,16 @@ fn service_router(state: ServiceState) -> Router {
         .route("/v1/healthz", health_routes)
         .route("/web", get(serve_web_index))
         .route("/web/config", get(web_config))
-        .route("/web/codex-auth", post(web_codex_auth_sync))
         .route("/web/desktop-intents", post(create_desktop_intent))
         .route(
             "/web/desktop-intents/{id}",
             get(consume_desktop_intent).delete(delete_desktop_intent),
         )
         .route("/web-sw.js", get(legacy_service_worker))
+        .route("/web/sw.js", get(legacy_scoped_service_worker))
         .route("/web/speech", web_speech_routes)
         .route("/web/speech-prep", web_speech_prep_routes)
+        .route("/web/google-stream", web_google_stream_routes)
         .route("/web/speech-jobs", web_speech_job_routes)
         .route(
             "/web/speech-jobs/{id}",
@@ -371,14 +376,6 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             kind: "not_found",
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn conflict(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            kind: "conflict",
             message: message.into(),
         }
     }

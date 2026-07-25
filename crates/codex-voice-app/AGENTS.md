@@ -72,7 +72,7 @@ rg -n "redact|access_token|preview|transcript_chars" src/main.rs
 - Linux `run` binds Control-M plus the keyboard dictation key through the GlobalShortcuts portal; approval may be prompted by the desktop.
 - Windows `run` currently uses Control-M polling and clipboard plus SendInput paste.
 - Keep platform-only commands behind the matching `#[cfg(target_os = "...")]`.
-- The main and settings windows are dumb external-URL webviews (`{base}/web?app=1`, `{base}/web?app=1&view=settings`) with no Tauri capabilities and no IPC. Selected text is stored as a short-lived one-shot server intent and the URL carries only `#intent=<id>`; never place selected text itself in the URL.
+- The main and settings windows are external-URL webviews (`{base}/web?app=1`, `{base}/web?app=1&view=settings`). Their only Tauri capability is `clipboard-manager:allow-read-text`, used when the web clipboard API is unavailable. Selected text is stored as a short-lived one-shot server intent and the URL carries only `#intent=<id>`; never place selected text itself in the URL.
 - `run` reuses an already-running service only when `/healthz` reports desktop readiness and its root is the stable `http://localhost:3846` origin; otherwise it self-hosts there. This keeps PWA storage origin-stable. Do not assume `run` always owns the server lifecycle.
 ## Pre-PR Checks
 

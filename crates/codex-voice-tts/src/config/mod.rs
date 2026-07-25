@@ -118,14 +118,14 @@ mod tests {
         assert_eq!(sky.prompt_scene.as_deref(), Some("At home"));
         assert_eq!(sky.elevenlabs.as_ref().unwrap().voice_settings.speed, 1.12);
         let prep = resolved.speech_prep.unwrap();
-        assert_eq!(prep.provider, SpeechPrepProviderKind::Codex);
+        assert_eq!(prep.provider, SpeechPrepProviderKind::Google);
         assert_eq!(prep.mode, SpeechPrepMode::PerformanceTags);
-        assert_eq!(prep.model, "gpt-5.6-luna");
+        assert_eq!(prep.model, "google/gemini-3.5-flash");
         assert_eq!(prep.threshold, 120);
         assert_eq!(prep.max_input_length, 12000);
         assert_eq!(prep.max_length, 6000);
-        assert_eq!(prep.attempt_timeout, std::time::Duration::from_secs(30));
-        assert_eq!(prep.timeout, std::time::Duration::from_secs(30));
+        assert_eq!(prep.attempt_timeout, std::time::Duration::from_secs(10));
+        assert_eq!(prep.timeout, std::time::Duration::from_secs(20));
     }
 
     #[test]

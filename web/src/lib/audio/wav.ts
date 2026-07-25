@@ -14,7 +14,7 @@
  * odd-byte handling in gain/concat paths are preserved exactly.
  */
 
-import { TTS_CHUNK_BOUNDARY_SILENCE_MS } from "../synth/chunking.ts";
+const TTS_CHUNK_BOUNDARY_SILENCE_MS = 180;
 
 /** Decode a base64 string to raw bytes. Ports `bytesFromBase64`. */
 export function bytesFromBase64(base64Audio: string): Uint8Array {

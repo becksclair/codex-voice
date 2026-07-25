@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
+import { audioBlobFromBase64, type BrowserTtsConfig, type WebSettings } from "../lib/index.ts";
 import {
-  clamp,
-  getLastGeneratedAudio,
-  loadPendingGeneration,
-  loadText,
-  saveText,
-  shouldApplyGeneratedText,
-  type BrowserTtsConfig,
-  type WebSettings,
-} from "../lib/index.ts";
-import type { GenerationController, GenerationMeta } from "../lib/generation.ts";
-import { reloadForWorkerUpdateWhenIdle, setBusyPredicate } from "../pwa.ts";
+  cancelWebSpeechJob,
+  createWebSpeechJob,
+  prepareWebSpeech,
+  waitForWebSpeechJob,
+} from "../lib/synth/serverJobs.ts";
+import { resolvePersona, resolveProvider } from "../lib/personas.ts";
+import {
+  canStreamElevenLabsDirect,
+  canStreamGoogleDirect,
+  streamElevenLabsDirect,
+  streamGoogleDirect,
+} from "../lib/audio/direct-stream.ts";
 import type { SetText } from "./usePersistedText.ts";
 import type { PlaybackApi } from "./usePlayback.ts";
 import type { WaveformRef } from "./useWaveform.ts";
@@ -26,221 +28,74 @@ interface UseGenerationOptions {
   clearError: () => void;
 }
 
-/** The public surface of {@link useGeneration}. */
 export interface GenerationState {
-  /** Whether generation is active and the generate button should cancel it. */
   busy: boolean;
-  /** Whether the spinner/`.generating` treatment is showing. */
   generating: boolean;
-  /** Progress fraction (0..1) for the generate button's progress bar. */
   progress: number;
-  /** The generate button's label text. */
   label: string;
-  /** Generate the supplied text, or the current draft when omitted. */
   generate: (inputOverride?: string) => Promise<boolean>;
-  /** Start generation from the button, or synchronously cancel a pending/active run. */
   toggleActive: () => void;
-  /** Cancel any active run (used by the clear button). */
   cancelActive: () => void;
 }
 
-/**
- * Owns the {@link GenerationController} lifecycle and translates its callbacks
- * into React state + playback/waveform side effects.
- *
- * Replaces the legacy controller construction, the `setGenerating`/`showError`
- * button wiring, the pagehide/pageshow/visibilitychange lifecycle handlers, and
- * the stored-state restore/resume bootstrap.
- *
- * The generation pipeline (`lib/generation.ts` and its speech-prep/synthesis/
- * streaming dependencies) is loaded lazily via dynamic `import()`: the shell
- * boots with only the editor, settings, and restored-audio playback. The
- * controller is constructed on the first generate, or eagerly at load only when
- * a pending generation must be resumed.
- */
+function jobOptions(config: BrowserTtsConfig, settings: WebSettings) {
+  const provider = settings.provider === "auto" ? undefined : settings.provider;
+  const effectiveProvider = provider ?? config.defaultProvider;
+  const voice =
+    settings.voice === "provider-default" && effectiveProvider === "google"
+      ? config.providers.google?.voice
+      : settings.voice.startsWith("persona:")
+        ? settings.voice.slice("persona:".length)
+        : undefined;
+  const model = settings.model === "default" ? undefined : settings.model.split(":", 2)[1];
+  return {
+    provider,
+    voice,
+    model,
+    speechPrepEnabled: settings.emotionPreprocessing,
+    speechPrepShortenEnabled: settings.summarization,
+  };
+}
+
 export function useGeneration(options: UseGenerationOptions): GenerationState {
   const { config, settings, textRef, setText, playback, waveformRef, showError, clearError } =
     options;
-
   const [busy, setBusy] = useState(false);
-  const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState(0);
   const [label, setLabel] = useState("Generate");
+  const activeJob = useRef<string | null>(null);
+  const abort = useRef<AbortController | null>(null);
+  const resetTimer = useRef<number | null>(null);
+  const releaseJobBestEffort = (job: string): void => {
+    void cancelWebSpeechJob(job).catch(() => {});
+  };
 
-  const controllerRef = useRef<GenerationController | null>(null);
-  const ensureControllerRef = useRef<(() => Promise<GenerationController>) | null>(null);
-  const activeRef = useRef(false);
-  // Generation epoch: bumped by cancel/clear/unmount so a generate() that is
-  // still awaiting the lazy pipeline import can tell it was abandoned. Without
-  // this, a cancel issued before the controller exists is a no-op and the
-  // awaited generate resurrects the just-cleared state.
-  const epochRef = useRef(0);
-  const configRef = useRef(config);
-  const settingsRef = useRef(settings);
-  configRef.current = config;
-  settingsRef.current = settings;
+  const cancelActive = (): void => {
+    if (resetTimer.current !== null) {
+      window.clearTimeout(resetTimer.current);
+      resetTimer.current = null;
+    }
+    abort.current?.abort();
+    abort.current = null;
+    const job = activeJob.current;
+    activeJob.current = null;
+    if (job) releaseJobBestEffort(job);
+    setBusy(false);
+    setProgress(0);
+    setLabel("Generate");
+  };
 
-  // Keep the controller's config/settings in sync (mirrors `controller.update`).
   useEffect(() => {
-    controllerRef.current?.update({ config, settings });
-  }, [config, settings]);
-
-  useEffect(() => {
-    let disposed = false;
-    const getDraftText = (): string => textRef.current?.value || loadText() || "";
-
-    const setGeneratingClass = (active: boolean, text: string, fraction: number): void => {
-      setGenerating(active);
-      setLabel(text);
-      setProgress(clamp(fraction, 0, 1));
+    const cancelOnUnload = (): void => {
+      const job = activeJob.current;
+      if (job) releaseJobBestEffort(job);
     };
-
-    // Construct the controller with the current config/settings; the sync effect
-    // above keeps it current afterwards.
-    const buildController = (Controller: typeof GenerationController): GenerationController =>
-      new Controller({
-        config: configRef.current,
-        settings: settingsRef.current,
-        getDraftText,
-        callbacks: {
-          onStatus: (statusLabel, fraction) => {
-            // The controller already clamps the fraction to [0, 1].
-            setProgress(fraction);
-            setLabel(statusLabel);
-          },
-          onGeneratingChange: (active) => {
-            if (active) {
-              activeRef.current = true;
-              setBusy(true);
-              playback.setPlayDisabled(true);
-              setGeneratingClass(true, "Starting", 0.08);
-            } else {
-              activeRef.current = false;
-              setBusy(false);
-              setTimeout(() => {
-                if (!activeRef.current) setGeneratingClass(false, "Generate", 0);
-              }, 350);
-              reloadForWorkerUpdateWhenIdle();
-            }
-          },
-          onError: (message) => {
-            playback.setPlayDisabled(!playback.audioHasSrc());
-            if (!playback.audioHasSrc() && !playback.hasStream()) waveformRef.current?.reset();
-            showError(message);
-          },
-          onClearError: clearError,
-          onTextReplace: (value) => setText(value, { persist: false }),
-          onAudioReady: (blob, meta: GenerationMeta) => {
-            if (meta.streamed && meta.playback) {
-              playback.onStreamAudioReady(blob, meta.playback.stopped ? null : meta.playback);
-            } else {
-              playback.loadAudioBlob(blob);
-            }
-          },
-          playbackCallbacks: {
-            onPlayingChange: (playing) => playback.onPlayingChange(playing),
-            onProgress: (current, estimated, finished) =>
-              playback.onStreamProgress(current, estimated, finished),
-            onPeaks: (peaks, durationDelta) =>
-              waveformRef.current?.appendStreamingPeaks(peaks, durationDelta),
-            onFinished: () => waveformRef.current?.markStreamFinished(),
-            onReplayReady: (blob) => playback.onReplayReady(blob),
-          },
-          onStreamPlaybackChange: (streamPlayback) =>
-            playback.onStreamPlaybackChange(streamPlayback),
-          onStreamState: (state) => playback.onStreamState(state),
-        },
-      });
-
-    // Lazily import + construct the controller. Idempotent: repeated calls
-    // resolve to the same instance. Serialized via a pending promise so two
-    // concurrent triggers (e.g. generate + a resume) don't build two controllers.
-    let pending: Promise<GenerationController> | null = null;
-    const ensureController = (): Promise<GenerationController> => {
-      if (controllerRef.current) return Promise.resolve(controllerRef.current);
-      if (pending) return pending;
-      pending = import("../lib/generation.ts").then((mod) => {
-        if (controllerRef.current) return controllerRef.current;
-        const controller = buildController(mod.GenerationController);
-        controllerRef.current = controller;
-        activeRef.current = false;
-        if (disposed) controller.cancel();
-        return controller;
-      });
-      return pending;
-    };
-    ensureControllerRef.current = ensureController;
-
-    setBusyPredicate(() => activeRef.current || playback.hasStream());
-
-    const restoreLastGeneratedAudio = async (): Promise<void> => {
-      try {
-        const record = await getLastGeneratedAudio();
-        if (!record?.blob) return;
-        if (
-          typeof record.text === "string" &&
-          shouldApplyGeneratedText(getDraftText(), record.text, record.text)
-        ) {
-          setText(record.text);
-        }
-        playback.loadAudioBlob(record.blob);
-        clearError();
-      } catch {
-        // Ignored, matching app.html behavior.
-      }
-    };
-
-    void (async () => {
-      await restoreLastGeneratedAudio();
-      if (loadPendingGeneration()) {
-        const controller = await ensureController();
-        await controller.resumePending();
-      }
-    })();
-
-    const cleanups: Array<() => void> = [];
-    const on = (target: EventTarget, type: string, handler: EventListener): void => {
-      target.addEventListener(type, handler);
-      cleanups.push(() => target.removeEventListener(type, handler));
-    };
-
-    on(window, "pagehide", () => {
-      if (activeRef.current) controllerRef.current?.markLifecycleInterrupted();
-      saveText(textRef.current?.value || "");
-    });
-    on(window, "pageshow", (event) => {
-      if ((event as PageTransitionEvent).persisted && !playback.audioHasSrc()) {
-        void restoreLastGeneratedAudio();
-      }
-      if (activeRef.current) setGeneratingClass(true, "Generating", 0.45);
-      if (!activeRef.current && loadPendingGeneration()) {
-        void ensureController().then((controller) => controller.resumePending());
-      }
-    });
-    on(document, "visibilitychange", () => {
-      if (document.visibilityState !== "visible" && activeRef.current) {
-        controllerRef.current?.markLifecycleInterrupted();
-        return;
-      }
-      if (document.visibilityState === "visible" && activeRef.current) {
-        setGeneratingClass(true, "Generating", 0.45);
-      }
-      if (document.visibilityState === "visible" && !activeRef.current && loadPendingGeneration()) {
-        void ensureController().then((controller) => controller.resumePending());
-      }
-    });
-
+    window.addEventListener("pagehide", cancelOnUnload);
     return () => {
-      disposed = true;
-      epochRef.current += 1;
-      for (const cleanup of cleanups) cleanup();
-      controllerRef.current?.cancel();
-      controllerRef.current = null;
-      ensureControllerRef.current = null;
-      setBusyPredicate(() => false);
+      window.removeEventListener("pagehide", cancelOnUnload);
+      cancelActive();
     };
-    // Mount-once setup of the generation controller + lifecycle listeners; the
-    // captured callbacks only touch refs and stable setters, so they are stable.
+    // Cancellation owns only refs and stable React setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -250,56 +105,125 @@ export function useGeneration(options: UseGenerationOptions): GenerationState {
       showError("Enter some text first.");
       return false;
     }
-    const ensureController = ensureControllerRef.current;
-    if (!ensureController) return false;
-    const epoch = epochRef.current;
-    const controller = await ensureController();
-    // Abandoned while the pipeline import was in flight (cancel/clear/unmount).
-    if (epoch !== epochRef.current) return false;
-    if (controller.isActive) {
-      controller.cancel();
-      activeRef.current = false;
-      setBusy(false);
+    if (!config) {
+      showError("Speech backend is unavailable.");
+      return false;
     }
-    await controller.generate(input);
-    return true;
-  };
-
-  const cancelActive = (): void => {
-    epochRef.current += 1;
-    const controller = controllerRef.current;
-    if (controller?.isActive) controller.cancel();
-    activeRef.current = false;
-    setBusy(false);
-    setGenerating(false);
-    setLabel("Generate");
-    setProgress(0);
+    cancelActive();
+    const controller = new AbortController();
+    abort.current = controller;
+    setBusy(true);
+    setLabel("Starting");
+    setProgress(0.08);
+    clearError();
+    try {
+      const options = jobOptions(config, settings);
+      const persona = resolvePersona(config, settings);
+      const provider = resolveProvider(config, persona, settings);
+      const canStreamDirect =
+        (provider === "elevenlabs" &&
+          Boolean(persona?.elevenlabs) &&
+          canStreamElevenLabsDirect(config, settings.model)) ||
+        (provider === "google" && canStreamGoogleDirect(config, settings.model));
+      if (canStreamDirect) {
+        let attemptedStream: import("../lib/audio/direct-stream.ts").DirectStreamPlayback | null =
+          null;
+        try {
+          setLabel("Preparing");
+          setProgress(0.25);
+          const prepared = await prepareWebSpeech(input, controller.signal, options);
+          if (prepared.input_changed) setText(prepared.input, { persist: false });
+          setLabel("Connecting");
+          setProgress(0.45);
+          const callbacks = {
+            onReady: (stream: import("../lib/audio/direct-stream.ts").DirectStreamPlayback) => {
+              attemptedStream = stream;
+              playback.attachStream(stream);
+            },
+            onPlayingChange: (playing: boolean) => playback.onStreamPlayingChange(playing),
+            onProgress: (current: number, buffered: number, finished: boolean) =>
+              playback.onStreamProgress(current, buffered, finished),
+            onWaveformChunk: (peaks: number[], durationDelta: number, sampleRate: number) =>
+              waveformRef.current?.appendStreamingPeaks(peaks, durationDelta, sampleRate, 1),
+            onWaveformSnapshot: (peaks: number[], duration: number) =>
+              waveformRef.current?.replaceStreamingPeaks(peaks, duration),
+            onFinished: () => waveformRef.current?.markStreamFinished(),
+            onDrained: () => playback.onStreamDrained(),
+          };
+          const streamed =
+            provider === "google"
+              ? await streamGoogleDirect(
+                  config,
+                  prepared.input,
+                  persona,
+                  settings.model,
+                  controller.signal,
+                  callbacks,
+                )
+              : await streamElevenLabsDirect(
+                  config,
+                  prepared.input,
+                  persona!,
+                  settings.model,
+                  controller.signal,
+                  callbacks,
+                );
+          playback.finishStream(streamed.blob, streamed.playback);
+          setProgress(1);
+          setLabel("Done");
+          return true;
+        } catch (streamError) {
+          playback.failStream(attemptedStream);
+          if (controller.signal.aborted) throw streamError;
+          setLabel("Server fallback");
+          setProgress(0.35);
+        }
+      }
+      const job = await createWebSpeechJob(input, controller.signal, options);
+      activeJob.current = job;
+      let result;
+      try {
+        result = await waitForWebSpeechJob(job, {
+          signal: controller.signal,
+          onProgress: (value, nextLabel) => {
+            setProgress(value);
+            setLabel(nextLabel);
+          },
+        });
+      } finally {
+        if (activeJob.current === job) activeJob.current = null;
+        releaseJobBestEffort(job);
+      }
+      if (result.input_changed) setText(result.input, { persist: false });
+      playback.loadAudioBlob(audioBlobFromBase64(result.audio_base64, result.mime_type));
+      setProgress(1);
+      setLabel("Done");
+      return true;
+    } catch (cause) {
+      if (!controller.signal.aborted) showError((cause as Error).message || "TTS failed.");
+      return false;
+    } finally {
+      if (abort.current === controller) {
+        abort.current = null;
+        setBusy(false);
+        resetTimer.current = window.setTimeout(() => {
+          resetTimer.current = null;
+          if (!abort.current) {
+            setProgress(0);
+            setLabel("Generate");
+          }
+        }, 350);
+      }
+    }
   };
 
   const toggleActive = (): void => {
-    if (activeRef.current) {
+    if (abort.current) {
       cancelActive();
-      return;
+    } else {
+      void generate();
     }
-    const input = (textRef.current?.value ?? "").trim();
-    if (!input) {
-      showError("Enter some text first.");
-      return;
-    }
-    // Reserve the active state synchronously so two clicks in one event turn
-    // cannot cancel the first run and immediately start a replacement while
-    // React is still waiting to commit `busy`.
-    activeRef.current = true;
-    setBusy(true);
-    setGenerating(true);
-    setLabel("Starting");
-    setProgress(0.08);
-    void generate(input)
-      .catch((error: Error) => showError(error.message || "TTS failed."))
-      .finally(() => {
-        if (!controllerRef.current?.isActive && activeRef.current) cancelActive();
-      });
   };
 
-  return { busy, generating, progress, label, generate, toggleActive, cancelActive };
+  return { busy, generating: busy, progress, label, generate, toggleActive, cancelActive };
 }

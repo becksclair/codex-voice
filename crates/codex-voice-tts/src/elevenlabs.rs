@@ -318,6 +318,7 @@ mod tests {
             model_hint: model.to_string(),
             voice_hint: None,
             speech_prep_enabled: None,
+            speech_prep_shorten_enabled: None,
             speech_prep_model_hint: None,
             speech_prep_reasoning_effort: None,
             speech_prep_timeout_ms: None,

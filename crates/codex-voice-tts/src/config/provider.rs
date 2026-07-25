@@ -29,7 +29,8 @@ const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_PREP_THRESHOLD_CHARS: usize = 120;
 const DEFAULT_PREP_MAX_INPUT_CHARS: usize = 12_000;
 const DEFAULT_PREP_MAX_OUTPUT_CHARS: usize = 6_000;
-const DEFAULT_PREP_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_PREP_ATTEMPT_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_PREP_TOTAL_TIMEOUT_MS: u64 = 20_000;
 const MIN_TIMEOUT_MS: u64 = 250;
 const MAX_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_SHORTEN_MIN_OUTPUT_CHARS: usize = 4_000;
@@ -371,7 +372,11 @@ fn resolve_speech_prep(
     advanced: &AdvancedSpeechPrepConfig,
     google: Option<&GoogleRuntimeConfig>,
 ) -> Result<Option<SpeechPrepConfig>, SpeechError> {
-    let provider = match advanced.provider.unwrap_or(SpeechPrepProviderInput::Codex) {
+    let provider = match advanced.provider.unwrap_or(if google.is_some() {
+        SpeechPrepProviderInput::Google
+    } else {
+        SpeechPrepProviderInput::Codex
+    }) {
         SpeechPrepProviderInput::Google => SpeechPrepProviderKind::Google,
         SpeechPrepProviderInput::Codex => SpeechPrepProviderKind::Codex,
     };
@@ -409,12 +414,12 @@ fn resolve_speech_prep(
     }
     let total_timeout = resolve_timeout(
         advanced.total_timeout_ms,
-        DEFAULT_PREP_TIMEOUT_MS,
+        DEFAULT_PREP_TOTAL_TIMEOUT_MS,
         "$.advanced.speechPrep.totalTimeoutMs",
     )?;
     let attempt_timeout = resolve_timeout(
         advanced.attempt_timeout_ms,
-        DEFAULT_PREP_TIMEOUT_MS,
+        DEFAULT_PREP_ATTEMPT_TIMEOUT_MS,
         "$.advanced.speechPrep.attemptTimeoutMs",
     )?;
     if attempt_timeout > total_timeout {

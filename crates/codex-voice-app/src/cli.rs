@@ -264,7 +264,7 @@ mod tests {
             "--iterations",
             "3",
             "--models",
-            "gpt-5.5-none,gemini-3.5-flash",
+            "gpt-5.6-luna-none,gemini-3.5-flash",
         ]);
         match cli.command {
             Some(Command::Tts {
@@ -275,7 +275,7 @@ mod tests {
                 assert_eq!(
                     args.models,
                     Some(vec![
-                        "gpt-5.5-none".to_string(),
+                        "gpt-5.6-luna-none".to_string(),
                         "gemini-3.5-flash".to_string(),
                     ])
                 );

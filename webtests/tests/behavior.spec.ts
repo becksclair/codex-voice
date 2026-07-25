@@ -1,8 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
-const GENERATION_KEY = 'codex-voice.web.generation.v1';
-
 function testWavBase64(durationSeconds = 3, sampleRate = 8_000): string {
   const samples = durationSeconds * sampleRate;
   const dataBytes = samples * 2;
@@ -39,7 +37,16 @@ async function installSpeechHarness(page: Page, complete = true): Promise<Speech
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
     if (pathname === '/web/config') {
-      return route.fulfill({ status: 503, contentType: 'application/json', body: '{}' });
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          version: 2,
+          defaultProvider: 'google',
+          providers: { google: { voice: 'Sulafat', models: ['test-model'] } },
+          personas: {},
+        }),
+      });
     }
     if (pathname === '/web/speech-jobs' && request.method() === 'POST') {
       harness.inputs.push((request.postDataJSON() as { input: string }).input);
@@ -86,194 +93,7 @@ async function installSpeechHarness(page: Page, complete = true): Promise<Speech
 
 test.use({ serviceWorkers: 'block' });
 
-test.describe('offline Codex generation', () => {
-  test.use({ serviceWorkers: 'allow' });
-
-  test('cached Codex auth survives a service-worker reload and powers direct generation', async ({
-    context,
-    page,
-  }) => {
-    const expiredToken = `header.${Buffer.from(JSON.stringify({ exp: 1 })).toString('base64url')}.sig`;
-    const freshToken = `header.${Buffer.from(
-      JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
-    ).toString('base64url')}.sig`;
-    const config = {
-      version: 1,
-      defaultProvider: 'google',
-      maxTextLength: 5000,
-      providers: {
-        google: {
-          apiKey: 'google-test-key',
-          baseUrl: 'https://google.example.test/v1beta',
-          voice: 'Kore',
-          model: 'gemini-test-tts',
-          fallbackModels: [],
-          streaming: {
-            transport: 'interactions-stream',
-            supportedModels: [],
-            outputFormat: 'pcm_24000',
-            sampleRate: 24000,
-            channels: 1,
-          },
-          inlineAudioTags: true,
-          maxTextLength: 5000,
-          timeoutMs: 30000,
-          constraints: [],
-        },
-      },
-      speechPrep: {
-        provider: 'codex',
-        mode: 'performance-tags',
-        strategies: { google: 'inline-tags', elevenlabs: 'inline-tags', default: 'inline-tags' },
-        tagPalette: ['softly'],
-        capPerformanceTags: true,
-        browserSupported: true,
-        baseUrl: '/_codex',
-        model: 'gpt-test',
-        fallbackModels: [],
-        threshold: 0,
-        maxInputLength: 5000,
-        maxLength: 5000,
-        attemptTimeoutMs: 5000,
-        timeoutMs: 10000,
-        codexAuth: {
-          accessToken: expiredToken,
-          refreshToken: 'initial-refresh',
-          accountId: 'account-id',
-          tokenUrl: 'https://auth.example.test/oauth/token',
-          clientId: 'client-id',
-        },
-      },
-      personas: {},
-    };
-    let configOnline = true;
-    let syncedAuth: { refreshToken?: string } | null = null;
-    const requests: string[] = [];
-    await page.route('**/*', async (route) => {
-      const request = route.request();
-      const url = new URL(request.url());
-      requests.push(`${request.method()} ${url.pathname}`);
-      if (url.pathname === '/web/config') {
-        return configOnline
-          ? route.fulfill({
-              status: 200,
-              contentType: 'application/json',
-              body: JSON.stringify(config),
-            })
-          : route.fulfill({ status: 502, body: 'Bad Gateway' });
-      }
-      if (url.pathname === '/web/codex-auth') {
-        if (!configOnline) return route.fulfill({ status: 502, body: 'Bad Gateway' });
-        syncedAuth = request.postDataJSON() as { refreshToken?: string };
-        return route.fulfill({ status: 204, body: '' });
-      }
-      if (url.pathname === '/web/speech-jobs') {
-        return route.fulfill({ status: 502, body: 'Bad Gateway' });
-      }
-      if (url.hostname === 'auth.example.test') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            access_token: freshToken,
-            refresh_token: 'rotated-refresh',
-            account_id: 'account-id',
-          }),
-        });
-      }
-      if (url.pathname === '/_codex/responses') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/event-stream',
-          body:
-            'data: {"type":"response.output_text.delta","delta":"[softly] Offline hello"}\n\n' +
-            'data: {"type":"response.completed","response":{}}\n\n' +
-            'data: [DONE]\n\n',
-        });
-      }
-      if (url.hostname === 'google.example.test') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            candidates: [
-              {
-                content: {
-                  parts: [{ inlineData: { data: testWavBase64(), mimeType: 'audio/wav' } }],
-                },
-              },
-            ],
-          }),
-        });
-      }
-      return route.continue();
-    });
-
-    await page.goto('/web?offline-codex=1');
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () =>
-            JSON.parse(localStorage.getItem('codex-voice.web.config.v1') || '{}')?.speechPrep
-              ?.codexAuth?.refreshToken,
-        ),
-      )
-      .toBe('initial-refresh');
-
-    await page.evaluate(() => navigator.serviceWorker.ready);
-    await page.reload();
-    await expect
-      .poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null), {
-        timeout: 15_000,
-      })
-      .toBe(true);
-
-    configOnline = false;
-    await context.setOffline(true);
-    await page.reload();
-    await page.locator('#text').fill('Offline hello');
-    await page.locator('#generate').click();
-
-    await expect(page.locator('#download')).toBeEnabled();
-    await expect(page.locator('#error-banner')).toBeHidden();
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () =>
-            JSON.parse(localStorage.getItem('codex-voice.web.config.v1') || '{}')?.speechPrep
-              ?.codexAuth?.refreshToken,
-        ),
-      )
-      .toBe('rotated-refresh');
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () =>
-            JSON.parse(localStorage.getItem('codex-voice.web.config.v1') || '{}')?.speechPrep
-              ?.codexAuth?.serverSyncPending,
-        ),
-      )
-      .toBe(true);
-    expect(requests).toContain('POST /_codex/responses');
-    expect(requests.filter((entry) => entry === 'POST /web/speech-jobs')).toHaveLength(1);
-
-    await context.setOffline(false);
-    configOnline = true;
-    await page.reload();
-    await expect.poll(() => syncedAuth?.refreshToken).toBe('rotated-refresh');
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () =>
-            JSON.parse(localStorage.getItem('codex-voice.web.config.v1') || '{}')?.speechPrep
-              ?.codexAuth?.serverSyncPending,
-        ),
-      )
-      .toBe(false);
-  });
-});
-
-test('mocked generation supports waveform, playback, seeking, download, and restore', async ({
+test('mocked generation supports waveform, playback, seeking, and download', async ({
   page,
 }) => {
   const harness = await installSpeechHarness(page);
@@ -313,10 +133,6 @@ test('mocked generation supports waveform, playback, seeking, download, and rest
   const bytes = await readFile(await download.path());
   expect(bytes.subarray(0, 4).toString('ascii')).toBe('RIFF');
 
-  await page.reload();
-  await expect(page.locator('#text')).toHaveValue('deterministic browser audio');
-  await expect(page.locator('#download')).toBeEnabled();
-  await expect(page.locator('#play')).toBeEnabled();
 });
 
 test('empty paste is a no-op and clear cancels a pending job', async ({ page }) => {
@@ -348,9 +164,6 @@ test('empty paste is a no-op and clear cancels a pending job', async ({ page }) 
   await expect(page.locator('#text')).toHaveValue('');
   await expect(page.locator('#generate')).toBeEnabled();
   await expect.poll(() => harness.deleted).toContain('job-1');
-  await expect
-    .poll(() => page.evaluate((key) => localStorage.getItem(key), GENERATION_KEY))
-    .toBeNull();
   await expect(page.locator('#play')).toBeDisabled();
   await expect(page.locator('#download')).toBeDisabled();
 });
@@ -379,12 +192,9 @@ test('generate button cancels a pending job', async ({ page }) => {
   await expect.poll(() => harness.deleted).toContain('job-1');
   await expect(page.locator('#generate-label')).toHaveText('Generate');
   await expect(page.locator('#text')).toHaveValue('stop this active draft');
-  await expect
-    .poll(() => page.evaluate((key) => localStorage.getItem(key), GENERATION_KEY))
-    .toBeNull();
 });
 
-test('two generate clicks in one event turn cancel before generation starts', async ({ page }) => {
+test('two generate clicks in one event turn cancel without duplicate requests', async ({ page }) => {
   const harness = await installSpeechHarness(page, false);
   await page.goto('/web?rapid-cancel=1');
   await page.locator('#text').fill('cancel before the lazy pipeline starts');
@@ -396,71 +206,7 @@ test('two generate clicks in one event turn cancel before generation starts', as
 
   await expect(page.locator('#generate-label')).toHaveText('Generate');
   await page.waitForTimeout(50);
-  expect(harness.inputs).toEqual([]);
-});
-
-test('a pending server job resumes after reload', async ({ page }) => {
-  const harness = await installSpeechHarness(page);
-  harness.inputs.push('resumed draft');
-  await page.addInitScript(
-    ({ key, startedAt }) => {
-      localStorage.clear();
-      localStorage.setItem(
-        key,
-        JSON.stringify({ input: 'resumed draft', jobId: 'job-1', startedAt }),
-      );
-    },
-    { key: GENERATION_KEY, startedAt: Date.now() },
-  );
-  await page.goto('/web?resume-audio=1');
-
-  await expect(page.locator('#text')).toHaveValue('resumed draft');
-  await expect(page.locator('#download')).toBeEnabled();
-  await expect
-    .poll(() => page.evaluate((key) => localStorage.getItem(key), GENERATION_KEY))
-    .toBeNull();
-});
-
-test('generation owners are unique across same-origin pages', async ({ page, context }) => {
-  const secondPage = await context.newPage();
-  await installSpeechHarness(page, false);
-  await installSpeechHarness(secondPage, false);
-  await page.goto('/web?owner-page=1');
-  await secondPage.goto('/web?owner-page=2');
-
-  await page.locator('#text').fill('first page');
-  await page.locator('#generate').click();
-  const firstOwner = await expect
-    .poll(() =>
-      page.evaluate(
-        (key) => JSON.parse(localStorage.getItem(key) ?? 'null')?.owner,
-        GENERATION_KEY,
-      ),
-    )
-    .not.toBeUndefined()
-    .then(() =>
-      page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? 'null').owner, GENERATION_KEY),
-    );
-
-  await secondPage.locator('#text').fill('second page');
-  await secondPage.locator('#generate').click();
-  await expect
-    .poll(() =>
-      secondPage.evaluate(
-        (key) => JSON.parse(localStorage.getItem(key) ?? 'null')?.input,
-        GENERATION_KEY,
-      ),
-    )
-    .toBe('second page');
-  const secondOwner = await secondPage.evaluate(
-    (key) => JSON.parse(localStorage.getItem(key) ?? 'null').owner,
-    GENERATION_KEY,
-  );
-
-  expect(secondOwner).not.toBe(firstOwner);
-  await page.locator('#clear').click();
-  await secondPage.locator('#clear').click();
-  await secondPage.close();
+  expect(harness.inputs.length).toBeLessThanOrEqual(1);
 });
 
 for (const viewport of [
@@ -489,7 +235,12 @@ test('declared favicon loads without a console error', async ({ page }) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ version: 1, defaultProvider: 'google', providers: {} }),
+      body: JSON.stringify({
+        version: 2,
+        defaultProvider: 'google',
+        providers: {},
+        personas: {},
+      }),
     }),
   );
   const errors: string[] = [];

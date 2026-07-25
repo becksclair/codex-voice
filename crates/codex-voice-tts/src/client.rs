@@ -208,7 +208,9 @@ impl ConfiguredSpeechClient {
         let provider_limit = self.provider_max_text_length(provider, request);
         let fit_limit = speech_prep_fit_limit(provider_limit);
         let mut request = request.clone();
-        if prep.should_shorten_to_fit(&request.input, provider_limit) {
+        if request.speech_prep_shorten_enabled != Some(false)
+            && prep.should_shorten_to_fit(&request.input, provider_limit)
+        {
             let cache_key = (request.input.clone(), format!("shorten-to-fit:{fit_limit}"));
             if let Some(cached) = cache.get(&cache_key) {
                 request = cached.clone();
@@ -290,6 +292,7 @@ impl ConfiguredSpeechClient {
             return cached.clone();
         }
 
+        let prep_started = std::time::Instant::now();
         let prepared_request = match prep.prepare(&request.input, context).await {
             Ok(Some(SpeechPrepOutput::Input(input))) => {
                 let input = match prep.fallback_performance_tags(&request.input, &context.target) {
@@ -311,6 +314,8 @@ impl ConfiguredSpeechClient {
                     model = %model_id,
                     strategy = %strategy.as_name(),
                     inline_audio_tags = supports_inline_audio_tags,
+                    elapsed_ms = prep_started.elapsed().as_millis(),
+                    outcome = "prepared",
                     "prepared TTS text before synthesis"
                 );
                 SpeechRequest {
@@ -325,6 +330,8 @@ impl ConfiguredSpeechClient {
                     provider = ?provider,
                     model = %model_id,
                     strategy = %strategy.as_name(),
+                    elapsed_ms = prep_started.elapsed().as_millis(),
+                    outcome = "prepared",
                     "prepared TTS delivery instruction before synthesis"
                 );
                 SpeechRequest {
@@ -335,9 +342,25 @@ impl ConfiguredSpeechClient {
                     ..request.clone()
                 }
             }
-            Ok(None) => request.clone(),
+            Ok(None) => {
+                tracing::info!(
+                    provider = ?provider,
+                    model = %model_id,
+                    elapsed_ms = prep_started.elapsed().as_millis(),
+                    outcome = "unchanged",
+                    "speech prep completed without changing the request"
+                );
+                request.clone()
+            }
             Err(error) => {
-                tracing::warn!(%error, provider = ?provider, "speech prep failed; using original TTS text");
+                tracing::warn!(
+                    %error,
+                    provider = ?provider,
+                    model = %model_id,
+                    elapsed_ms = prep_started.elapsed().as_millis(),
+                    outcome = "fallback",
+                    "speech prep failed; using original TTS text"
+                );
                 match prep.fallback_performance_tags(&request.input, &context.target) {
                     Ok(Some(input)) => {
                         tracing::info!(
@@ -559,6 +582,18 @@ fn should_use_local_tag_coverage(remote: &str, local: &str) -> bool {
 impl SpeechClient for ConfiguredSpeechClient {
     async fn prepare(&self, request: &SpeechRequest) -> SpeechResult<String> {
         let (provider, persona, _) = self.resolve_request(request)?;
+        if request.speech_prep_enabled == Some(false)
+            && request.speech_prep_shorten_enabled != Some(true)
+        {
+            return Ok(request.input.clone());
+        }
+        if request.speech_prep_shorten_enabled == Some(true) {
+            let mut cache = HashMap::new();
+            let prepared = self
+                .prepare_request_for_provider(provider, request, persona, &mut cache)
+                .await;
+            return Ok(prepared.input);
+        }
         let mut prep_config = self
             .config
             .speech_prep
@@ -691,7 +726,7 @@ mod tests {
     use crate::config::{
         GooglePersonaConfig, GoogleRuntimeConfig, ProviderKind, ResolvedPersona, ResolvedTtsConfig,
     };
-    use codex_voice_core::{SpeechError, SpeechFormat, SpeechRequest};
+    use codex_voice_core::{SpeechClient, SpeechError, SpeechFormat, SpeechRequest};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -737,6 +772,7 @@ mod tests {
             model_hint: String::new(),
             voice_hint: voice.map(str::to_string),
             speech_prep_enabled: None,
+            speech_prep_shorten_enabled: None,
             speech_prep_model_hint: None,
             speech_prep_reasoning_effort: None,
             speech_prep_timeout_ms: None,
@@ -791,6 +827,17 @@ mod tests {
         assert_eq!(provider, ProviderKind::Google);
         assert!(persona.is_none());
         assert_eq!(native_voice, Some("native-google-voice"));
+    }
+
+    #[tokio::test]
+    async fn prepare_is_a_noop_when_enrichment_and_shortening_are_disabled() {
+        let client = ConfiguredSpeechClient::try_new(google_only_config()).unwrap();
+        let mut request = request(Some("google"), None);
+        request.input = "keep this wording".to_string();
+        request.speech_prep_enabled = Some(false);
+        request.speech_prep_shorten_enabled = Some(false);
+
+        assert_eq!(client.prepare(&request).await.unwrap(), "keep this wording");
     }
 
     #[test]

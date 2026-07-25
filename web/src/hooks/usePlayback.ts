@@ -1,46 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { audioDownloadExtension, formatTime } from "../format.ts";
-import type { StreamingPlayback, StreamState } from "../lib/audio/streaming.ts";
-import { reloadForWorkerUpdateWhenIdle } from "../pwa.ts";
 import type { WaveformRef } from "./useWaveform.ts";
+import type { DirectStreamPlayback } from "../lib/audio/direct-stream.ts";
 
-/**
- * Imperative playback control surface. Stable across renders: every method
- * closes over refs and the (stable) React state setters, so it can be captured
- * once by the generation controller and the seek gestures.
- */
 export interface PlaybackApi {
-  /** Load a finished audio blob into the `<audio>` element and waveform. */
   loadAudioBlob(blob: Blob): void;
-  /** Tear down the current audio + streaming playback and reset the display. */
   resetAudio(): void;
-  /** Toggle play/pause for the current stream or `<audio>` source. */
   togglePlay(): Promise<void>;
-  /** Download the current audio blob. */
   download(): void;
-  /** Seek the current stream or `<audio>` source to `seconds`. */
   seekToWaveformTime(seconds: number): void;
-  /** Whether the `<audio>` element currently has a source. */
   audioHasSrc(): boolean;
-  /** Whether a live streaming playback is attached. */
   hasStream(): boolean;
-  /** Enable/disable the play button (streaming edge cases). */
   setPlayDisabled(disabled: boolean): void;
-  /** A streamed blob became ready: enable play/download and attach the stream. */
-  onStreamAudioReady(blob: Blob, playback: StreamingPlayback | null): void;
-  /** Streaming playing-state changed (mirrors `playSvg(!playing)`). */
-  onPlayingChange(playing: boolean): void;
-  /** Attach/detach live playback independently from the final downloadable blob. */
-  onStreamPlaybackChange(playback: StreamingPlayback | null): void;
-  /** Streaming progress tick. */
-  onStreamProgress(current: number, estimated: number, finished: boolean): void;
-  /** High-level streaming state passthrough (handles the buffering reset). */
-  onStreamState(state: StreamState): void;
-  /** The streamed run drained to a replay blob. */
-  onReplayReady(blob: Blob): void;
+  attachStream(stream: DirectStreamPlayback): void;
+  finishStream(blob: Blob, stream: DirectStreamPlayback): void;
+  failStream(stream: DirectStreamPlayback | null): void;
+  onStreamDrained(): void;
+  onStreamPlayingChange(playing: boolean): void;
+  onStreamProgress(current: number, buffered: number, finished: boolean): void;
 }
 
-/** The public surface of {@link usePlayback}. */
 export interface PlaybackState {
   paused: boolean;
   elapsed: string;
@@ -48,18 +27,9 @@ export interface PlaybackState {
   playDisabled: boolean;
   downloadDisabled: boolean;
   api: PlaybackApi;
-  /** Shared "is the user scrubbing" flag (read by seek gestures + progress). */
   seekingRef: React.RefObject<boolean>;
 }
 
-/**
- * Owns the `<audio>` element and all playback display state.
- *
- * Replaces the legacy `audio`/`streamPlayback` block: `resetAudio`,
- * `loadAudioBlob`, `downloadCurrentAudio`, `updatePosition`, the seek helpers,
- * the streaming-callback side effects, and the `playSvg` icon toggle (now the
- * `paused` state). The generation controller drives this through {@link PlaybackApi}.
- */
 export function usePlayback(
   waveformRef: WaveformRef,
   showError: (message: string) => void,
@@ -70,20 +40,18 @@ export function usePlayback(
   const [duration, setDuration] = useState("0:00");
   const [playDisabled, setPlayDisabled] = useState(true);
   const [downloadDisabled, setDownloadDisabled] = useState(true);
-
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
-  const currentBlobRef = useRef<Blob | null>(null);
-  const streamRef = useRef<StreamingPlayback | null>(null);
+  const blobRef = useRef<Blob | null>(null);
+  const urlRef = useRef<string | null>(null);
   const seekingRef = useRef(false);
+  const streamRef = useRef<DirectStreamPlayback | null>(null);
+  const streamDrainedRef = useRef(false);
 
-  // The audio element + its listeners are a true external system.
   useEffect(() => {
     const audio = new Audio();
     audioRef.current = audio;
-
-    const updatePosition = (): void => {
-      const total = audio.duration || 0;
+    const update = (): void => {
+      const total = Number.isFinite(audio.duration) ? audio.duration : 0;
       if (!seekingRef.current && total > 0) waveformRef.current?.setCurrent(audio.currentTime);
       setElapsed(formatTime(audio.currentTime));
       setDuration(formatTime(total));
@@ -93,183 +61,139 @@ export function usePlayback(
       clearError();
     };
     const onPause = (): void => setPaused(true);
-    const onEnded = (): void => {
-      setPaused(true);
-      updatePosition();
-    };
-    audio.addEventListener("loadedmetadata", updatePosition);
-    audio.addEventListener("timeupdate", updatePosition);
+    audio.addEventListener("loadedmetadata", update);
+    audio.addEventListener("timeupdate", update);
     audio.addEventListener("play", onPlay);
     audio.addEventListener("pause", onPause);
-    audio.addEventListener("ended", onEnded);
-
+    audio.addEventListener("ended", onPause);
     return () => {
-      audio.removeEventListener("loadedmetadata", updatePosition);
-      audio.removeEventListener("timeupdate", updatePosition);
-      audio.removeEventListener("play", onPlay);
-      audio.removeEventListener("pause", onPause);
-      audio.removeEventListener("ended", onEnded);
+      streamRef.current?.stop();
+      streamRef.current = null;
       audio.pause();
-      audio.removeAttribute("src");
-      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
+      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
       audioRef.current = null;
     };
-    // Mount-once setup of the <audio> element + its listeners (external system).
+    // The audio element is a mount-scoped external system.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Built once; every method only touches refs + stable setters.
-  const apiRef = useRef<PlaybackApi | null>(null);
-  if (apiRef.current === null) {
-    const stopStream = (): void => {
-      const playback = streamRef.current;
-      if (!playback) return;
-      streamRef.current = null;
-      playback.stop();
-      reloadForWorkerUpdateWhenIdle();
-    };
+  const resetAudio = (): void => {
+    streamRef.current?.stop();
+    streamRef.current = null;
+    streamDrainedRef.current = false;
+    const audio = audioRef.current;
+    audio?.pause();
+    if (audio) audio.removeAttribute("src");
+    if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    urlRef.current = null;
+    blobRef.current = null;
+    waveformRef.current?.reset();
+    setPaused(true);
+    setElapsed("0:00");
+    setDuration("0:00");
+    setPlayDisabled(true);
+    setDownloadDisabled(true);
+  };
 
-    const resetAudio = (): void => {
-      stopStream();
+  const api = useRef<PlaybackApi>({
+    loadAudioBlob(blob) {
+      resetAudio();
+      blobRef.current = blob;
+      const url = URL.createObjectURL(blob);
+      urlRef.current = url;
       const audio = audioRef.current;
       if (audio) {
-        audio.pause();
-        audio.removeAttribute("src");
+        audio.src = url;
         audio.load();
       }
-      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-      currentBlobRef.current = null;
-      setPlayDisabled(true);
-      setDownloadDisabled(true);
-      setPaused(true);
-      setElapsed("0:00");
-      setDuration("0:00");
-      waveformRef.current?.reset();
-    };
-
-    const loadAudioBlob = (blob: Blob): void => {
-      resetAudio();
-      const audio = audioRef.current;
-      if (!audio) return;
-      currentBlobRef.current = blob;
-      const url = URL.createObjectURL(blob);
-      objectUrlRef.current = url;
-      audio.src = url;
-      audio.load();
       setPlayDisabled(false);
       setDownloadDisabled(false);
-      void waveformRef.current?.decodeBlob(blob, audio.currentTime || 0);
-    };
-
-    const seekToWaveformTime = (seconds: number): void => {
-      const target = Math.max(0, Number(seconds) || 0);
+      void waveformRef.current?.decodeBlob(blob);
+    },
+    resetAudio,
+    async togglePlay() {
       if (streamRef.current) {
-        streamRef.current
-          .seekTo(target)
-          .catch((error: Error) => showError(error.message || "Seek failed."));
+        try {
+          await streamRef.current.toggle();
+        } catch (cause) {
+          showError((cause as Error).message || "Streaming playback failed.");
+        }
         return;
       }
       const audio = audioRef.current;
-      const total = audio?.duration || 0;
-      if (audio && total > 0) {
-        audio.currentTime = Math.min(Math.max(target, 0), total);
-        setElapsed(formatTime(audio.currentTime));
-        setDuration(formatTime(total));
-        if (!seekingRef.current) waveformRef.current?.setCurrent(audio.currentTime);
+      if (!audio?.src) return;
+      try {
+        if (audio.paused) await audio.play();
+        else audio.pause();
+      } catch (cause) {
+        showError((cause as Error).message || "Audio playback failed.");
       }
-    };
-
-    apiRef.current = {
-      loadAudioBlob,
-      resetAudio,
-      seekToWaveformTime,
-      async togglePlay() {
-        if (streamRef.current) {
-          try {
-            await streamRef.current.toggle();
-          } catch (error) {
-            showError((error as Error).message || "Streaming playback failed.");
-          }
-          return;
-        }
-        const audio = audioRef.current;
-        if (!audio?.src) return;
-        if (audio.paused) {
-          try {
-            await audio.play();
-          } catch (error) {
-            showError((error as Error).message || "Playback failed.");
-          }
-        } else {
-          audio.pause();
-        }
-      },
-      download() {
-        const blob = currentBlobRef.current;
-        if (!blob) return;
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `codex-voice-${new Date()
-          .toISOString()
-          .replace(/[:.]/g, "-")}.${audioDownloadExtension(blob)}`;
-        document.body.append(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      },
-      audioHasSrc() {
-        return Boolean(audioRef.current?.src);
-      },
-      hasStream() {
-        return Boolean(streamRef.current);
-      },
-      setPlayDisabled(disabled) {
-        setPlayDisabled(disabled);
-      },
-      onStreamAudioReady(blob, playback) {
-        currentBlobRef.current = blob;
-        setDownloadDisabled(false);
-        setPlayDisabled(false);
-        streamRef.current = playback;
-      },
-      onStreamPlaybackChange(playback) {
-        if (playback) {
-          resetAudio();
-          streamRef.current = playback;
-          waveformRef.current?.resetStreaming();
-          setDuration("Live");
-          setPlayDisabled(false);
-          setPaused(!playback.playing);
-          return;
-        }
+    },
+    download() {
+      const blob = blobRef.current;
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `codex-voice.${audioDownloadExtension(blob)}`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    },
+    seekToWaveformTime(seconds) {
+      if (streamRef.current) {
+        void streamRef.current
+          .seekTo(seconds)
+          .catch((cause) => showError((cause as Error).message || "Seek failed."));
+        return;
+      }
+      const audio = audioRef.current;
+      if (audio?.src) audio.currentTime = seconds;
+    },
+    audioHasSrc: () => Boolean(audioRef.current?.src),
+    hasStream: () => Boolean(streamRef.current),
+    setPlayDisabled,
+    attachStream(stream) {
+      resetAudio();
+      streamRef.current = stream;
+      streamDrainedRef.current = false;
+      waveformRef.current?.resetStreaming(24_000, 1, stream.seekable);
+      setPaused(!stream.playing);
+      setDuration("Live");
+      setPlayDisabled(false);
+    },
+    finishStream(blob, stream) {
+      if (streamRef.current !== stream) return;
+      blobRef.current = blob;
+      setDownloadDisabled(false);
+      setPlayDisabled(false);
+      if (streamDrainedRef.current) {
         streamRef.current = null;
-        setPaused(true);
-        setPlayDisabled(!audioRef.current?.src);
-      },
-      onPlayingChange(playing) {
-        setPaused(!playing);
-      },
-      onStreamProgress(current, estimated, finished) {
-        setElapsed(formatTime(current));
-        setDuration(finished ? formatTime(estimated) : "Live");
-        waveformRef.current?.setCurrent(current);
-      },
-      onStreamState(state) {
-        if (state === "buffering") {
-          setDuration("Live");
-          setPlayDisabled(false);
-        }
-      },
-      onReplayReady(blob) {
-        streamRef.current = null;
-        loadAudioBlob(blob);
-        reloadForWorkerUpdateWhenIdle();
-      },
-    };
-  }
+        stream.stop();
+        api.loadAudioBlob(blob);
+      }
+    },
+    failStream(stream) {
+      if (!stream || streamRef.current !== stream) return;
+      resetAudio();
+    },
+    onStreamDrained() {
+      streamDrainedRef.current = true;
+      const blob = blobRef.current;
+      if (!blob) return;
+      const stream = streamRef.current;
+      streamRef.current = null;
+      stream?.stop();
+      api.loadAudioBlob(blob);
+    },
+    onStreamPlayingChange(playing) {
+      setPaused(!playing);
+    },
+    onStreamProgress(current, buffered, finished) {
+      setElapsed(formatTime(current));
+      setDuration(finished ? formatTime(buffered) : "Live");
+      waveformRef.current?.setCurrent(current);
+    },
+  }).current;
 
   return {
     paused,
@@ -277,7 +201,7 @@ export function usePlayback(
     duration,
     playDisabled,
     downloadDisabled,
-    api: apiRef.current,
+    api,
     seekingRef,
   };
 }

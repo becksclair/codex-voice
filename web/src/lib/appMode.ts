@@ -1,13 +1,12 @@
 /**
  * Desktop-app-webview URL contract.
  *
- * Tauri windows load this PWA over HTTP as dumb webviews (no Tauri IPC, no
- * `window.__TAURI__`); the Rust side signals app-mode context purely through
- * the URL: query params for window flags, the fragment for one-shot payload
- * data.
+ * Tauri windows load this PWA over HTTP. Window context and selected-text
+ * intake are URL-driven; the official clipboard-manager plugin is the only
+ * native IPC surface.
  *
  * - `?app=1` — the window is a desktop app webview ("app mode"); the
- *   PWA-specific behaviors (service-worker registration) are skipped.
+ *   enables the native clipboard fallback.
  * - `?view=settings` — a settings-only window: the settings drawer starts
  *   open.
  * - `#intent=<128-bit hex id>` — consume selected text from the local service,

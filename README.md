@@ -16,8 +16,9 @@ runtime first:
 - Linux KDE/Wayland diagnostics for portal availability.
 - Linux clipboard paste diagnostic using RemoteDesktop portal keyboard events.
 - Cross-platform Tauri 2 desktop shell: a system tray plus plain webview windows
-  that load the existing React PWA over HTTP (no bundler, no Tauri IPC — windows
-  are external-URL webviews). System notification status HUD, log file,
+  that load the existing React PWA over HTTP (no bundler; native integration is
+  limited to clipboard reads through Tauri's official clipboard-manager plugin).
+  System notification status HUD, log file,
   diagnostics, test recording, speak-text, settings, and quit menu actions.
 
 ## Commands
@@ -47,16 +48,19 @@ generation started automatically. It exposes a Tauri tray with a status label
 plus `Start Test Recording`, `Speak text...` (opens the main window), `Open
 Settings` (opens the settings window), `Open Logs`, `Run Diagnostics`, and
 `Quit` actions. The main and settings windows are plain webviews that load the
-same React PWA (`{base}/web?app=1` and `{base}/web?app=1&view=settings`); there
-is no native settings/speak-text UI and no Tauri IPC. `run` reuses a discovered
+same installable React web app (`{base}/web?app=1` and
+`{base}/web?app=1&view=settings`); there
+is no native settings/speak-text UI; Tauri IPC is limited to the official
+clipboard-manager plugin's read-text permission. `run` reuses a discovered
 service only when `/healthz` reports desktop readiness and its root is the
 canonical `http://localhost:3846` origin; otherwise it self-hosts there. Keeping
-one desktop origin preserves the PWA's localStorage and IndexedDB. The
+one desktop origin preserves draft text and ordinary settings in localStorage. The
 embedded instance is owned by the desktop process and deliberately does not
-publish a discovery file. Selected text is handed to the PWA through a
+publish a discovery file. Selected text is handed to the web app through a
 short-lived, one-shot desktop intent rather than being placed in the URL. All
-TTS generation and playback for speak-text happens in the PWA via the
-`/web/speech` endpoints described below.
+generated audio exists only in the current page. ElevenLabs v3 streams MP3
+directly to the webview, Google Gemini 3.1 uses the same-origin PCM stream
+relay, and unsupported models use backend speech jobs.
 
 ## Local Audio Server
 
@@ -105,30 +109,31 @@ The app is a standalone React frontend that lives at `web/` in the repo root
 directory into the build output and embeds it in the binary, so the app ships
 inside `codex-voice`. Cargo builds never require `bun`: when `web/dist` is
 absent the build embeds a stub page and prints a cargo warning. See
-[`web/README.md`](web/README.md) for the stack, dev workflow, PWA/manifest
+[`web/README.md`](web/README.md) for the stack, dev workflow, manifest
 details, and the route-shadowing constraint.
 
 The app lets you paste or type text and generate speech (including
 generate-on-paste), scrub playback on a touch-friendly waveform, and install
-itself to a phone or desktop homescreen via the web manifest and service
-worker.
+itself to a phone or desktop homescreen via the web manifest. It requires the
+backend for configuration and generation and has no offline execution path.
 
 Routes: `GET /web/` (app shell), `GET /web/assets/*` (content-hashed,
-immutable JS/CSS/icons), `GET /web/config` (browser-facing TTS config),
-`GET /web/sw.js` (service worker), `POST /web/speech` (synchronous synthesis),
+immutable JS/CSS/icons), `GET /web/config` (TTS and stream-capability config),
+`POST /web/speech` (synchronous synthesis), `POST /web/google-stream`
+(same-origin relay for Google Gemini 3.1 native PCM-over-SSE streaming),
 `POST /web/speech-jobs` and `GET /web/speech-jobs/{id}` (async speech jobs for
 longer input), and `DELETE /web/speech-jobs/{id}` (idempotent cancellation).
+ElevenLabs v3 streams MP3 directly from the provider; models without a direct
+stream path, including Google Gemini 2.5, use speech jobs.
 Desktop selection handoff uses `POST /web/desktop-intents`, one-shot
 `GET /web/desktop-intents/{id}`, and idempotent `DELETE` cleanup.
 The service admits at most three nonterminal jobs and executes one synthesis
 job at a time; overload returns `429` with `Retry-After`. The manifests (`manifest.webmanifest`,
 `manifest-light.webmanifest`) and install icons are static files under
 `web/public/`. Only `/web/assets/*` is served with immutable caching; the app
-shell, service worker, manifests, and icons are served `no-cache`, and Workbox
-content-hash revisions handle service-worker precache versioning. The legacy
-`/web-sw.js` route now serves a small self-destructing worker so previously
-installed PWAs unregister and adopt the new `/web/sw.js`; it can be removed
-after a couple of releases.
+shell, manifests, and icons are served `no-cache`. The legacy `/web-sw.js`
+route serves a small self-destructing worker so older installations unregister
+their retired worker.
 
 ### Serving a dist from disk
 
@@ -161,19 +166,15 @@ runs the backend alone; `mise run verify` includes `web-check` and `web-test`,
 command table lives in the "Web Frontend" section of `AGENTS.md`.
 
 `/web/config` and the `/web/speech*` routes are deliberately unauthenticated
-so the PWA can call them without a bearer token. The config includes provider
-keys and, for Codex prep, a refresh-capable OAuth bundle; the trust boundary is
-private-network/Tailscale-only deployment, per the "Deployment Context"
-section of the root `AGENTS.md`.
+so the private-network web app can call them without a bearer token. Version 2
+of `/web/config` contains selectable provider/model/persona and stream-capability
+configuration. ElevenLabs direct streaming includes its configured endpoint
+and browser-scoped API key. Google credentials, OAuth tokens, account IDs, and
+auth paths remain server-only.
 Browser requests carrying an Origin are accepted for `/web/config` only from
 `https://voice.heliasar.com` or the Vite development origins on loopback port
-`5173`; the broader CORS policy used by the OpenAI-compatible API cannot read
-this credential payload. Codex auth is re-read from its configured file for
-each config response so a server-side refresh is not exported as a stale
-snapshot. Browser OAuth rotation is marked pending in origin storage and
-atomically synchronized back to the configured auth file through
-`POST /web/codex-auth` when the backend becomes reachable again; same-account,
-non-older bundles are the only accepted updates.
+`5173`. `/web/codex-auth` no longer exists; Codex and Google prep calls remain
+server-side direct provider calls.
 
 ## Text-to-Speech (TTS)
 
@@ -248,10 +249,13 @@ should be omitted unless a deployment needs a nondefault override:
 
 Provider timeouts default to 30 seconds. Google defaults to 6,000 input
 characters and ElevenLabs v3 to 5,000; `maxInputChars` explicitly overrides
-the model default. Speech prep defaults to Codex with `gpt-5.6-luna`, no
-reasoning, `performance-tags` mode, a 120-character threshold, 12,000-character
-input, 6,000-character output, and 30-second attempt/total budgets. Its default
-strategy and tag palette are the built-in Codex/Luna performance-tag policy.
+the model default. When Google is configured, speech prep defaults to
+`google/gemini-3.5-flash`; deployments without Google fall back to direct
+Codex prep with `gpt-5.6-luna` and no reasoning. Defaults are
+`performance-tags` mode, a 120-character threshold, 12,000-character input,
+6,000-character output, a 10-second attempt budget, and a 20-second total
+budget. Timeout or retryable failure falls back to local tags or original text.
+The default strategy and tag palette are the built-in performance-tag policy.
 The default Codex endpoint and auth path are
 `https://chatgpt.com/backend-api/codex` and `~/.codex/auth.json`; provider
 endpoints and ElevenLabs output format retain their built-in defaults.
@@ -263,6 +267,10 @@ model supports them. Set `advanced.speechPrep.mode` to `"shorten"` for the older
 shortening behavior. Model support is inferred for known tag-aware models and can
 be overridden per provider with `"inlineAudioTags": true` or `false`. Google
 prep models must support `generateContent`.
+
+The current direct-client comparison is recorded in
+[`docs/enrichment-benchmark-2026-07-25.md`](docs/enrichment-benchmark-2026-07-25.md);
+Gemini 3.5 Flash measured a 2.760-second median across three runs.
 
 ## User Service Setup
 
@@ -298,8 +306,6 @@ Client ──https──▶ Saga (Caddy 80/443)
 - **Saga** is the ingress node; Tailnet-bound Caddy owns `80/443`.
 - **asgard** runs the actual `codex-voice server` bound to `0.0.0.0:3845`.
 - Caddy handles TLS termination with the wildcard `heliasar.com` certificate.
-- Saga handles only exact `POST /_codex/responses` independently, forwarding
-  it to ChatGPT so a warmed PWA can perform Codex prep while asgard is offline.
 
 ### Saga Caddy snippet
 
@@ -310,28 +316,9 @@ voice.heliasar.com {
     tls /etc/saga-tls/heliasar.com.crt /etc/saga-tls/heliasar.com.key
     encode zstd gzip
 
-    @codex_responses {
-        method POST
-        path /_codex/responses
-    }
-    handle @codex_responses {
-        rewrite * /backend-api/codex/responses
-        reverse_proxy https://chatgpt.com {
-            header_up Host chatgpt.com
-        }
-    }
-    handle /_codex/* {
-        respond "Not Found" 404
-    }
-    handle {
-        reverse_proxy 100.120.202.119:3845
-    }
+    reverse_proxy 100.120.202.119:3845
 }
 ```
-
-The scoped relay is not a general ChatGPT proxy: every other `/_codex/*` path
-or method is rejected. It still requires the PWA's cached bearer token and
-account ID.
 
 ### asgard systemd unit
 
@@ -367,11 +354,10 @@ curl -s https://voice.heliasar.com/healthz
 # Expected: {"ok":true,"capabilities":{"transcriptions":true,"speech":true}}
 ```
 
-If asgard is offline, ordinary API routes return a gateway error while a warmed,
-service-worker-controlled PWA can load its cached shell/config and fall back to
-direct provider generation. Codex prep uses Saga's `/_codex/responses` relay;
-OAuth refresh goes directly to `auth.openai.com` and does not require the Codex
-CLI.
+If asgard is offline, the web app reports that the speech backend is
+unavailable and disables generation. It does not cache provider configuration.
+ElevenLabs v3 is the only provider called directly from the browser; Google
+streaming and fallback jobs remain same-origin server routes.
 
 ## Linux Notes
 

@@ -1,119 +1,30 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  GENERATION_STATE_STORAGE_KEY,
-  MAX_PENDING_GENERATION_AGE_MS,
-  clearPendingGeneration,
-  deleteLastGeneratedAudio,
-  getLastGeneratedAudio,
-  loadPendingGeneration,
-  loadText,
-  savePendingGeneration,
-  saveLastGeneratedAudio,
-  saveText,
-} from "./storage.ts";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { clearLegacyPersistentState, SETTINGS_STORAGE_KEY, TEXT_STORAGE_KEY } from "./storage.ts";
 
 beforeEach(() => {
   localStorage.clear();
-});
-afterEach(() => {
-  vi.useRealTimers();
+  sessionStorage.clear();
 });
 
-describe("text persistence", () => {
-  it("defaults to an empty string", () => {
-    expect(loadText()).toBe("");
-  });
+afterEach(() => vi.unstubAllGlobals());
 
-  it("round-trips saved text", () => {
-    saveText("hello world");
-    expect(loadText()).toBe("hello world");
-  });
-});
+test("legacy offline state is removed while draft and settings survive", () => {
+  const deleteDatabase = vi.fn();
+  vi.stubGlobal("indexedDB", { deleteDatabase });
+  localStorage.setItem(TEXT_STORAGE_KEY, "draft");
+  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ theme: "dark" }));
+  localStorage.setItem("codex-voice.web.config.v1", "secret-bearing config");
+  localStorage.setItem("codex-voice.web.generation.v1", "pending job");
+  sessionStorage.setItem("codex-voice.web.worker-update-notice", "1");
+  sessionStorage.setItem("codex-voice.web.app-mode-worker-cleanup", "1");
 
-describe("pending generation", () => {
-  it("returns null when nothing is stored", () => {
-    expect(loadPendingGeneration()).toBeNull();
-  });
+  clearLegacyPersistentState();
 
-  it("round-trips a server-job pending generation", () => {
-    savePendingGeneration("some input", "job-123");
-    const pending = loadPendingGeneration();
-    expect(pending?.input).toBe("some input");
-    expect(pending?.jobId).toBe("job-123");
-    expect(typeof pending?.startedAt).toBe("number");
-  });
-
-  it("discards and clears a pending generation without a jobId", () => {
-    savePendingGeneration("no job");
-    expect(loadPendingGeneration()).toBeNull();
-    expect(localStorage.getItem(GENERATION_STATE_STORAGE_KEY)).toBeNull();
-  });
-
-  it("discards a pending generation older than the max age", () => {
-    savePendingGeneration("stale", "job-9");
-    const now = Date.now();
-    vi.useFakeTimers();
-    vi.setSystemTime(now + MAX_PENDING_GENERATION_AGE_MS + 1000);
-    expect(loadPendingGeneration()).toBeNull();
-    expect(localStorage.getItem(GENERATION_STATE_STORAGE_KEY)).toBeNull();
-  });
-
-  it("tolerates corrupt JSON and clears it", () => {
-    localStorage.setItem(GENERATION_STATE_STORAGE_KEY, "{broken");
-    expect(loadPendingGeneration()).toBeNull();
-    expect(localStorage.getItem(GENERATION_STATE_STORAGE_KEY)).toBeNull();
-  });
-
-  it("clearPendingGeneration removes the record", () => {
-    savePendingGeneration("x", "job-1");
-    clearPendingGeneration();
-    expect(localStorage.getItem(GENERATION_STATE_STORAGE_KEY)).toBeNull();
-  });
-
-  it("only clears pending generation owned by the completed run", () => {
-    savePendingGeneration("replacement", "job-2", "new-owner");
-    clearPendingGeneration("old-owner");
-    expect(loadPendingGeneration()?.jobId).toBe("job-2");
-
-    clearPendingGeneration("new-owner");
-    expect(loadPendingGeneration()).toBeNull();
-  });
-});
-
-describe("generated audio IndexedDB store", () => {
-  it("saves, reads, and deletes the last generated audio", async () => {
-    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/wav" });
-    await saveLastGeneratedAudio(blob, "the text", true);
-
-    const record = await getLastGeneratedAudio();
-    expect(record?.id).toBe("last");
-    expect(record?.text).toBe("the text");
-    expect(record?.mimeType).toBe("audio/wav");
-    expect(record?.inputChanged).toBe(true);
-    expect(typeof record?.createdAt).toBe("string");
-    // The blob is round-tripped through IndexedDB's structured clone. The
-    // fake-indexeddb polyfill degrades Blob to a plain shape, so we assert the
-    // record round-trips rather than re-reading blob bytes here.
-    expect(record?.blob).toBeDefined();
-
-    await deleteLastGeneratedAudio();
-    expect(await getLastGeneratedAudio()).toBeNull();
-  });
-
-  it("returns null when nothing is stored", async () => {
-    // Clean any prior record from a shared IndexedDB.
-    await deleteLastGeneratedAudio();
-    expect(await getLastGeneratedAudio()).toBeNull();
-  });
-
-  it("only conditionally deletes audio owned by the cancelled run", async () => {
-    const blob = new Blob([new Uint8Array([1])], { type: "audio/wav" });
-    await saveLastGeneratedAudio(blob, "new run", false, "new-owner");
-
-    await deleteLastGeneratedAudio("old-owner");
-    expect((await getLastGeneratedAudio())?.text).toBe("new run");
-
-    await deleteLastGeneratedAudio("new-owner");
-    expect(await getLastGeneratedAudio()).toBeNull();
-  });
+  expect(localStorage.getItem(TEXT_STORAGE_KEY)).toBe("draft");
+  expect(localStorage.getItem(SETTINGS_STORAGE_KEY)).toContain("dark");
+  expect(localStorage.getItem("codex-voice.web.config.v1")).toBeNull();
+  expect(localStorage.getItem("codex-voice.web.generation.v1")).toBeNull();
+  expect(sessionStorage.getItem("codex-voice.web.worker-update-notice")).toBeNull();
+  expect(sessionStorage.getItem("codex-voice.web.app-mode-worker-cleanup")).toBeNull();
+  expect(deleteDatabase).toHaveBeenCalledWith("codex-voice-web-audio");
 });
