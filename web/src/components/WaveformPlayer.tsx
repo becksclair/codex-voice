@@ -43,7 +43,9 @@ export function WaveformPlayer(props: WaveformPlayerProps) {
         <span className="waveform-marker" aria-hidden="true"></span>
         <span className="waveform-thumb" aria-hidden="true"></span>
       </div>
-      <time id="duration">{props.duration}</time>
+      <time id="duration" className={props.duration === "Live" ? "live-status" : undefined}>
+        {props.duration}
+      </time>
     </div>
   );
 }

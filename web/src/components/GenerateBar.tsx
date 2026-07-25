@@ -5,8 +5,8 @@ import type { CSSProperties } from "react";
  * settings). `icon-button` is retained as a hook for the sheen pseudo-elements
  * and the raised-svg rule in index.css.
  */
-const GLASS_ICON_BUTTON =
-  "icon-button relative inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer touch-manipulation items-center justify-center overflow-hidden rounded-[13px] border border-[var(--glass-button-border)] bg-[image:var(--glass-button-bg)] p-0 text-[var(--glass-button-color)] shadow-[var(--glass-button-shadow)] [backdrop-filter:var(--glass-button-filter)] [-webkit-backdrop-filter:var(--glass-button-filter)] hover:border-[var(--glass-button-hover-border)] hover:bg-[image:var(--glass-button-hover-bg)] disabled:cursor-not-allowed disabled:opacity-[0.72]";
+const TOOLBAR_BUTTON =
+  "utility-toolbar-button icon-button inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer touch-manipulation items-center justify-center border-0 bg-transparent p-0 text-[var(--glass-button-color)] disabled:cursor-not-allowed disabled:opacity-[0.5]";
 
 interface GenerateBarProps {
   generating: boolean;
@@ -73,52 +73,58 @@ export function GenerateBar(props: GenerateBarProps) {
           <span></span>
         </span>
       </button>
-      <button
-        id="play"
-        type="button"
-        className={`${GLASS_ICON_BUTTON} col-start-3 max-[420px]:col-start-2`}
-        disabled={props.playDisabled}
-        aria-label={props.paused ? "Play" : "Pause"}
-        onClick={props.onTogglePlay}
+      <div
+        className="utility-toolbar col-start-3 col-span-3 max-[420px]:col-start-2"
+        role="group"
+        aria-label="Playback and app controls"
       >
-        <svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true">
-          {props.paused ? (
-            <path d="M8 5v14l11-7Z" />
-          ) : (
-            <>
-              <path d="M8 5v14" />
-              <path d="M16 5v14" />
-            </>
-          )}
-        </svg>
-      </button>
-      <button
-        id="download"
-        type="button"
-        className={GLASS_ICON_BUTTON}
-        disabled={props.downloadDisabled}
-        aria-label="Download audio"
-        onClick={props.onDownload}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 3v12" />
-          <path d="m7 10 5 5 5-5" />
-          <path d="M5 21h14" />
-        </svg>
-      </button>
-      <button
-        id="settings-toggle"
-        type="button"
-        className={GLASS_ICON_BUTTON}
-        aria-label="Toggle settings"
-        aria-expanded={props.settingsOpen}
-        onClick={props.onToggleSettings}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
-          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.04 1.56V21a2 2 0 1 1-4 0v-.08a1.7 1.7 0 0 0-1.04-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.04H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.64 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.08a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.1.38.4.7.76.86.25.1.52.15.8.14H21a2 2 0 1 1 0 4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
-        </svg>
-      </button>
+        <button
+          id="play"
+          type="button"
+          className={TOOLBAR_BUTTON}
+          disabled={props.playDisabled}
+          aria-label={props.paused ? "Play" : "Pause"}
+          onClick={props.onTogglePlay}
+        >
+          <svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true">
+            {props.paused ? (
+              <path d="M8 5v14l11-7Z" />
+            ) : (
+              <>
+                <path d="M8 5v14" />
+                <path d="M16 5v14" />
+              </>
+            )}
+          </svg>
+        </button>
+        <button
+          id="download"
+          type="button"
+          className={TOOLBAR_BUTTON}
+          disabled={props.downloadDisabled}
+          aria-label="Download audio"
+          onClick={props.onDownload}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v12" />
+            <path d="m7 10 5 5 5-5" />
+            <path d="M5 21h14" />
+          </svg>
+        </button>
+        <button
+          id="settings-toggle"
+          type="button"
+          className={TOOLBAR_BUTTON}
+          aria-label="Toggle settings"
+          aria-expanded={props.settingsOpen}
+          onClick={props.onToggleSettings}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.04 1.56V21a2 2 0 1 1-4 0v-.08a1.7 1.7 0 0 0-1.04-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.04H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.64 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.08a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.1.38.4.7.76.86.25.1.52.15.8.14H21a2 2 0 1 1 0 4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 }

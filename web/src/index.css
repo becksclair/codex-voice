@@ -41,11 +41,19 @@
   --error-bg: rgba(92, 23, 49, 0.58);
   --focus-ring: rgba(238, 94, 165, 0.2);
   --overlay-color: rgba(255, 239, 248, 0.96);
-  --overlay-bg: linear-gradient(135deg, rgba(255, 124, 190, 0.04), rgba(50, 20, 63, 0.06));
-  --overlay-border: rgba(255, 184, 221, 0.08);
+  --composer-top-edge: rgba(255, 247, 250, 0.44);
+  --composer-bottom-edge: rgba(0, 0, 0, 0.08);
+  --utility-toolbar-bg: rgba(68, 46, 76, 0.72);
+  --utility-toolbar-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 6px 14px rgba(238, 94, 165, 0.14),
+    0 3px 8px rgba(0, 0, 0, 0.12);
+  --overlay-bg:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 32%),
+    linear-gradient(135deg, rgba(255, 124, 190, 0.04), rgba(50, 20, 63, 0.06));
+  --overlay-border: rgba(255, 255, 255, 0.12);
   --overlay-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -1px 0 rgba(0, 0, 0, 0.06),
-    0 10px 24px rgba(238, 94, 165, 0.12), 0 8px 24px rgba(0, 0, 0, 0.16);
+    0 3px 8px rgba(0, 0, 0, 0.1);
   --overlay-hover-bg: linear-gradient(135deg, rgba(255, 124, 190, 0.08), rgba(50, 20, 63, 0.1));
   --overlay-hover-border: rgba(255, 184, 221, 0.12);
   --overlay-active-bg: linear-gradient(135deg, rgba(255, 124, 190, 0.06), rgba(50, 20, 63, 0.12));
@@ -53,7 +61,12 @@
     inset 0 1px 2px rgba(0, 0, 0, 0.12), 0 8px 20px rgba(238, 94, 165, 0.1),
     0 4px 14px rgba(0, 0, 0, 0.12);
   --glass-button-color: rgba(255, 250, 253, 0.98);
-  --glass-button-bg: linear-gradient(180deg, rgba(255, 238, 249, 0.19), rgba(255, 238, 249, 0.14));
+  --glass-button-bg: linear-gradient(
+    145deg,
+    rgba(220, 235, 255, 0.12),
+    rgba(255, 224, 242, 0.1) 52%,
+    rgba(238, 221, 255, 0.08)
+  );
   --glass-button-sheen: linear-gradient(
     110deg,
     rgba(255, 255, 255, 0.08),
@@ -62,11 +75,11 @@
     transparent
   );
   --glass-button-edge: linear-gradient(rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
-  --glass-button-border: rgba(255, 255, 255, 0.24);
+  --glass-button-border: rgba(255, 255, 255, 0.14);
   --glass-button-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.1), inset 0 -1px 0 rgba(255, 255, 255, 0.035),
-    0 3px 8px rgba(0, 0, 0, 0.14);
-  --glass-button-filter: blur(14px) saturate(1.08);
+    0 2px 6px rgba(0, 0, 0, 0.1);
+  --glass-button-filter: blur(12px) saturate(1.2);
   --glass-icon-filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.16));
   --glass-button-hover-bg: linear-gradient(
     180deg,
@@ -99,6 +112,9 @@
       transparent 96%
     );
   --seekbar-border: rgba(255, 255, 255, 0.1);
+  --seekbar-label: rgba(246, 234, 244, 0.82);
+  --live-status-color: rgba(188, 255, 96, 0.98);
+  --live-status-shadow: 0 1px 0 rgba(255, 255, 255, 0.28), 0 0 18px rgba(156, 236, 42, 0.54);
   --seekbar-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.075), inset 0 -14px 24px rgba(255, 255, 255, 0.018),
     0 12px 28px rgba(0, 0, 0, 0.22), 0 8px 18px rgba(238, 94, 165, 0.035);
@@ -137,11 +153,19 @@
   --error-bg: rgba(255, 230, 237, 0.78);
   --focus-ring: rgba(229, 55, 134, 0.18);
   --overlay-color: rgba(58, 23, 53, 0.88);
-  --overlay-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.32), rgba(240, 185, 215, 0.18));
-  --overlay-border: rgba(183, 126, 169, 0.2);
+  --composer-top-edge: rgba(255, 255, 255, 0.58);
+  --composer-bottom-edge: rgba(126, 82, 116, 0.1);
+  --utility-toolbar-bg: rgba(255, 249, 253, 0.78);
+  --utility-toolbar-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.76), 0 6px 14px rgba(229, 55, 134, 0.14),
+    0 3px 8px rgba(103, 50, 89, 0.1);
+  --overlay-bg:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.36), transparent 32%),
+    linear-gradient(135deg, rgba(232, 244, 255, 0.2), rgba(255, 221, 239, 0.12));
+  --overlay-border: rgba(131, 83, 126, 0.28);
   --overlay-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.52), inset 0 -1px 0 rgba(151, 86, 137, 0.08),
-    0 10px 24px rgba(229, 55, 134, 0.12), 0 8px 22px rgba(103, 50, 89, 0.14);
+    0 3px 8px rgba(103, 50, 89, 0.1);
   --overlay-hover-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.44), rgba(240, 185, 215, 0.24));
   --overlay-hover-border: rgba(183, 126, 169, 0.26);
   --overlay-active-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.24), rgba(240, 185, 215, 0.3));
@@ -151,9 +175,9 @@
   --glass-button-color: rgba(58, 23, 53, 0.84);
   --glass-button-bg: linear-gradient(
     145deg,
-    rgba(255, 255, 255, 0.88),
-    rgba(255, 255, 255, 0.7) 52%,
-    rgba(255, 255, 255, 0.48)
+    rgba(232, 244, 255, 0.58),
+    rgba(255, 225, 241, 0.42) 52%,
+    rgba(241, 227, 255, 0.28)
   );
   --glass-button-sheen:
     radial-gradient(ellipse at 50% 4%, rgba(255, 255, 255, 0.9), transparent 45%),
@@ -166,12 +190,12 @@
       rgba(255, 255, 255, 0.34) 82%,
       transparent 100%
     );
-  --glass-button-edge: linear-gradient(rgba(255, 255, 255, 0.64), rgba(255, 255, 255, 0));
-  --glass-button-border: rgba(255, 255, 255, 0.9);
+  --glass-button-edge: linear-gradient(rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0));
+  --glass-button-border: rgba(255, 255, 255, 0.32);
   --glass-button-shadow:
-    inset 0 1px 1px rgba(255, 255, 255, 0.98), inset 0 -14px 18px rgba(238, 214, 230, 0.22),
-    0 12px 24px rgba(229, 55, 134, 0.16), 0 8px 22px rgba(103, 50, 89, 0.14);
-  --glass-button-filter: blur(18px) saturate(1.65);
+    inset 0 1px 1px rgba(255, 255, 255, 0.98), inset 0 -4px 8px rgba(238, 214, 230, 0.16),
+    0 3px 8px rgba(103, 50, 89, 0.1);
+  --glass-button-filter: blur(12px) saturate(1.25);
   --glass-icon-filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.2));
   --glass-button-hover-bg: linear-gradient(
     145deg,
@@ -200,6 +224,12 @@
       transparent 96%
     );
   --seekbar-border: rgba(255, 255, 255, 0.62);
+  --seekbar-label: rgba(92, 61, 85, 0.86);
+  --live-status-color: rgba(0, 126, 66, 0.99);
+  --live-status-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.86), 0 0 2px rgba(188, 255, 206, 0.92),
+    0 0 6px rgba(0, 255, 120, 0.78), 0 0 22px rgba(0, 236, 108, 0.62),
+    0 0 36px rgba(0, 208, 90, 0.4);
   --seekbar-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.86), 0 14px 28px rgba(103, 50, 89, 0.12),
     0 10px 24px rgba(229, 55, 134, 0.12);
@@ -263,33 +293,66 @@ button svg {
   pointer-events: none;
 }
 
+/* Quiet warm-white hairline that defines the composer glass plane. */
+.text-shell {
+  box-shadow: inset 0 -1px 0 var(--composer-bottom-edge);
+}
+.text-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0 14px auto;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--composer-top-edge) 18%,
+    var(--composer-top-edge) 82%,
+    transparent
+  );
+  pointer-events: none;
+}
+
 /* Clear button hides via [hidden]; the id beats the inline-flex utility. */
 #clear[hidden] {
   display: none;
 }
 
-/* Glass icon-button sheen overlays + raised icon (play/download/settings). */
-.buttons .icon-button::before {
-  content: "";
-  position: absolute;
-  inset: 1px;
-  border-radius: inherit;
-  background: var(--glass-button-sheen);
-  pointer-events: none;
+/* Shared frosted toolbar surface and quiet internal separators. */
+.utility-toolbar {
+  position: relative;
+  align-self: start;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  height: 42px;
+  min-height: 42px;
+  overflow: visible;
+  border: 1px solid var(--seekbar-border);
+  border-radius: 10px;
+  background: var(--utility-toolbar-bg);
+  box-shadow: var(--utility-toolbar-shadow);
+  backdrop-filter: var(--seekbar-filter);
+  -webkit-backdrop-filter: var(--seekbar-filter);
 }
-.buttons .icon-button::after {
-  content: "";
-  position: absolute;
-  inset: 1px 1px auto 1px;
-  height: 28%;
-  border-radius: inherit;
-  background: var(--glass-button-edge);
-  pointer-events: none;
+.utility-toolbar-button {
+  position: relative;
+  z-index: 1;
 }
-.buttons .icon-button svg {
+.utility-toolbar-button + .utility-toolbar-button {
+  border-left: 1px solid var(--seekbar-border);
+}
+.utility-toolbar-button svg {
   position: relative;
   z-index: 2;
   filter: var(--glass-icon-filter);
+}
+.utility-toolbar #play[aria-label="Play"] #play-icon {
+  transform: translate(3px, -1px);
+}
+.utility-toolbar #play[aria-label="Pause"] #play-icon {
+  transform: translate(2px, -1px);
+  color: var(--text);
+  stroke-width: 2.4;
+  filter: brightness(0.82) var(--glass-icon-filter);
 }
 
 /* Generate button spinner + progress fill (animation + `--generate-progress`). */
@@ -333,8 +396,47 @@ button svg {
 }
 .scrubber time {
   min-width: 3.6ch;
+  color: var(--seekbar-label);
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1;
+  text-shadow: var(--count-shadow);
   user-select: none;
   -webkit-user-select: none;
+}
+
+@keyframes live-status-pulse {
+  0%,
+  100% {
+    text-shadow: var(--live-status-shadow);
+  }
+  50% {
+    text-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.88),
+      0 0 2px rgba(214, 255, 224, 0.98),
+      0 0 8px rgba(0, 255, 118, 0.92),
+      0 0 30px rgba(0, 255, 118, 0.82),
+      0 0 48px rgba(0, 224, 92, 0.56);
+  }
+}
+
+.scrubber time.live-status {
+  color: var(--live-status-color);
+  animation: live-status-pulse 4.8s ease-in-out infinite;
+  text-transform: uppercase;
+  -webkit-text-stroke: 0.2px rgba(0, 78, 42, 0.36);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scrubber time.live-status {
+    animation: none;
+  }
 }
 
 /* Waveform seek slider + canvas + marker/thumb, positioned from `--seek-progress`. */

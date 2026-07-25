@@ -5,7 +5,7 @@ import type { ClipboardEvent, RefObject } from "react";
  * the textarea. `icon-button` is retained only as a hook for the `svg` styling.
  */
 const OVERLAY_ICON_BUTTON =
-  "icon-button inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer touch-manipulation items-center justify-center rounded-full border border-[var(--overlay-border)] bg-[image:var(--overlay-bg)] p-0 text-[var(--overlay-color)] shadow-[var(--overlay-shadow)] [backdrop-filter:blur(6px)_saturate(1.25)] [-webkit-backdrop-filter:blur(6px)_saturate(1.25)] hover:border-[var(--overlay-hover-border)] hover:bg-[image:var(--overlay-hover-bg)] active:bg-[image:var(--overlay-active-bg)] active:shadow-[var(--overlay-active-shadow)]";
+  "icon-button inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer touch-manipulation items-center justify-center rounded-full border border-[var(--overlay-border)] bg-[image:var(--overlay-bg)] p-0 text-[var(--overlay-color)] shadow-[var(--overlay-shadow)] [backdrop-filter:blur(10px)_saturate(1.2)] [-webkit-backdrop-filter:blur(10px)_saturate(1.2)] hover:border-[var(--overlay-hover-border)] hover:bg-[image:var(--overlay-hover-bg)] active:bg-[image:var(--overlay-active-bg)] active:shadow-[var(--overlay-active-shadow)]";
 
 interface TextEditorProps {
   textRef: RefObject<HTMLTextAreaElement | null>;
