@@ -312,6 +312,16 @@ button svg {
   pointer-events: none;
 }
 
+#text {
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  font-weight: 500;
+}
+
 /* Clear button hides via [hidden]; the id beats the inline-flex utility. */
 #clear[hidden] {
   display: none;
