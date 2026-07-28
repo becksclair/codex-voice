@@ -31,6 +31,13 @@ interface SpeechHarness {
   complete: boolean;
 }
 
+const composerSourceValue = (page: Page) =>
+  page.evaluate(
+    () =>
+      (document.querySelector('[data-testid="composer-source"]') as HTMLTextAreaElement | null)
+        ?.value ?? null,
+  );
+
 async function installSpeechHarness(page: Page, complete = true): Promise<SpeechHarness> {
   const harness: SpeechHarness = { inputs: [], deleted: [], complete };
   await page.route('**/*', async (route) => {
@@ -157,13 +164,11 @@ test('empty paste is a no-op and clear cancels a pending job', async ({ page }) 
 
   await page.evaluate(() => navigator.clipboard.writeText(''));
   await page.locator('#paste').click();
-  await expect(page.locator('[data-testid="composer-source"]')).toHaveValue(
-    'keep this active draft',
-  );
+  await expect.poll(() => composerSourceValue(page)).toBe('keep this active draft');
   await expect(page.locator('#generate')).toBeEnabled();
 
   await page.locator('#clear').click();
-  await expect(page.locator('[data-testid="composer-source"]')).toHaveValue('');
+  await expect.poll(() => composerSourceValue(page)).toBe('');
   await expect(page.locator('#generate')).toBeEnabled();
   await expect.poll(() => harness.deleted).toContain('job-1');
   await expect(page.locator('#play')).toBeDisabled();

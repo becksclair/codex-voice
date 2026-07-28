@@ -113,10 +113,9 @@ function MainWindowApp() {
     if (settings.settings.generateOnPaste === false) return;
     const pasted = event.clipboardData?.getData("text") || "";
     if (!pasted.trim()) return;
-    const valueBeforePaste = textRef.current?.value ?? "";
     setTimeout(() => {
       const current = textRef.current?.value ?? "";
-      if (current === valueBeforePaste || !current.trim()) return;
+      if (!current.trim()) return;
       generation.generate(current).catch((e: Error) => errorApi.show(e.message || "TTS failed."));
     }, 0);
   };

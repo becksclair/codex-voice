@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -7,6 +7,13 @@ import path from 'node:path';
 // `#intent=<id>` (one-shot selected-text handoff + auto-generate).
 
 const discoveryPath = path.resolve(__dirname, '../../target/webtests-state/codex-voice/transcriber.json');
+
+const composerSourceValue = (page: Page) =>
+  page.evaluate(
+    () =>
+      (document.querySelector('[data-testid="composer-source"]') as HTMLTextAreaElement | null)
+        ?.value ?? null,
+  );
 
 // Block service workers left over in a reused browser profile so the
 // billed-call firewall below remains unconditional.
@@ -106,7 +113,8 @@ test('consecutive button and native pastes generate the newly pasted text', asyn
   for (const value of ['first pasted draft', 'second pasted draft']) {
     await page.evaluate((text) => navigator.clipboard.writeText(text), value);
     await page.locator('#paste').click();
-    await expect(page.locator('[data-testid="composer-source"]')).toHaveValue(value);
+    await expect.poll(() => composerSourceValue(page)).toBe(value);
+    await expect(page.locator('#text')).toHaveText(value);
     await expect.poll(() => generated.at(-1)).toBe(value);
   }
 
@@ -115,7 +123,8 @@ test('consecutive button and native pastes generate the newly pasted text', asyn
     await page.locator('#text').click();
     await page.locator('#text').press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
     await page.locator('#text').press(process.platform === 'darwin' ? 'Meta+V' : 'Control+V');
-    await expect(page.locator('[data-testid="composer-source"]')).toHaveValue(value);
+    await expect.poll(() => composerSourceValue(page)).toBe(value);
+    await expect(page.locator('#text')).toHaveText(value);
     await expect.poll(() => generated.at(-1)).toBe(value);
   }
 
@@ -125,6 +134,9 @@ test('consecutive button and native pastes generate the newly pasted text', asyn
     'first native paste',
     'second native paste',
   ]);
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('codex-voice.web.text')))
+    .toBe('second native paste');
 });
 
 test('closing a stale settings window cannot overwrite the main draft', async ({ context, page }) => {
@@ -137,9 +149,7 @@ test('closing a stale settings window cannot overwrite the main draft', async ({
 
   await page.locator('#text').fill('newer main-window draft');
   await settings.close();
-  await expect(page.locator('[data-testid="composer-source"]')).toHaveValue(
-    'newer main-window draft',
-  );
+  await expect.poll(() => composerSourceValue(page)).toBe('newer main-window draft');
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem('codex-voice.web.text')))
     .toBe('newer main-window draft');
