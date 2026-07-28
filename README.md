@@ -165,6 +165,20 @@ runs the backend alone; `mise run verify` includes `web-check` and `web-test`,
 `mise run setup` builds the frontend before the release binary. The full
 command table lives in the "Web Frontend" section of `AGENTS.md`.
 
+For the immutable Saga release lane, a clean Linux x86-64 checkout can build a
+full-commit-addressed bundle without publishing or deploying it:
+
+```bash
+python3 -m unittest discover -s scripts/tests -v
+scripts/package_linux_amd64.sh "$(git rev-parse HEAD)"
+```
+
+The packager builds the PWA first, emits the archive and `.sha256` sidecar under
+`output/releases/`, validates their exact contract, and smokes the extracted
+binary's `--version`, loopback health, and non-stub embedded PWA. See
+[`plans/024-saga-immutable-release-and-migration.md`](plans/024-saga-immutable-release-and-migration.md)
+for the automation, protected-state, notification, and cutover contract.
+
 `/web/config` and the `/web/speech*` routes are deliberately unauthenticated
 so the private-network web app can call them without a bearer token. Version 2
 of `/web/config` contains selectable provider/model/persona and stream-capability
@@ -290,12 +304,21 @@ mise run setup
 systemctl --user status codex-voice.service codex-voice-server.service
 ```
 
-## Homelab Reverse-Proxy Setup
+## Homelab Reverse-Proxy Setup and Saga Migration
 
 Saga proxies `voice.heliasar.com` across the Tailscale network to the service
 host. This lets any Tailnet client reach the PWA and OpenAI-compatible endpoints
 without knowing the backend machine's Tailscale IP. The legacy
 `codex-voice.heliasar.com` hostname redirects to `voice.heliasar.com`.
+
+Asgard is the current backend owner. The approved migration first accepts Codex
+Voice privately on Saga at `127.0.0.1:3845`, reached only through an SSH local
+forward from another Tailnet client. No Caddy/domain or Asgard ownership change
+occurs before that canary passes. Application-layer Voice remains no-auth, so
+the Saga listener stays loopback-only and canonical ingress stays Tailnet-only.
+Saga retains and validates its existing Codex auth; the one active Codex Voice
+XDG config file is resolved from the effective services and migrated separately
+as protected service state.
 
 ### Architecture
 
@@ -306,8 +329,13 @@ Client ──https──▶ Saga (Caddy 80/443)
 ```
 
 - **Saga** is the ingress node; Tailnet-bound Caddy owns `80/443`.
-- **asgard** runs the actual `codex-voice server` bound to `0.0.0.0:3845`.
+- **asgard** currently runs the actual `codex-voice server` on its explicit
+  Tailscale address; wildcard binds are rejected by the CLI.
 - Caddy handles TLS termination with the wildcard `heliasar.com` certificate.
+
+After private Saga acceptance and separately authorized cutover, the target
+upstream is Saga loopback. Asgard is stopped only after canonical Tailnet
+consumer acceptance.
 
 ### Saga Caddy snippet
 

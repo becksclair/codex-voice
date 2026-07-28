@@ -17,6 +17,7 @@ Note: at planning time the working tree carried one uncommitted change to `crate
 | 003 | Harden auth.json rewrites (atomic 0600 write, unique tmp, spawn_blocking) | P1 | S | — | DONE — landed on `main`, commit `a4706e3` |
 | 004 | Pin engine error recovery + Codex client HTTP contract with tests | P1 | S | — | DONE — landed on `main`, commits `63e6343`+`d33b069` |
 | 018 | Make mise verify tasks trustworthy inside nested git worktrees | P3 | S | 001 | DONE — landed on `main`, commit `e9143a7` (trap-closure proven via before/after nested-worktree test) |
+| 024 | Immutable linux-amd64 release and Saga migration | P1 | M | — | IN PROGRESS — producer slice local only; no publish/deploy/cutover |
 | 005 | Keep the tray/event loop responsive during transcription | P2 | M | 004 | DONE — landed on `main`, commit `d486f57` |
 | 006 | Split server.rs; extract web assets; prune string-literal tests | P2 | M | 001 (soft) | DONE — landed on `main`, commits `42766ce`+`254c7e0`+`272c1bf`+`cce1972`; stashed server.rs WIP re-applied to app.html as `6fc7b22` |
 | 007 | Memoize + compress + cache the web shell | P3 | S | 006 | DONE — landed on `main`, commit `ac34c14` |
