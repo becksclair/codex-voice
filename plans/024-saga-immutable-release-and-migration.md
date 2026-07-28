@@ -1,6 +1,6 @@
 # Saga immutable release and migration
 
-Status: **IN PROGRESS — producer slice implemented locally; nothing published or deployed.**
+Status: **IN PROGRESS — producer artifact contract is on `main`; installed-service acceptance is implemented locally; nothing published or deployed in this slice.**
 
 This plan separates confirmed current state from the approved target. It is the
 release/cutover contract for moving Codex Voice from Asgard to Saga.
@@ -21,16 +21,23 @@ release/cutover contract for moving Codex Voice from Asgard to Saga.
 
 ## Approved artifact and automation contract
 
-Every successful `main` push will eventually run two bounded workflows:
+Every successful `main` push runs the bounded producer workflow:
 
 1. Build the Vite app and locked release binary, validate it, and publish an
    immutable artifact under the full source commit SHA.
-2. Automatically consume that exact published artifact and deploy only the
+
+After the one-time private Saga canary proves the consumer lane, every
+successful producer publication automatically triggers the separate consumer
+workflow:
+
+2. Consume that exact published artifact and deploy only the
    `codex-voice` selected service on Saga. Deployment never rebuilds source or
    resolves a mutable `latest` artifact.
 
-The automatic deploy trigger is enabled only after the one-time private Saga
-canary and canonical cutover bootstrap below.
+Producer publication is required to create the Phase 1 artifact. Only the
+automatic deploy trigger waits for the one-time private Saga canary. Canonical
+cutover is later and separately authorized; it is not part of the
+automatic-delivery completion claim.
 
 Artifact contract:
 
@@ -83,12 +90,17 @@ not transfer, rewrite, or print it.
    embedded PWA/assets, config/provider readiness, a small non-sensitive
    transcription, and consumer TTS. Direct Saga Tailnet-IP access to 3845 must
    fail.
-2. **Canonical Tailnet-only cutover, separately authorized.** Change Saga
+2. **Automatic delivery proof.** Enable the successful-main producer and its
+   serialized `codex-voice` consumer. Prove a real push publishes, reads back,
+   installs, activates, and accepts the exact artifact through the same
+   installed-service contract. Terminal deploy/consumer failures email Bex;
+   success sends no mail.
+3. **Canonical Tailnet-only cutover, separately authorized follow-up.** Change Saga
    Caddy's upstream from Asgard to Saga loopback without widening exposure.
    Accept DNS/TLS, PWA/assets, health, transcription, and TTS through the
    canonical hostname from a Tailnet consumer.
-3. **Ownership closeout.** Only after live acceptance, stop/disable Asgard and
-   remove its ownership references. Then enable recurring automatic deploy.
+4. **Ownership closeout.** Only after canonical live acceptance, stop/disable
+   Asgard and remove its ownership references.
 
 Rollback acceptance, drills, and proof are not gates. Ordinary failure handling
 stops the failed stage, reports it, and leaves corrective action to the operator.
@@ -144,34 +156,85 @@ mask the original deployment failure.
 6. Add forward acceptance for active state, loopback health, embedded assets,
    Codex auth usability, config/provider readiness, and bounded
    transcription/TTS checks. Add no rollback-drill or rollback-acceptance gate.
-7. Add a Gitea consumer accepting immutable artifact identity from a successful
-   main producer run and automatically invoking only this service after the
-   bootstrap approval.
+   Emit the exact bounded `codex-voice-installed-service/v1` attestation below;
+   producer acceptance must consume it through
+   `scripts/accept_installed_service.py` rather than a source-tree test.
+7. Add a serialized Gitea consumer accepting immutable artifact identity from a
+   successful main producer run and automatically invoking only this service
+   after private-canary approval.
 8. Connect terminal failure to the existing Bex operational mail seam using the
    redacted contract. Recipient and credentials remain external configuration.
-9. Keep private SSH-forward canary, Caddy cutover, canonical acceptance, and
-   Asgard retirement as separately authorized one-time tasks, outside recurring
-   deployment.
+9. Keep Caddy cutover, canonical-host acceptance, and Asgard stop/disable as the
+   separately authorized follow-up after automatic delivery is proven. The
+   private SSH-forward canary is the prerequisite for enabling that delivery.
+
+The Saga host attestation is JSON with exactly these fields:
+
+```json
+{
+  "schema_version": "codex-voice-installed-service/v1",
+  "service_id": "codex-voice",
+  "source_commit": "<40-char-lowercase-commit>",
+  "artifact_sha256": "<archive-sha256>",
+  "artifact_binary_sha256": "<validated-extracted-binary-sha256>",
+  "installed_binary_sha256": "<fixed-root-binary-sha256>",
+  "version": "codex-voice <version>",
+  "unit": "codex-voice.service",
+  "unit_user": "ubuntu",
+  "active_state": "active",
+  "sub_state": "running",
+  "listener": "127.0.0.1:3845",
+  "service_instance_id": "<32-char-lowercase-process-instance-id>",
+  "config_sha256": "<protected-config-sha256>",
+  "config_ready": true,
+  "provider_environment_ready": true,
+  "codex_auth_ready": true
+}
+```
+
+Saga generates it only after hashing the validated archive member and installed
+fixed-root binary, running `--version` under the final identity, proving the
+exact unit/listener, validating the one config and separately owned provider
+environment without values, and checking existing Codex auth read-only under
+`ubuntu`. The host verifier must resolve the process owning `127.0.0.1:3845`,
+prove its executable digest equals the installed-binary digest, read that
+process's `/healthz` instance ID, and confirm the listener owner and instance ID
+remain unchanged across those checks. The acceptance program requires the same
+instance ID through the second client's SSH forward, equality of artifact and
+installed binary digests, then performs health/PWA/config/TTS/transcription
+calls over the supplied loopback or SSH-forward URL. Its JSON output contains
+only digests, version, booleans, provider names/counts, response sizes, and
+transcript length; it never emits config, environment, auth, audio, or
+transcript content.
 
 ## Remaining evidence and decisions
 
 - Confirm current Saga Ops selected-service task/variable names and the
   fixed-root atomic file-replacement contract.
-- Resolve the Gitea artifact storage/download interface and immutable identity
-  fields.
+- Confirm the Saga consumer's package-read credential name/owner for the proven
+  Generic Package URL; producer publication/read-back uses `PACKAGE_TOKEN` only
+  in its final step.
 - Resolve the effective Asgard config source and Saga destination.
-- Confirm Saga's final unit user/group and auth readability under that identity.
+- Confirm Saga's existing Codex auth is readable and usable under the confirmed
+  final `ubuntu:ubuntu` unit identity.
 - Locate the existing mail command/API, recipient configuration name, sender
   owner, and credential owner without exposing values.
-- Bex must separately authorize private install/canary, Caddy/domain cutover,
-  and Asgard retirement. Automatic deployment policy itself is decided.
+- Private install/canary and automatic-delivery implementation are authorized.
+  Caddy/domain cutover, canonical-host acceptance, and Asgard retirement remain
+  a separate later authorization.
 
 ## Smallest implementation-ready sequence
 
-1. Land this producer packager, validator tests, runtime smokes, and contract.
-2. Add the matching Saga Ops consumer and protected-state preflights without
-   enabling recurring deployment.
-3. Build/publish one immutable artifact, then perform the private Saga canary.
-4. With separate approval, cut over canonical ingress and accept consumers.
-5. Retire Asgard ownership, then enable automatic deployment after every
-   successful main artifact.
+1. Land the producer installed-service acceptance harness, exact Saga
+   attestation contract, and post-verification Gitea package publication/read-back
+   job. Only its publish step receives `PACKAGE_TOKEN`.
+2. Complete Saga activation/attestation using the existing fixed-root installer;
+   resolve protected input sources and package-read authorization without
+   exposing values.
+3. Publish/read back one immutable artifact and pass the real private
+   SSH-forward canary.
+4. Add and prove successful-main publication plus serialized Saga deployment,
+   the same installed acceptance, and terminal failure-only email.
+5. Stop with automatic delivery proven. In the separately authorized follow-up,
+   change the exact Caddy upstream, accept the canonical host, then stop/disable
+   Asgard only after acceptance.

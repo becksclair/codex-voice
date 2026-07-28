@@ -179,6 +179,25 @@ binary's `--version`, loopback health, and non-stub embedded PWA. See
 [`plans/024-saga-immutable-release-and-migration.md`](plans/024-saga-immutable-release-and-migration.md)
 for the automation, protected-state, notification, and cutover contract.
 
+After Saga has installed and activated that exact artifact, the canonical live
+acceptance entrypoint consumes Saga's bounded host attestation and talks only to
+an explicit loopback URL (locally on Saga or through an SSH local forward):
+
+```bash
+scripts/accept_installed_service.py \
+  --base-url http://127.0.0.1:<forwarded-port> \
+  --source-commit <full-commit-sha> \
+  --artifact-sha256 <archive-sha256> \
+  --installed-attestation <path-to-redacted-saga-attestation.json>
+```
+
+It fails closed on artifact/installed-binary identity, unit identity/state,
+the sole loopback listener and its per-process health instance ID, protected config/provider readiness, existing Saga
+Codex auth readiness, health, non-stub PWA/assets, resolved web config, live TTS,
+and live transcription of the generated fixed non-sensitive canary phrase. It
+never uses the source tree, direct-provider CLI fallback, a non-loopback URL, or
+prints config/provider/auth values or transcript text.
+
 `/web/config` and the `/web/speech*` routes are deliberately unauthenticated
 so the private-network web app can call them without a bearer token. Version 2
 of `/web/config` contains selectable provider/model/persona and stream-capability

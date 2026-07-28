@@ -155,6 +155,7 @@ pub(crate) fn test_state_with_speech_backend_and_config(
     tts_config: Option<ResolvedTtsConfig>,
 ) -> ServiceState {
     ServiceState {
+        instance_id: "0123456789abcdef0123456789abcdef".into(),
         backend: Arc::new(FakeBackend::default()),
         tts: Arc::new(std::sync::RwLock::new(TtsServiceState::from_parts(
             speech,

@@ -50,6 +50,7 @@ const MULTIPART_OVERHEAD_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct ServiceState {
+    pub(crate) instance_id: String,
     pub(crate) backend: Arc<dyn TranscriptionClient>,
     pub(crate) tts: Arc<RwLock<TtsServiceState>>,
     pub(crate) web_speech_jobs: WebSpeechJobStore,
@@ -150,6 +151,7 @@ async fn bind_service(
     let tts_watcher = tts_config_path.map(|path| tokio::spawn(watch_tts_config(tts.clone(), path)));
 
     let app = service_router(ServiceState {
+        instance_id: hex::encode(rand::random::<[u8; 16]>()),
         backend,
         tts,
         web_speech_jobs: Arc::new(WebSpeechJobManager::new()),
@@ -322,6 +324,7 @@ async fn health(
     };
     Ok(Json(Health {
         ok: true,
+        instance_id: state.instance_id,
         capabilities,
     }))
 }
@@ -329,6 +332,7 @@ async fn health(
 #[derive(Debug, Serialize)]
 struct Health {
     ok: bool,
+    instance_id: String,
     capabilities: ServiceCapabilities,
 }
 

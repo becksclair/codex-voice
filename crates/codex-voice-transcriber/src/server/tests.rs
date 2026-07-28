@@ -1243,6 +1243,7 @@ async fn health_includes_capabilities() {
     assert_eq!(value["capabilities"]["transcriptions"], true);
     assert_eq!(value["capabilities"]["speech"], true);
     assert_eq!(value["capabilities"]["desktop"], true);
+    assert_eq!(value["instance_id"], "0123456789abcdef0123456789abcdef");
 }
 
 #[tokio::test]

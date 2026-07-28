@@ -51,3 +51,88 @@ jobs:
       - run: cd webtests && bun install --frozen-lockfile && bunx playwright install --with-deps chromium
       - run: cargo build -q -p codex-voice-app --bin codex-voice
       - run: cd webtests && bunx playwright test
+
+  publish:
+    needs: [verify, deny, web-e2e]
+    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    runs-on: saga-build
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      SERVICE_ID: codex-voice
+      SOURCE_COMMIT: ${{ gitea.sha }}
+      PACKAGE_OWNER: ${{ gitea.repository_owner }}
+      GITEA_SERVER_URL: ${{ gitea.server_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file libasound2-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev pkg-config wget
+      - name: Build and validate immutable runtime artifact
+        run: scripts/package_linux_amd64.sh "$SOURCE_COMMIT"
+      - name: Publish once and read back exact Gitea package files
+        env:
+          PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PACKAGE_TOKEN" || { echo "PACKAGE_TOKEN secret is required" >&2; exit 1; }
+          archive="${SERVICE_ID}-linux-amd64-${SOURCE_COMMIT}.tar.gz"
+          package_url="${GITEA_SERVER_URL}/api/packages/${PACKAGE_OWNER}/generic/${SERVICE_ID}/${SOURCE_COMMIT}"
+          readback=$(mktemp -d "${TMPDIR:-/tmp}/codex-voice-readback.XXXXXX")
+          trap 'rm -rf -- "$readback"' EXIT
+
+          for file in "$archive" "${archive}.sha256"; do
+            local_file="output/releases/${file}"
+            remote_file="$readback/${file}"
+            status=$(curl \
+              --silent \
+              --show-error \
+              --output "$remote_file" \
+              --write-out '%{http_code}' \
+              --header "Authorization: token ${PACKAGE_TOKEN}" \
+              "${package_url}/${file}" || true)
+            case "$status" in
+              200)
+                cmp --silent "$local_file" "$remote_file" || {
+                  echo "immutable package file already exists with different bytes: $file" >&2
+                  exit 1
+                }
+                ;;
+              404)
+                if ! curl \
+                    --fail \
+                    --silent \
+                    --show-error \
+                    --header "Authorization: token ${PACKAGE_TOKEN}" \
+                    --upload-file "$local_file" \
+                    "${package_url}/${file}"; then
+                  echo "package upload did not return success; checking immutable read-back: $file" >&2
+                fi
+                ;;
+              *)
+                echo "package preflight failed for $file with HTTP $status" >&2
+                exit 1
+                ;;
+            esac
+
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --output "$remote_file" \
+              --header "Authorization: token ${PACKAGE_TOKEN}" \
+              "${package_url}/${file}"
+            cmp --silent "$local_file" "$remote_file" || {
+              echo "published package read-back differs from local file: $file" >&2
+              exit 1
+            }
+          done
+
+          (cd "$readback" && sha256sum --check "${archive}.sha256")
