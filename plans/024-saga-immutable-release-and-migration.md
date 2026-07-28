@@ -13,6 +13,8 @@ release/cutover contract for moving Codex Voice from Asgard to Saga.
 - Saga currently terminates Tailnet-only `voice.heliasar.com` ingress and proxies
   to Asgard. Asgard remains live owner until a separately authorized cutover.
 - Saga uses a central Ansible, fixed-root, selected-service deployment lane.
+- The active Gitea producer runner label is `saga-build`; no active runner
+  currently advertises the repository's previous `ubuntu-latest` label.
 - Saga has normal Codex auth already. This migration does not copy auth or log in.
 - The one active Codex Voice config source/destination must still be resolved
   from the effective Asgard and Saga service definitions.

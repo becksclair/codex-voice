@@ -6,7 +6,7 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: saga-build
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,7 +27,7 @@ jobs:
       - run: cd web && bun install --frozen-lockfile && bun run check && bun run test && bun run build
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: saga-build
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -35,7 +35,7 @@ jobs:
           command: check advisories licenses sources
 
   web-e2e:
-    runs-on: ubuntu-latest
+    runs-on: saga-build
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
