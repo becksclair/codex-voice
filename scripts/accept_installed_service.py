@@ -328,7 +328,7 @@ def accept_pwa(base_url: str) -> int:
     return len(assets)
 
 
-def accept_config(base_url: str) -> tuple[int, str]:
+def accept_config(base_url: str) -> tuple[int, str, str]:
     config = _get_json(base_url, "/web/config")
     default_provider = config.get("defaultProvider")
     providers = config.get("providers")
@@ -338,19 +338,25 @@ def accept_config(base_url: str) -> tuple[int, str]:
         or not default_provider
     ):
         raise AcceptanceError("web config did not prove the expected resolved schema")
-    if not isinstance(providers, dict) or not isinstance(
-        providers.get(default_provider), dict
+    default_config = providers.get(default_provider) if isinstance(providers, dict) else None
+    models = default_config.get("models") if isinstance(default_config, dict) else None
+    if (
+        not isinstance(default_config, dict)
+        or not isinstance(models, list)
+        or not models
+        or not isinstance(models[0], str)
+        or not models[0].strip()
     ):
         raise AcceptanceError(
-            "web config did not prove the default provider is configured"
+            "web config did not prove the default provider has a configured model"
         )
     configured = sum(isinstance(value, dict) for value in providers.values())
-    return configured, default_provider
+    return configured, default_provider, models[0]
 
 
-def synthesize_canary(base_url: str) -> tuple[bytes, str]:
+def synthesize_canary(base_url: str, model: str) -> tuple[bytes, str]:
     body = json.dumps(
-        {"model": "codex-voice-canary", "input": CANARY_TEXT, "response_format": "wav"},
+        {"model": model, "input": CANARY_TEXT, "response_format": "wav"},
         separators=(",", ":"),
     ).encode()
     audio, headers = _read_response(
@@ -444,8 +450,8 @@ def accept_installed_service(
             "healthz did not report all required installed capabilities"
         )
     asset_count = accept_pwa(base_url)
-    provider_count, default_provider = accept_config(base_url)
-    audio, audio_content_type = synthesize_canary(base_url)
+    provider_count, default_provider, default_model = accept_config(base_url)
+    audio, audio_content_type = synthesize_canary(base_url, default_model)
     transcript_chars = transcribe_canary(base_url, audio)
     return {
         "schema_version": ACCEPTANCE_SCHEMA,
@@ -467,6 +473,7 @@ def accept_installed_service(
             "ready": True,
             "sha256": attestation["config_sha256"],
             "default_provider": default_provider,
+            "default_model": default_model,
             "configured_provider_count": provider_count,
             "provider_environment_ready": True,
         },

@@ -59,7 +59,7 @@ class FakeService(BaseHTTPRequestHandler):
     config: object = {
         "version": 2,
         "defaultProvider": "google",
-        "providers": {"google": {"voice": "fixture"}},
+        "providers": {"google": {"models": ["fixture-model"]}},
         "secretFixture": "must-never-appear",
     }
     icon_sources = True
@@ -126,7 +126,10 @@ class FakeService(BaseHTTPRequestHandler):
         body = self.rfile.read(length)
         if self.path == "/v1/audio/speech":
             request = json.loads(body)
-            if request["input"] != "The private canary number is seven.":
+            if (
+                request["input"] != "The private canary number is seven."
+                or request["model"] != "fixture-model"
+            ):
                 self.send_error(400)
                 return
             self.send_response(200)
@@ -166,7 +169,7 @@ class InstalledAcceptanceTests(unittest.TestCase):
         FakeService.config = {
             "version": 2,
             "defaultProvider": "google",
-            "providers": {"google": {"voice": "fixture"}},
+            "providers": {"google": {"models": ["fixture-model"]}},
             "secretFixture": "must-never-appear",
         }
         FakeService.icon_sources = True
@@ -232,6 +235,17 @@ class InstalledAcceptanceTests(unittest.TestCase):
             "providers": {},
         }
         with self.assertRaisesRegex(AcceptanceError, "default provider"):
+            accept_installed_service(
+                self.base_url, SOURCE_COMMIT, ARTIFACT_SHA256, self.attestation_path
+            )
+
+    def test_rejects_default_provider_without_model(self) -> None:
+        FakeService.config = {
+            "version": 2,
+            "defaultProvider": "google",
+            "providers": {"google": {"models": []}},
+        }
+        with self.assertRaisesRegex(AcceptanceError, "configured model"):
             accept_installed_service(
                 self.base_url, SOURCE_COMMIT, ARTIFACT_SHA256, self.attestation_path
             )
