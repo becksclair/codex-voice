@@ -157,11 +157,13 @@ test('empty paste is a no-op and clear cancels a pending job', async ({ page }) 
 
   await page.evaluate(() => navigator.clipboard.writeText(''));
   await page.locator('#paste').click();
-  await expect(page.locator('#text')).toHaveValue('keep this active draft');
+  await expect(page.locator('[data-testid="composer-source"]')).toHaveValue(
+    'keep this active draft',
+  );
   await expect(page.locator('#generate')).toBeEnabled();
 
   await page.locator('#clear').click();
-  await expect(page.locator('#text')).toHaveValue('');
+  await expect(page.locator('[data-testid="composer-source"]')).toHaveValue('');
   await expect(page.locator('#generate')).toBeEnabled();
   await expect.poll(() => harness.deleted).toContain('job-1');
   await expect(page.locator('#play')).toBeDisabled();
@@ -191,7 +193,9 @@ test('generate button cancels a pending job', async ({ page }) => {
 
   await expect.poll(() => harness.deleted).toContain('job-1');
   await expect(page.locator('#generate-label')).toHaveText('Generate');
-  await expect(page.locator('#text')).toHaveValue('stop this active draft');
+  await expect(page.locator('[data-testid="composer-source"]')).toHaveValue(
+    'stop this active draft',
+  );
 });
 
 test('two generate clicks in one event turn cancel without duplicate requests', async ({ page }) => {

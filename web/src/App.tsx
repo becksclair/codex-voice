@@ -8,7 +8,7 @@ import {
 } from "./lib/index.ts";
 import { GenerateBar } from "./components/GenerateBar.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
-import { TextEditor } from "./components/TextEditor.tsx";
+import { TextEditor, type TextMirrorElement } from "./components/TextEditor.tsx";
 import { WaveformPlayer } from "./components/WaveformPlayer.tsx";
 import { useGeneration } from "./hooks/useGeneration.ts";
 import { useLatest } from "./hooks/useLatest.ts";
@@ -44,7 +44,7 @@ function SettingsWindowApp() {
 }
 
 function MainWindowApp() {
-  const textRef = useRef<HTMLTextAreaElement>(null);
+  const textRef = useRef<TextMirrorElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sliderRef = useRef<HTMLDivElement>(null);
 
@@ -109,7 +109,7 @@ function MainWindowApp() {
 
   const charCount = Array.from(text).length;
 
-  const handleNativePaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+  const handleNativePaste = (event: ClipboardEvent<HTMLElement>): void => {
     if (settings.settings.generateOnPaste === false) return;
     const pasted = event.clipboardData?.getData("text") || "";
     if (!pasted.trim()) return;
@@ -164,7 +164,7 @@ function MainWindowApp() {
     localStorage.removeItem(TEXT_STORAGE_KEY);
     playback.api.resetAudio();
     errorApi.clear();
-    textRef.current?.focus();
+    (document.getElementById("text") as HTMLElement | null)?.focus();
   };
 
   return (

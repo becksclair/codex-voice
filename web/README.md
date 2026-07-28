@@ -19,6 +19,9 @@ Tauri desktop windows in app mode.
   and exhaustive-deps as errors) and **oxfmt** as the only formatter
   (`.oxfmtrc.json`).
 - **vitest** (happy-dom environment) for unit tests.
+- **Lexical 0.48** for the lazy-loaded rich Markdown composer, including
+  headings, lists, emphasis, links, inline/fenced code, and literal bracketed
+  emotion tags.
 
 ### React Compiler status
 
@@ -80,6 +83,13 @@ From the repo root, the mise tasks wrap these: `dev` (full stack), `web-dev`,
 
 ## Runtime behavior
 
+- The composer renders Markdown in place while retaining a canonical Markdown
+  source for persistence and the existing generation path. Literal emotion
+  directives such as `[brightly]` and `[screams loudly]` keep their square
+  brackets and use a thin inline border without a highlighted background.
+- The visible contenteditable retains the frozen `#text` selector. A clipped,
+  read-only source mirror exposes the generation-facing `.value` contract and
+  is not a second rendered document tree.
 - Opening settings keeps the editor-first layout, but the main surface becomes
   vertically scrollable on short/mobile viewports so every control remains
   reachable. The standalone settings window is independently scrollable.

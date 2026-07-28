@@ -30,7 +30,7 @@ test('typed text persists across a reload', async ({ page }) => {
     .toBe(sample);
 
   await page.reload();
-  await expect(page.locator('#text')).toHaveValue(sample);
+  await expect(page.locator('[data-testid="composer-source"]')).toHaveValue(sample);
 });
 
 test('paste button fills the textarea without stealing focus', async ({ page }) => {
@@ -60,7 +60,7 @@ test('paste button fills the textarea without stealing focus', async ({ page }) 
   await page.locator('#paste').click();
 
   // The paste flow populated the textarea...
-  await expect(page.locator('#text')).toHaveValue(pasted);
+  await expect(page.locator('[data-testid="composer-source"]')).toHaveValue(pasted);
 
   // ...but focus did NOT jump into the textarea (the regression being guarded).
   const textareaFocused = await page.evaluate(

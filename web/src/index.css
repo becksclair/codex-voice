@@ -43,6 +43,8 @@
   --overlay-color: rgba(255, 239, 248, 0.96);
   --composer-top-edge: rgba(255, 247, 250, 0.44);
   --composer-bottom-edge: rgba(0, 0, 0, 0.08);
+  --emotion-ink: #351126;
+  --emotion-border: rgba(255, 184, 221, 0.66);
   --utility-toolbar-bg: rgba(68, 46, 76, 0.72);
   --utility-toolbar-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 6px 14px rgba(238, 94, 165, 0.14),
@@ -155,6 +157,8 @@
   --overlay-color: rgba(58, 23, 53, 0.88);
   --composer-top-edge: rgba(255, 255, 255, 0.58);
   --composer-bottom-edge: rgba(126, 82, 116, 0.1);
+  --emotion-ink: #6b174f;
+  --emotion-border: rgba(183, 63, 139, 0.46);
   --utility-toolbar-bg: rgba(255, 249, 253, 0.78);
   --utility-toolbar-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.76), 0 6px 14px rgba(229, 55, 134, 0.14),
@@ -312,7 +316,8 @@ button svg {
   pointer-events: none;
 }
 
-#text {
+#text,
+.composer-content {
   font-family:
     Inter,
     system-ui,
@@ -320,6 +325,100 @@ button svg {
     "Segoe UI",
     sans-serif;
   font-weight: 500;
+}
+
+.composer-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  caret-color: var(--accent);
+}
+.composer-source-mirror {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.composer-content:empty::before {
+  content: attr(data-placeholder);
+  color: color-mix(in srgb, var(--text) 50%, transparent);
+  pointer-events: none;
+}
+.composer-paragraph {
+  margin: 0 0 0.72em;
+}
+.composer-heading {
+  margin: 0 0 0.5em;
+  color: var(--text);
+  font-weight: 700;
+  line-height: 1.2;
+}
+.composer-heading-h1 {
+  font-size: 1.45em;
+}
+.composer-heading-h2 {
+  font-size: 1.28em;
+}
+.composer-heading-h3 {
+  font-size: 1.14em;
+}
+.composer-quote {
+  margin: 0 0 0.72em;
+  border-inline-start: 3px solid var(--accent);
+  padding-inline-start: 0.8em;
+  color: var(--muted);
+}
+.composer-list {
+  margin: 0 0 0.72em;
+  padding-inline-start: 1.55em;
+}
+.composer-list-ul {
+  list-style: disc;
+}
+.composer-list-ol {
+  list-style: decimal;
+}
+.composer-list-item {
+  padding-inline-start: 0.18em;
+}
+.composer-bold {
+  font-weight: 700;
+}
+.composer-italic {
+  font-style: italic;
+}
+.composer-strikethrough {
+  text-decoration: line-through;
+}
+.composer-underline {
+  text-decoration: underline;
+}
+.composer-inline-code,
+.composer-code-block {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.composer-inline-code {
+  border-radius: 0.3em;
+  background: color-mix(in srgb, var(--panel-soft) 78%, transparent);
+  padding: 0.08em 0.28em;
+  color: var(--accent-strong);
+}
+.composer-code-block {
+  display: block;
+  margin: 0 0 0.72em;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.65em;
+  background: color-mix(in srgb, var(--panel-soft) 74%, transparent);
+  padding: 0.7em 0.8em;
+  font-size: 0.88em;
+  line-height: 1.5;
+}
+.composer-link {
+  color: var(--accent-strong);
+  text-decoration: underline;
 }
 
 /* Clear button hides via [hidden]; the id beats the inline-flex utility. */

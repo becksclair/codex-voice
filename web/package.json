@@ -13,6 +13,13 @@
     "fmt": "oxfmt ."
   },
   "dependencies": {
+    "@lexical/code": "0.48.0",
+    "@lexical/link": "0.48.0",
+    "@lexical/list": "0.48.0",
+    "@lexical/markdown": "0.48.0",
+    "@lexical/react": "0.48.0",
+    "@lexical/rich-text": "0.48.0",
+    "lexical": "0.48.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

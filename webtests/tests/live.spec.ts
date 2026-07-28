@@ -136,7 +136,7 @@ test.describe.serial('live TTS smoke', () => {
     // --- Stage 6: backend-first prep inserted several context-local cues ---
     expect(serverJobCreates).toBe(1);
     expect(browserProviderRequests).toEqual([]);
-    const preparedText = await page.locator('#text').inputValue();
+    const preparedText = await page.locator('[data-testid="composer-source"]').inputValue();
     expect(preparedText).not.toBe(LIVE_SMOKE_INPUT);
     expect(preparedText.match(/\[[^\]\n]{1,80}\]/g)?.length ?? 0).toBeGreaterThan(2);
 

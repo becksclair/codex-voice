@@ -1,5 +1,6 @@
 import { useEffect, type RefObject } from "react";
 import type { WaveformRef } from "./useWaveform.ts";
+import type { TextMirrorElement } from "../components/TextEditor.tsx";
 
 /**
  * Sync the `--visual-viewport-*` custom properties and the `keyboard-open`
@@ -10,7 +11,7 @@ import type { WaveformRef } from "./useWaveform.ts";
  * so it stays an effect; it schedules a waveform redraw on every layout change.
  */
 export function useVisualViewport(
-  textRef: RefObject<HTMLTextAreaElement | null>,
+  textRef: RefObject<TextMirrorElement | null>,
   waveformRef: WaveformRef,
 ): void {
   useEffect(() => {
@@ -42,7 +43,7 @@ export function useVisualViewport(
     on(window, "resize", update);
     on(window, "orientationchange", update);
 
-    const text = textRef.current;
+    const text = document.getElementById("text") ?? textRef.current;
     if (text) {
       on(text, "focus", update);
       on(text, "blur", () => setTimeout(update, 120));

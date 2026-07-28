@@ -70,6 +70,11 @@ const REQUIRED_IDS = [
   "waveform-slider",
 ];
 
+function sourceMirror(): HTMLTextAreaElement {
+  return (document.querySelector('[data-testid="composer-source"]') ??
+    document.getElementById("text")) as HTMLTextAreaElement;
+}
+
 test("renders every element ID in the frozen test contract", () => {
   render(<App />);
   for (const id of REQUIRED_IDS) {
@@ -79,7 +84,7 @@ test("renders every element ID in the frozen test contract", () => {
 
 test("character count updates as the user types", () => {
   render(<App />);
-  const text = document.getElementById("text") as HTMLTextAreaElement;
+  const text = sourceMirror();
   const count = document.getElementById("count") as HTMLElement;
   expect(count.textContent).toBe("0 chars");
 
@@ -88,6 +93,38 @@ test("character count updates as the user types", () => {
 
   fireEvent.input(text, { target: { value: "abcd" } });
   expect(count.textContent).toBe("4 chars");
+});
+
+test("renders Markdown while preserving the canonical source mirror", async () => {
+  const fixture = [
+    "# Heading",
+    "",
+    "[brightly] **Welcome** with `[not an emotion tag]`",
+    "",
+    "- [screams loudly] item",
+    "",
+    "```rust",
+    "fn main() {}",
+    "```",
+  ].join("\n");
+  localStorage.setItem("codex-voice.web.text", fixture);
+
+  render(<App />);
+
+  await waitFor(() => {
+    const editor = document.getElementById("text");
+    expect(editor?.querySelector("h1")?.textContent).toBe("Heading");
+    expect(editor?.querySelector("ul li")?.textContent).toContain("[screams loudly]");
+    expect(editor?.querySelector(".composer-code-block")?.textContent).toContain("fn main");
+    expect(editor?.querySelector('[style*="--emotion-tag"]')?.textContent).toBe("[brightly]");
+    expect(
+      editor?.querySelector(".composer-inline-code")?.closest('[style*="--emotion-tag"]'),
+    ).toBe(null);
+  });
+
+  expect(
+    (document.querySelector('[data-testid="composer-source"]') as HTMLTextAreaElement).value,
+  ).toBe(fixture);
 });
 
 test("settings toggle shows and hides the panel", () => {
@@ -137,7 +174,7 @@ test("generate with empty text surfaces the error banner", async () => {
 
 test("backend failure disables generation without calling a provider", async () => {
   render(<App />);
-  const text = document.getElementById("text") as HTMLTextAreaElement;
+  const text = sourceMirror();
   const generate = document.getElementById("generate") as HTMLButtonElement;
   fireEvent.input(text, { target: { value: "Backend-only speech" } });
 
@@ -165,16 +202,15 @@ test("generate button remains enabled and cancels an active generation", async (
     }),
   );
 
+  localStorage.setItem("codex-voice.web.text", "Cancel this generation");
   render(<App />);
   await waitFor(() =>
     expect(
       (document.getElementById("provider") as HTMLSelectElement).options.length,
     ).toBeGreaterThan(1),
   );
-  const text = document.getElementById("text") as HTMLTextAreaElement;
   const generate = document.getElementById("generate") as HTMLButtonElement;
   const label = document.getElementById("generate-label") as HTMLElement;
-  fireEvent.input(text, { target: { value: "Cancel this generation" } });
   fireEvent.click(generate);
 
   await waitFor(() => expect(generationSignal).toBeDefined());
@@ -202,15 +238,13 @@ test("provider default sends the configured Google voice instead of the default 
     }),
   );
 
+  localStorage.setItem("codex-voice.web.text", "Use the provider voice");
   render(<App />);
   const voice = document.getElementById("voice") as HTMLSelectElement;
   await waitFor(() =>
     expect(Array.from(voice.options).map((option) => option.value)).toContain("provider-default"),
   );
   fireEvent.change(voice, { target: { value: "provider-default" } });
-  fireEvent.input(document.getElementById("text") as HTMLTextAreaElement, {
-    target: { value: "Use the provider voice" },
-  });
   fireEvent.click(document.getElementById("generate") as HTMLButtonElement);
 
   await waitFor(() => expect(requestBody?.voice).toBe("Sulafat"));
@@ -259,7 +293,7 @@ test("#intent= intake consumes text, clears the hash, and fires generation once"
   window.history.pushState(null, "", `/web#intent=${intentId}`);
 
   render(<App />);
-  const text = document.getElementById("text") as HTMLTextAreaElement;
+  const text = sourceMirror();
 
   await waitFor(() => expect(text.value).toBe(sample));
   await waitFor(() => expect(location.hash).toBe(""));
@@ -301,7 +335,7 @@ test("a slower older desktop intent cannot replace the newest selection", async 
     }),
   );
   render(<App />);
-  const text = document.getElementById("text") as HTMLTextAreaElement;
+  const text = sourceMirror();
 
   window.history.pushState(null, "", `/web#intent=${firstId}`);
   window.dispatchEvent(new HashChangeEvent("hashchange"));
@@ -358,7 +392,7 @@ test("paste fills the textarea without moving focus", async () => {
   });
 
   render(<App />);
-  const text = document.getElementById("text") as HTMLTextAreaElement;
+  const text = sourceMirror();
   const paste = document.getElementById("paste") as HTMLButtonElement;
   const generateOnPaste = document.getElementById("generate-on-paste") as HTMLInputElement;
   const settingsToggle = document.getElementById("settings-toggle") as HTMLButtonElement;
@@ -387,7 +421,7 @@ test("an empty clipboard paste is a complete no-op", async () => {
 
   render(<App />);
   const paste = document.getElementById("paste") as HTMLButtonElement;
-  const text = document.getElementById("text") as HTMLTextAreaElement;
+  const text = sourceMirror();
   fireEvent.click(paste);
 
   await waitFor(() => expect(navigator.clipboard.readText).toHaveBeenCalledOnce());
@@ -427,11 +461,7 @@ test("desktop clipboard button falls back to the Tauri command", async () => {
   render(<App />);
   fireEvent.click(document.getElementById("paste") as HTMLButtonElement);
 
-  await waitFor(() =>
-    expect((document.getElementById("text") as HTMLTextAreaElement).value).toBe(
-      "desktop clipboard text",
-    ),
-  );
+  await waitFor(() => expect(sourceMirror().value).toBe("desktop clipboard text"));
   expect(readText).toHaveBeenCalledOnce();
 });
 
@@ -457,7 +487,7 @@ test("consecutive clipboard-button pastes generate the newly pasted text", async
     ).toBeGreaterThan(1),
   );
   const paste = document.getElementById("paste") as HTMLButtonElement;
-  const text = document.getElementById("text") as HTMLTextAreaElement;
+  const text = sourceMirror();
 
   for (const value of ["first pasted draft", "second pasted draft"]) {
     clipboard.readText.mockResolvedValueOnce(value);

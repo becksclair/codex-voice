@@ -14,13 +14,14 @@ import {
   streamGoogleDirect,
 } from "../lib/audio/direct-stream.ts";
 import type { SetText } from "./usePersistedText.ts";
+import type { TextMirrorElement } from "../components/TextEditor.tsx";
 import type { PlaybackApi } from "./usePlayback.ts";
 import type { WaveformRef } from "./useWaveform.ts";
 
 interface UseGenerationOptions {
   config: BrowserTtsConfig | null;
   settings: WebSettings;
-  textRef: RefObject<HTMLTextAreaElement | null>;
+  textRef: RefObject<TextMirrorElement | null>;
   setText: SetText;
   playback: PlaybackApi;
   waveformRef: WaveformRef;

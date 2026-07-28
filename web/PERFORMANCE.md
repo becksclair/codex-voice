@@ -6,7 +6,9 @@ assets and enforces the initial-load budget.
 
 ## Current shape
 
-- The browser loads one content-hashed application module and one stylesheet.
+- The browser loads the content-hashed application shell and stylesheet first.
+  The Lexical Markdown editor is a separate lazy chunk loaded after the shell
+  becomes interactive, so it does not count against the 80 kB initial budget.
 - Speech prep and fallback job admission run in Rust. ElevenLabs v3 MP3 streams
   directly to browser playback; Google Gemini 3.1 native PCM-over-SSE streams
   through a thin same-origin relay and is scheduled with Web Audio. Unsupported
@@ -35,9 +37,16 @@ modulepreloads, and fails above 80,000 bytes gzip. The budget protects the
 interactive shell from accidental dependency growth; provider functionality
 belongs on the backend rather than in a deferred browser bundle.
 
-## Runtime re-render sanity
+## Composer runtime
 
-The prompt textarea is controlled, so each keystroke re-renders `App`.
-`WaveformPlayer` and `SettingsPanel` receive no text-derived props, and the
-React Compiler handles memoization without hand-written `useMemo`,
-`useCallback`, or `memo`.
+The Lexical document owns the live editing state. Markdown export and the React
+draft update are coalesced across a 120 ms idle window, and localStorage writes
+are separately debounced by 350 ms. Generation and paste-boundary reads use the
+source mirror's synchronous `.value` getter, so they cannot observe a stale
+export. This keeps full-document Markdown serialization off the per-keystroke
+hot path while preserving the existing generation input contract.
+
+Large documents still incur a full Markdown export after an editing burst and
+when generation reads the source. The current acceptance target is a roughly
+100 kB Markdown document; larger documents remain supported but are not covered
+by a fixed responsiveness guarantee.

@@ -1,25 +1,26 @@
-import type { ClipboardEvent, RefObject } from "react";
+import { lazy, Suspense, type ClipboardEvent, type MutableRefObject } from "react";
+import type { TextMirrorElement } from "./LexicalTextEditor.tsx";
 
-/**
- * Shared utilities for the translucent "overlay" icon buttons that float over
- * the textarea. `icon-button` is retained only as a hook for the `svg` styling.
- */
-const OVERLAY_ICON_BUTTON =
-  "icon-button inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer touch-manipulation items-center justify-center rounded-full border border-[var(--overlay-border)] bg-[image:var(--overlay-bg)] p-0 text-[var(--overlay-color)] shadow-[var(--overlay-shadow)] [backdrop-filter:blur(10px)_saturate(1.2)] [-webkit-backdrop-filter:blur(10px)_saturate(1.2)] hover:border-[var(--overlay-hover-border)] hover:bg-[image:var(--overlay-hover-bg)] active:bg-[image:var(--overlay-active-bg)] active:shadow-[var(--overlay-active-shadow)]";
+export type { TextMirrorElement } from "./LexicalTextEditor.tsx";
 
 interface TextEditorProps {
-  textRef: RefObject<HTMLTextAreaElement | null>;
+  textRef: MutableRefObject<TextMirrorElement | null>;
   value: string;
   onChange: (value: string) => void;
-  onPaste: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
+  onPaste: (event: ClipboardEvent<HTMLElement>) => void;
   onPasteClick: () => void;
   onClearClick: () => void;
-  /** Whether the clear button is shown (text is non-empty). */
   clearVisible: boolean;
 }
 
-/** The prompt textarea (`#text`) with its paste (`#paste`) and clear (`#clear`) buttons. */
-export function TextEditor(props: TextEditorProps) {
+const OVERLAY_ICON_BUTTON =
+  "icon-button inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer touch-manipulation items-center justify-center rounded-full border border-[var(--overlay-border)] bg-[image:var(--overlay-bg)] p-0 text-[var(--overlay-color)] shadow-[var(--overlay-shadow)] [backdrop-filter:blur(10px)_saturate(1.2)] [-webkit-backdrop-filter:blur(10px)_saturate(1.2)] hover:border-[var(--overlay-hover-border)] hover:bg-[image:var(--overlay-hover-bg)] active:bg-[image:var(--overlay-active-bg)] active:shadow-[var(--overlay-active-shadow)]";
+
+const LexicalTextEditor = lazy(() =>
+  import("./LexicalTextEditor.tsx").then(({ TextEditor }) => ({ default: TextEditor })),
+);
+
+function TextEditorFallback(props: TextEditorProps) {
   return (
     <div className="text-shell relative flex flex-auto min-h-[260px] overflow-hidden rounded-[22px] border border-[var(--line)] bg-[var(--panel)] p-0 [--text-button-clearance:126px] [--text-edge-pad:8px] focus-within:border-[var(--accent)] focus-within:shadow-[0_0_0_3px_var(--focus-ring)]">
       <textarea
@@ -33,7 +34,15 @@ export function TextEditor(props: TextEditorProps) {
         spellCheck={true}
         placeholder="Type something to hear it spoken..."
         className="h-full min-h-0 w-full flex-auto resize-none rounded-none border-0 bg-transparent px-4 pt-[var(--text-edge-pad)] pb-[calc(var(--text-button-clearance)_+_var(--text-edge-pad))] text-[0.94rem] leading-[1.45] text-[var(--text)] outline-none [scroll-padding:var(--text-edge-pad)_16px_calc(var(--text-button-clearance)_+_var(--text-edge-pad))]"
-      ></textarea>
+      />
+      <FallbackControls {...props} />
+    </div>
+  );
+}
+
+function FallbackControls(props: TextEditorProps) {
+  return (
+    <>
       <button
         id="paste"
         type="button"
@@ -63,6 +72,14 @@ export function TextEditor(props: TextEditorProps) {
           <path d="M14 11v5" />
         </svg>
       </button>
-    </div>
+    </>
+  );
+}
+
+export function TextEditor(props: TextEditorProps) {
+  return (
+    <Suspense fallback={<TextEditorFallback {...props} />}>
+      <LexicalTextEditor {...props} />
+    </Suspense>
   );
 }
