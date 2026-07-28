@@ -356,18 +356,47 @@ After private Saga acceptance and separately authorized cutover, the target
 upstream is Saga loopback. Asgard is stopped only after canonical Tailnet
 consumer acceptance.
 
-### Saga Caddy snippet
+### Saga Caddy cutover seam
 
-`/opt/homelab/config/caddy/Caddyfile`:
+Central `configs/services.json` is the owner; the Saga Caddyfile is generated
+output and must not be edited independently. The current canonical site keeps a
+special direct ChatGPT route and sends only the final fallback to Asgard:
 
 ```caddy
 voice.heliasar.com {
     tls /etc/saga-tls/heliasar.com.crt /etc/saga-tls/heliasar.com.key
     encode zstd gzip
-
-    reverse_proxy 100.120.202.119:3845
+    @codex_responses {
+        method POST
+        path /_codex/responses
+    }
+    handle @codex_responses {
+        rewrite * /backend-api/codex/responses
+        reverse_proxy https://chatgpt.com {
+            header_up Host chatgpt.com
+        }
+    }
+    handle /_codex/* {
+        respond "Not Found" 404
+    }
+    handle {
+        reverse_proxy 100.120.202.119:3845 {
+            header_up X-Forwarded-Proto https
+            header_up Host {host}
+        }
+    }
 }
 ```
+
+After Phase 2 and separate cutover authorization, change the central runtime
+and site upstream from `100.120.202.119:3845`/Asgard to
+`127.0.0.1:3845`/Saga and regenerate. The generated change must affect only the
+final fallback; the `/_codex/responses` and rejecting `/_codex/*` handlers stay
+intact. Canonical acceptance from a Tailnet consumer must prove DNS/TLS,
+health/instance identity, PWA/assets/config, one bounded transcription, and one
+TTS synthesis before Asgard's `codex-voice-server.service` is stopped and
+disabled. Only after that acceptance may the old listener and ownership
+references be removed.
 
 ### asgard systemd unit
 

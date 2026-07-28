@@ -97,10 +97,17 @@ not transfer, rewrite, or print it.
    installs, activates, and accepts the exact artifact through the same
    installed-service contract. Terminal deploy/consumer failures email Bex;
    success sends no mail.
-3. **Canonical Tailnet-only cutover, separately authorized follow-up.** Change Saga
-   Caddy's upstream from Asgard to Saga loopback without widening exposure.
-   Accept DNS/TLS, PWA/assets, health, transcription, and TTS through the
-   canonical hostname from a Tailnet consumer.
+3. **Canonical Tailnet-only cutover, separately authorized follow-up.** DNS
+   already resolves `voice.heliasar.com` to Saga. In central service intent,
+   change only the Codex Voice runtime/site ownership from Asgard at
+   `100.120.202.119:3845` to Saga at `127.0.0.1:3845`, regenerate Saga Caddy,
+   and prove that the generated final `handle` now uses
+   `reverse_proxy 127.0.0.1:3845`. Preserve the existing direct
+   `POST /_codex/responses` ChatGPT handler, the rejecting `/_codex/*` handler,
+   TLS, headers, encoding, and Tailnet-only DNS/ingress ownership. From a
+   Tailnet consumer, accept canonical DNS/TLS, the same health instance and
+   capabilities, PWA/assets, config surface, one bounded transcription, and
+   one TTS synthesis.
 4. **Ownership closeout.** Only after canonical live acceptance, stop/disable
    Asgard and remove its ownership references.
 
@@ -238,5 +245,8 @@ transcript content.
 4. Add and prove successful-main publication plus serialized Saga deployment,
    the same installed acceptance, and terminal failure-only email.
 5. Stop with automatic delivery proven. In the separately authorized follow-up,
-   change the exact Caddy upstream, accept the canonical host, then stop/disable
-   Asgard only after acceptance.
+   change central Codex Voice ownership plus the generated Caddy fallback from
+   `100.120.202.119:3845` to `127.0.0.1:3845`, accept the canonical host, then
+   stop/disable Asgard `codex-voice-server.service` only after acceptance and
+   prove its old listener/process is absent before removing Asgard ownership
+   references.

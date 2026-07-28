@@ -52,7 +52,7 @@ export function GenerateBar(props: GenerateBarProps) {
             id="generate-label"
             className={
               props.generationActive
-                ? "flex flex-col text-center leading-[1.05] whitespace-nowrap max-[420px]:text-[0.82rem]"
+                ? "flex flex-col text-center leading-[1.05] whitespace-nowrap max-[420px]:text-[0.75rem]"
                 : ""
             }
           >

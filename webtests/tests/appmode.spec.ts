@@ -38,22 +38,40 @@ test('#intent= consumes selected text, clears the hash, and fires a generation a
   const { id } = (await created.json()) as { id: string };
 
   // A host with real `~/.config/codex-voice/config.json` provider configuration would
-  // otherwise let this test place a real (billed) synthesis call — this repo's
-  // paid live smoke is deliberately opt-in (see live.spec.ts). Block every
-  // request that isn't page-origin static content, INCLUDING same-origin
-  // `/web/speech-jobs` (the server relays that to a real provider too), so
-  // the generation attempt is observed but can never actually reach a
-  // provider, regardless of what TTS config this host happens to have.
+  // otherwise let this test place a real (billed) synthesis call. Install a
+  // deterministic local config response before navigating to the intent page, and
+  // abort the provider-bound speech-job request; this keeps the test independent of
+  // the host config while still allowing the local page assets to load normally.
   let generationAttempted = false;
-  await page.route('**/*', (route) => {
-    const url = new URL(route.request().url());
-    const isLocal = url.hostname === '127.0.0.1' || url.hostname === 'localhost';
-    if (isLocal && !url.pathname.startsWith('/web/speech-jobs')) return route.continue();
-    generationAttempted = true;
-    return route.abort();
+  await page.route('**/*', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const pathname = url.pathname;
+    if (pathname === '/web/config') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          version: 2,
+          defaultProvider: 'google',
+          providers: { google: { voice: 'Sulafat', models: ['test-model'] } },
+          personas: {},
+        }),
+      });
+    }
+    if (pathname.startsWith('/web/speech-jobs')) {
+      generationAttempted = true;
+      return route.abort();
+    }
+    if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') {
+      return route.abort();
+    }
+    return route.continue();
   });
 
-  await page.goto(`/web#intent=${id}`);
+  // Use a distinct URL so Playwright performs a document navigation after the
+  // route stubs are installed; a hash-only transition would retain the prior app.
+  await page.goto(`/web?intent-e2e=1#intent=${id}`);
 
   await expect(page.locator('[data-testid="composer-source"]')).toHaveValue(sample);
   await expect

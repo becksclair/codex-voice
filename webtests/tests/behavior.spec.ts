@@ -179,20 +179,45 @@ test('generate button cancels a pending job', async ({ page }) => {
   const harness = await installSpeechHarness(page, false);
   await page.setViewportSize({ width: 320, height: 568 });
   await page.goto('/web?pending-audio=1');
+  // Saga resolves system-ui to the wider DejaVu Sans. Exercise that installed
+  // service shape explicitly instead of relying on the developer host's font.
+  await page.locator('body').evaluate((body) => {
+    body.style.fontFamily = 'DejaVu Sans, sans-serif';
+  });
   await page.locator('#text').fill('stop this active draft');
   await page.locator('#generate').click();
   await expect.poll(() => harness.inputs.length).toBe(1);
   await expect(page.locator('#generate')).toHaveAttribute('aria-label', 'Stop generation');
   const buttonBox = await page.locator('#generate').boundingBox();
   const labelBox = await page.locator('#generate-label').boundingBox();
-  const spinnerBox = await page.locator('#generate .spinner').boundingBox();
   expect(buttonBox).not.toBeNull();
   expect(labelBox).not.toBeNull();
-  expect(spinnerBox).not.toBeNull();
   expect(Math.abs(labelBox!.x + labelBox!.width / 2 - (buttonBox!.x + buttonBox!.width / 2))).toBeLessThan(1);
   expect(labelBox!.x).toBeGreaterThanOrEqual(buttonBox!.x);
   expect(labelBox!.x + labelBox!.width).toBeLessThanOrEqual(buttonBox!.x + buttonBox!.width);
-  expect(spinnerBox!.x + spinnerBox!.width).toBeLessThanOrEqual(labelBox!.x);
+  const layoutGeometry = await page.locator('#generate').evaluate((button) => {
+    const label = button.querySelector<HTMLElement>('#generate-label');
+    const spinner = button.querySelector<HTMLElement>('.spinner');
+    if (!label || !spinner) throw new Error('generation label or spinner missing');
+
+    const offsetFromButton = (element: HTMLElement) => {
+      let left = 0;
+      let current: HTMLElement | null = element;
+      while (current && current !== button) {
+        left += current.offsetLeft;
+        current = current.offsetParent as HTMLElement | null;
+      }
+      return left;
+    };
+
+    const labelLeft = offsetFromButton(label);
+    const spinnerLeft = offsetFromButton(spinner);
+    return {
+      labelLeft,
+      spinnerRight: spinnerLeft + spinner.offsetWidth,
+    };
+  });
+  expect(layoutGeometry.spinnerRight).toBeLessThanOrEqual(layoutGeometry.labelLeft);
 
   await page.locator('#generate').click();
 
