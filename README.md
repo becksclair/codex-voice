@@ -250,11 +250,13 @@ should be omitted unless a deployment needs a nondefault override:
 Provider timeouts default to 30 seconds. Google defaults to 6,000 input
 characters and ElevenLabs v3 to 5,000; `maxInputChars` explicitly overrides
 the model default. When Google is configured, speech prep defaults to
-`google/gemini-3.5-flash`; deployments without Google fall back to direct
+`google/gemini-3.6-flash`; deployments without Google fall back to direct
 Codex prep with `gpt-5.6-luna` and no reasoning. Defaults are
 `performance-tags` mode, a 120-character threshold, 12,000-character input,
 6,000-character output, a 10-second attempt budget, and a 20-second total
 budget. Timeout or retryable failure falls back to local tags or original text.
+Google prep explicitly requests minimal thinking for both performance tagging
+and shortening, so Gemini 3.6 does not use its provider-default medium level.
 The default strategy and tag palette are the built-in performance-tag policy.
 The default Codex endpoint and auth path are
 `https://chatgpt.com/backend-api/codex` and `~/.codex/auth.json`; provider

@@ -64,9 +64,9 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
     enabled; Google 2.5 and other unsupported models retain backend jobs.
     Cached config, service-worker/offline execution, job recovery, and
     persistent audio remain removed.
-  - **Faster enrichment 2026-07-25:** Google deployments default speech prep to
-    Gemini 3.5 Flash with 10-second attempt and 20-second total bounds. Direct
-    Codex prep remains an explicit server-side option and the no-Google
+  - **Enrichment model update 2026-07-28:** Google deployments default speech
+    prep to Gemini 3.6 Flash with 10-second attempt and 20-second total bounds.
+    Direct Codex prep remains an explicit server-side option and the no-Google
     fallback.
 - [x] Add bounded speech-job admission and cancellation
   - At most three nonterminal jobs, one active synthesis, `429 Retry-After` on overload

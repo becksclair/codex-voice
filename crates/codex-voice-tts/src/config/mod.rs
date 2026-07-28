@@ -120,7 +120,7 @@ mod tests {
         let prep = resolved.speech_prep.unwrap();
         assert_eq!(prep.provider, SpeechPrepProviderKind::Google);
         assert_eq!(prep.mode, SpeechPrepMode::PerformanceTags);
-        assert_eq!(prep.model, "google/gemini-3.5-flash");
+        assert_eq!(prep.model, "google/gemini-3.6-flash");
         assert_eq!(prep.threshold, 120);
         assert_eq!(prep.max_input_length, 12000);
         assert_eq!(prep.max_length, 6000);

@@ -326,7 +326,7 @@ test.describe('configured emotion enrichment quality', () => {
     'set LIVE_ENRICHMENT_QUALITY=1 to run the paid prep-only quality gate',
   );
 
-  test('meets the configured Gemini 3.5 Flash richness and semantic-quality contract', async ({
+  test('meets the configured Gemini 3.6 Flash richness and semantic-quality contract', async ({
     request,
   }, testInfo) => {
     test.setTimeout(120_000);
@@ -338,7 +338,7 @@ test.describe('configured emotion enrichment quality', () => {
     const config = (await configResponse.json()) as {
       speechPrep?: { model?: string; reasoningEffort?: string };
     };
-    expect(config.speechPrep?.model).toBe('google/gemini-3.5-flash');
+    expect(config.speechPrep?.model).toBe('google/gemini-3.6-flash');
     expect(config.speechPrep?.reasoningEffort).toBeUndefined();
 
     const startedAt = performance.now();

@@ -438,6 +438,7 @@ impl SpeechPrepClient {
     ) -> SpeechResult<String> {
         let model = normalize_google_model_name(model);
         let url = format!("{}/models/{}:generateContent", self.config.base_url, model);
+        let body = google_request_body_for_model(model, body);
         let api_key =
             self.config.api_key.as_deref().ok_or_else(|| {
                 SpeechError::Config("Google speech prep is missing API key".into())
@@ -449,7 +450,7 @@ impl SpeechPrepClient {
                 .timeout(timeout)
                 .header("x-goog-api-key", api_key)
                 .header("Content-Type", "application/json")
-                .json(body)
+                .json(&body)
                 .send()
                 .await
                 .map_err(|e| SpeechError::Request(format!("speech prep request failed: {e}")))?;
@@ -478,6 +479,23 @@ impl SpeechPrepClient {
             ))
         })?
     }
+}
+
+fn google_request_body_for_model(model: &str, body: &serde_json::Value) -> serde_json::Value {
+    let mut body = body.clone();
+    if normalize_google_model_name(model) == "gemini-3.6-flash" {
+        if let Some(config) = body
+            .get_mut("generationConfig")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            config.remove("temperature");
+            config.insert(
+                "thinkingConfig".to_string(),
+                serde_json::json!({ "thinkingLevel": "MINIMAL" }),
+            );
+        }
+    }
+    body
 }
 
 fn google_model_supports_style_instruction(model_id: &str) -> bool {
@@ -1184,6 +1202,63 @@ mod tests {
             normalize_google_model_name("gemini-3.5-flash"),
             "gemini-3.5-flash"
         );
+    }
+
+    #[test]
+    fn gemini_36_performance_request_omits_temperature_and_keeps_minimal_thinking() {
+        let body = serde_json::json!({
+            "contents": [{ "parts": [{ "text": "tag this" }] }],
+            "generationConfig": {
+                "temperature": 0.45,
+                "maxOutputTokens": 384,
+                "thinkingConfig": { "thinkingLevel": "MINIMAL" }
+            }
+        });
+
+        let request = google_request_body_for_model("google/gemini-3.6-flash", &body);
+
+        assert!(request["generationConfig"].get("temperature").is_none());
+        assert_eq!(request["generationConfig"]["maxOutputTokens"], 384);
+        assert_eq!(request["contents"], body["contents"]);
+        assert_eq!(
+            request["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "MINIMAL"
+        );
+    }
+
+    #[test]
+    fn gemini_36_shorten_request_adds_minimal_thinking_and_preserves_shape() {
+        let body = serde_json::json!({
+            "contents": [{ "parts": [{ "text": "shorten this" }] }],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 4096
+            }
+        });
+
+        let request = google_request_body_for_model("google/gemini-3.6-flash", &body);
+
+        assert!(request["generationConfig"].get("temperature").is_none());
+        assert_eq!(request["generationConfig"]["maxOutputTokens"], 4096);
+        assert_eq!(request["contents"], body["contents"]);
+        assert_eq!(
+            request["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "MINIMAL"
+        );
+    }
+
+    #[test]
+    fn earlier_gemini_request_retains_temperature() {
+        let body = serde_json::json!({
+            "generationConfig": {
+                "temperature": 0.45,
+                "maxOutputTokens": 384
+            }
+        });
+
+        let request = google_request_body_for_model("google/gemini-3.5-flash", &body);
+
+        assert_eq!(request["generationConfig"]["temperature"], 0.45);
     }
 
     #[test]

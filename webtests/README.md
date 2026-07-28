@@ -93,7 +93,7 @@ prep-only endpoint and never invokes synthesis or generates audio:
 mise run test-web-enrichment
 ```
 
-The quality gate requires Gemini 3.5 Flash, exact wording
+The quality gate requires Gemini 3.6 Flash, exact wording
 preservation, 8–16 tags per 1,000 source characters, at least 75% unique tag
 vocabulary, no single tag occupying more than 25% of insertions, at least two
 tags in every third, a maximum 400-character cue gap (the fixture's final
