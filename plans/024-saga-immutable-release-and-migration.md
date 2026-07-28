@@ -1,6 +1,6 @@
 # Saga immutable release and migration
 
-Status: **IN PROGRESS — producer artifact contract is on `main`; installed-service acceptance is implemented locally; nothing published or deployed in this slice.**
+Status: **IN PROGRESS — the real Saga runner passes through deterministic artifact validation; the repository package secret is now provisioned and publication/read-back is pending a fresh `main` run. Nothing is deployed.**
 
 This plan separates confirmed current state from the approved target. It is the
 release/cutover contract for moving Codex Voice from Asgard to Saga.
@@ -15,6 +15,9 @@ release/cutover contract for moving Codex Voice from Asgard to Saga.
 - Saga uses a central Ansible, fixed-root, selected-service deployment lane.
 - The active Gitea producer runner label is `saga-build`; no active runner
   currently advertises the repository's previous `ubuntu-latest` label.
+- The Codex Voice repository now owns a least-privilege `PACKAGE_TOKEN` Actions
+  secret for immutable Gitea package publication/read-back; its value remains
+  outside the repository and workflow output.
 - Saga has normal Codex auth already. This migration does not copy auth or log in.
 - The one active Codex Voice config source/destination must still be resolved
   from the effective Asgard and Saga service definitions.
