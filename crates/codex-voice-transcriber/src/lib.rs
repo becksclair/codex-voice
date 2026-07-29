@@ -170,6 +170,20 @@ pub fn transcription_backend_from_local(
     }
 }
 
+/// Builds a local-only backend for modes where falling back to Codex would
+/// violate the selected service origin contract.
+pub fn transcription_backend_from_local_required(
+    local: client::LocalTranscriberClient,
+) -> ResolvedTranscriptionBackend {
+    ResolvedTranscriptionBackend {
+        label: "local-service-required",
+        client: RuntimeTranscriptionClient::Local {
+            client: local,
+            fallback: None,
+        },
+    }
+}
+
 pub async fn probe_limits(config: ProbeLimitsConfig) -> Result<(), TranscriberError> {
     let source_size = tokio::fs::metadata(&config.file)
         .await
@@ -296,5 +310,21 @@ mod tests {
             error.to_string(),
             "failed to split audio for limit probe: ffmpeg failed with status 1"
         );
+    }
+
+    #[test]
+    fn required_service_backend_has_no_direct_codex_fallback() {
+        let local = client::LocalTranscriberClient::from_service(
+            "https://voice.heliasar.com/v1".to_string(),
+            String::new(),
+            Duration::from_secs(1),
+        )
+        .expect("client builds");
+        let resolved = transcription_backend_from_local_required(local);
+        assert_eq!(resolved.label, "local-service-required");
+        assert!(matches!(
+            resolved.client,
+            RuntimeTranscriptionClient::Local { fallback: None, .. }
+        ));
     }
 }

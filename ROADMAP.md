@@ -73,6 +73,7 @@ OpenAI-compatible localhost service so tools like `summarize` can reuse Codex Vo
   - `DELETE /web/speech-jobs/{id}` is idempotent and aborts active work
 - [x] Add short-lived one-shot desktop intents for selected-text handoff
 - [x] Let `run` own an embedded service at the stable `http://localhost:3846` desktop origin when no external service is healthy
+- [x] Add an exact `https://voice.heliasar.com` remote-required desktop mode with no embedded or direct-Codex fallback
   - Embedded instances never publish or delete the standalone discovery file
 
 **Validation:** `cargo test --workspace`, `cargo run -p codex-voice-app --bin codex-voice -- doctor tts --text "hello"`, `cargo run -p codex-voice-app --bin codex-voice -- server`

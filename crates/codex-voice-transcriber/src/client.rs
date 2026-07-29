@@ -60,12 +60,15 @@ impl LocalTranscriberClient {
         probe_timeout: Duration,
         runtime_timeout: Duration,
     ) -> Option<Self> {
-        let client = Self::from_service(
-            format!("{}/v1", root_url.trim_end_matches('/')),
-            String::new(),
-            runtime_timeout,
-        )
-        .ok()?;
+        let client = Self {
+            base_url: format!("{}/v1", root_url.trim_end_matches('/')),
+            token: String::new(),
+            http: reqwest::Client::builder()
+                .timeout(runtime_timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .ok()?,
+        };
         client
             .health_responding(probe_timeout)
             .await
@@ -207,7 +210,7 @@ impl LocalTranscriberClient {
             .timeout(probe_timeout)
             .send()
             .await
-            .is_ok()
+            .is_ok_and(|response| response.status().is_success())
     }
 
     pub async fn create_desktop_intent(&self, text: &str) -> Result<String, String> {
@@ -450,6 +453,75 @@ mod tests {
 
         server.abort();
         assert!(discovered.is_some());
+    }
+
+    #[tokio::test]
+    async fn desktop_origin_rejects_health_redirect_without_contacting_target() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let target_hits = Arc::new(AtomicUsize::new(0));
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect target");
+        let target_addr = target_listener.local_addr().unwrap();
+        let target_hits_for_server = target_hits.clone();
+        let target_server = tokio::spawn(async move {
+            axum::serve(
+                target_listener,
+                Router::new().route(
+                    "/healthz",
+                    get(move || {
+                        let target_hits = target_hits_for_server.clone();
+                        async move {
+                            target_hits.fetch_add(1, Ordering::SeqCst);
+                            StatusCode::OK
+                        }
+                    }),
+                ),
+            )
+            .await
+            .expect("serve redirect target");
+        });
+
+        let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind origin server");
+        let origin_addr = origin_listener.local_addr().unwrap();
+        let location = format!("http://{target_addr}/healthz");
+        let origin_server = tokio::spawn(async move {
+            axum::serve(
+                origin_listener,
+                Router::new().route(
+                    "/healthz",
+                    get(move || {
+                        let location = location.clone();
+                        async move {
+                            (
+                                StatusCode::TEMPORARY_REDIRECT,
+                                [(header::LOCATION, location)],
+                            )
+                        }
+                    }),
+                ),
+            )
+            .await
+            .expect("serve origin");
+        });
+
+        let client = LocalTranscriberClient::connect_desktop_origin(
+            &format!("http://{origin_addr}"),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await;
+
+        origin_server.abort();
+        target_server.abort();
+        assert!(client.is_none());
+        assert_eq!(target_hits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

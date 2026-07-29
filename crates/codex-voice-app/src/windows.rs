@@ -5,12 +5,21 @@
 use std::sync::Arc;
 
 use codex_voice_transcriber::client::LocalTranscriberClient;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{webview::NewWindowResponse, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
-use crate::{tray::AppWindows, DESKTOP_ORIGIN};
+use crate::tray::AppWindows;
 
 const MAIN_LABEL: &str = "main";
 const SETTINGS_LABEL: &str = "settings";
+
+fn is_trusted_window_url(url: &Url) -> bool {
+    matches!(
+        (url.scheme(), url.host_str(), url.port_or_known_default()),
+        ("https", Some("voice.heliasar.com"), Some(443))
+            | ("http", Some("localhost"), Some(3846))
+            | ("http", Some("127.0.0.1"), Some(3846))
+    )
+}
 
 /// Opens/focuses the app's webview windows on the Tauri main thread. All
 /// Window creation, focus, and navigation calls are dispatched via
@@ -24,7 +33,7 @@ pub struct DesktopWindows {
 
 impl DesktopWindows {
     pub fn new(app: tauri::AppHandle, client: LocalTranscriberClient) -> Self {
-        let base_url = DESKTOP_ORIGIN.into();
+        let base_url: Arc<str> = client.web_root_url().into();
         Self {
             app,
             base_url,
@@ -68,7 +77,9 @@ impl DesktopWindows {
                     let builder =
                         WebviewWindowBuilder::new(&handle, label, WebviewUrl::External(parsed))
                             .title(title)
-                            .inner_size(size.0, size.1);
+                            .inner_size(size.0, size.1)
+                            .on_navigation(is_trusted_window_url)
+                            .on_new_window(|_, _| NewWindowResponse::Deny);
                     builder
                         .build()
                         .map_err(|error| format!("failed to build {label} window: {error}"))?;
@@ -145,5 +156,30 @@ impl AppWindows for UnavailableWindows {
 
     fn open_settings(&self) {
         tracing::warn!("speech service unavailable; cannot open the settings window");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_trusted_window_url;
+
+    #[test]
+    fn navigation_is_limited_to_supported_desktop_origins() {
+        for value in [
+            "https://voice.heliasar.com/web?app=1",
+            "http://localhost:3846/web?app=1",
+            "http://127.0.0.1:3846/web?app=1#intent=abc",
+        ] {
+            assert!(is_trusted_window_url(&value.parse().unwrap()), "{value}");
+        }
+        for value in [
+            "http://voice.heliasar.com/web",
+            "https://voice.heliasar.com:444/web",
+            "https://voice.heliasar.com.evil.test/web",
+            "https://example.com/",
+            "file:///tmp/index.html",
+        ] {
+            assert!(!is_trusted_window_url(&value.parse().unwrap()), "{value}");
+        }
     }
 }

@@ -67,6 +67,42 @@ async fn cors_headers_are_present_on_unauthorized_response() {
 }
 
 #[tokio::test]
+async fn origin_guard_allows_canonical_and_native_requests_but_rejects_foreign_origins() {
+    let mut state = test_state(1024);
+    state.auth.no_auth = true;
+    let app = service_router(state);
+
+    for origin in [None, Some("https://voice.heliasar.com")] {
+        let mut request = axum::http::Request::builder().uri("/healthz");
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "origin={origin:?}");
+    }
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/healthz")
+                .header(header::ORIGIN, "https://attacker.example")
+                .body(body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(response
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .is_none());
+}
+
+#[tokio::test]
 async fn web_app_sets_no_cache_and_html_content_type() {
     let app = service_router(test_state_with_speech(1024));
     let response = app

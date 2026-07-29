@@ -323,6 +323,13 @@ mise run setup
 systemctl --user status codex-voice.service codex-voice-server.service
 ```
 
+By default, `codex-voice run` keeps its stable embedded desktop origin at
+`http://localhost:3846`. Set
+`CODEX_VOICE_DESKTOP_ORIGIN=https://voice.heliasar.com` to select the canonical
+Saga service instead. This remote-required mode uses that one origin for the
+Tauri webviews and native service calls. If Saga is unavailable it fails
+closed: it does not start the embedded service or fall back to direct Codex.
+
 ## Homelab Reverse-Proxy Setup and Saga Migration
 
 Saga proxies `voice.heliasar.com` across the Tailscale network to the service
@@ -330,11 +337,12 @@ host. This lets any Tailnet client reach the PWA and OpenAI-compatible endpoints
 without knowing the backend machine's Tailscale IP. The legacy
 `codex-voice.heliasar.com` hostname redirects to `voice.heliasar.com`.
 
-Asgard is the current backend owner. The approved migration first accepts Codex
-Voice privately on Saga at `127.0.0.1:3845`, reached only through an SSH local
-forward from another Tailnet client. No Caddy/domain or Asgard ownership change
-occurs before that canary passes. Application-layer Voice remains no-auth, so
-the Saga listener stays loopback-only and canonical ingress stays Tailnet-only.
+Asgard is the current canonical backend owner. The migration first accepted
+Codex Voice privately on Saga at `127.0.0.1:3845`. The selected desktop target
+is now the direct remote origin `https://voice.heliasar.com`; an SSH localhost
+forward is not part of the tray architecture. Application-layer Voice remains
+no-auth, so the Saga listener stays loopback-only and canonical ingress stays
+Tailnet-only.
 Saga retains and validates its existing Codex auth; the one active Codex Voice
 XDG config file is resolved from the effective services and migrated separately
 as protected service state.
@@ -352,9 +360,10 @@ Client ──https──▶ Saga (Caddy 80/443)
   Tailscale address; wildcard binds are rejected by the CLI.
 - Caddy handles TLS termination with the wildcard `heliasar.com` certificate.
 
-After private Saga acceptance and separately authorized cutover, the target
-upstream is Saga loopback. Asgard is stopped only after canonical Tailnet
-consumer acceptance.
+After private Saga acceptance and separately authorized cutover, a
+host-networked, Tailnet-bound Saga proxy connects Caddy to the loopback backend.
+Asgard is stopped only after canonical Tailnet consumer and remote-tray
+acceptance.
 
 ### Saga Caddy cutover seam
 

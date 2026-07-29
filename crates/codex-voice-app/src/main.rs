@@ -134,10 +134,14 @@ struct SpawnedPlatformEngine {
 
 async fn spawn_platform_engine(
     service_client: Option<LocalTranscriberClient>,
+    remote_required: bool,
 ) -> Result<SpawnedPlatformEngine> {
     let injector = Arc::new(PlatformTextInjector::new());
     let audio = Arc::new(CpalWavRecorder::new());
     let resolved = match service_client {
+        Some(client) if remote_required => {
+            codex_voice_transcriber::transcription_backend_from_local_required(client)
+        }
         Some(client) => codex_voice_transcriber::transcription_backend_from_local(client),
         None => codex_voice_transcriber::resolve_transcription_backend().await?,
     };
@@ -195,6 +199,26 @@ struct ResolvedServer {
 }
 
 pub(crate) const DESKTOP_ORIGIN: &str = "http://localhost:3846";
+pub(crate) const REMOTE_DESKTOP_ORIGIN: &str = "https://voice.heliasar.com";
+
+fn configured_remote_origin() -> anyhow::Result<Option<String>> {
+    let Some(raw) = std::env::var_os("CODEX_VOICE_DESKTOP_ORIGIN") else {
+        return Ok(None);
+    };
+    parse_remote_origin(
+        &raw.into_string()
+            .map_err(|_| anyhow::anyhow!("CODEX_VOICE_DESKTOP_ORIGIN must be valid UTF-8"))?,
+    )
+    .map(Some)
+}
+
+fn parse_remote_origin(raw: &str) -> anyhow::Result<String> {
+    let valid = matches!(raw, REMOTE_DESKTOP_ORIGIN | "https://voice.heliasar.com/");
+    if !valid {
+        anyhow::bail!("CODEX_VOICE_DESKTOP_ORIGIN must be https://voice.heliasar.com");
+    }
+    Ok(REMOTE_DESKTOP_ORIGIN.to_string())
+}
 
 fn is_canonical_desktop_origin(root: &str) -> bool {
     root == DESKTOP_ORIGIN || root == "http://127.0.0.1:3846"
@@ -228,10 +252,30 @@ impl ResolvedServer {
     }
 }
 
-async fn resolve_server() -> Result<ResolvedServer> {
+async fn resolve_server(remote_origin: Option<&str>) -> Result<ResolvedServer> {
     const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
     const RUNTIME_TIMEOUT: Duration = Duration::from_secs(60);
     const DESKTOP_READY_WAIT: Duration = Duration::from_secs(10);
+    if let Some(origin) = remote_origin {
+        let client =
+            LocalTranscriberClient::connect_desktop_origin(origin, PROBE_TIMEOUT, RUNTIME_TIMEOUT)
+                .await
+                .ok_or_else(|| {
+                    anyhow::anyhow!("configured remote desktop service is unavailable")
+                })?;
+        if !client
+            .wait_for_desktop_ready(PROBE_TIMEOUT, DESKTOP_READY_WAIT)
+            .await
+        {
+            anyhow::bail!(
+                "configured remote desktop service did not become ready within 10 seconds"
+            );
+        }
+        return Ok(ResolvedServer {
+            client,
+            embedded: None,
+        });
+    }
     if let Some(client) = LocalTranscriberClient::discover(PROBE_TIMEOUT, RUNTIME_TIMEOUT).await {
         let root = client.web_root_url();
         if is_canonical_desktop_origin(&root) {
@@ -326,11 +370,16 @@ async fn shutdown_signal() {
 /// the backing HTTP service, opens the tray (degrading to no tray on
 /// failure), spawns the dictation engine, and drives `run_app` until quit.
 async fn run_background(app_handle: tauri::AppHandle) -> Result<()> {
-    // Server resolution failing must not take dictation down with it: fall
-    // back to a window-less run where the tray still works and the speak
-    // hotkey reports status instead of opening a window.
-    let server = match resolve_server().await {
+    let remote_origin = configured_remote_origin()?;
+    let remote_required = remote_origin.is_some();
+    // Local-mode resolution failure keeps dictation available without
+    // windows. Remote-required mode fails closed instead of changing service
+    // ownership or selecting the direct Codex backend.
+    let server = match resolve_server(remote_origin.as_deref()).await {
         Ok(server) => Some(server),
+        Err(error) if remote_required => {
+            return Err(error).context("configured remote desktop service is unavailable")
+        }
         Err(error) => {
             tracing::error!(%error, "speech service unavailable; running without windows");
             None
@@ -361,7 +410,11 @@ async fn run_background(app_handle: tauri::AppHandle) -> Result<()> {
         reader,
         hotkey_service: _hotkey_service,
         control,
-    } = spawn_platform_engine(server.as_ref().map(|server| server.client.clone())).await?;
+    } = spawn_platform_engine(
+        server.as_ref().map(|server| server.client.clone()),
+        remote_required,
+    )
+    .await?;
 
     let app = run_app(PlatformParts {
         hotkey_rx,
@@ -395,12 +448,16 @@ fn run_headless() -> Result<()> {
         .build()
         .context("failed to build headless tokio runtime")?;
     runtime.block_on(async move {
-        // Reuse or self-host the local speech service just as the windowed path
-        // does, so headless dictation uses the local transcriber instead of
-        // hard-requiring Codex auth. On failure the engine's own backend
-        // resolution falls back to direct Codex.
-        let server = match resolve_server().await {
+        let remote_origin = configured_remote_origin()?;
+        let remote_required = remote_origin.is_some();
+        // Local mode may still reuse, self-host, or fall back to direct Codex.
+        // Remote-required mode preserves the selected remote owner and fails
+        // closed when it cannot be reached.
+        let server = match resolve_server(remote_origin.as_deref()).await {
             Ok(server) => Some(server),
+            Err(error) if remote_required => {
+                return Err(error).context("configured remote desktop service is unavailable")
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -416,7 +473,7 @@ fn run_headless() -> Result<()> {
             reader,
             hotkey_service: _hotkey_service,
             control,
-        } = spawn_platform_engine(server.as_ref().map(|server| server.client.clone())).await?;
+        } = spawn_platform_engine(server.as_ref().map(|server| server.client.clone()), remote_required).await?;
         let app = run_app(PlatformParts {
             hotkey_rx,
             app_rx,
@@ -520,6 +577,29 @@ fn run() -> Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_remote_origin;
+
+    #[test]
+    fn remote_origin_accepts_only_the_canonical_origin() {
+        for value in ["https://voice.heliasar.com", "https://voice.heliasar.com/"] {
+            assert!(parse_remote_origin(value).is_ok(), "{value}");
+        }
+        for value in [
+            "http://voice.heliasar.com",
+            "https://voice.heliasar.com.evil.test",
+            "https://user@voice.heliasar.com",
+            "https://voice.heliasar.com:443",
+            "https://voice.heliasar.com/web",
+            "https://voice.heliasar.com/?view=settings",
+            "https://voice.heliasar.com/#intent=x",
+        ] {
+            assert!(parse_remote_origin(value).is_err(), "{value}");
+        }
+    }
 }
 
 #[cfg(test)]

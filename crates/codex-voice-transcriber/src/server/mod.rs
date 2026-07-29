@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use axum::{
+    body::Body,
     extract::{DefaultBodyLimit, State},
     http::{header, HeaderMap, Method, StatusCode},
+    middleware::{from_fn, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -255,7 +257,13 @@ fn service_router(state: ServiceState) -> Router {
     use tower_http::cors::{AllowOrigin, CorsLayer};
 
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::mirror_request())
+        .allow_origin(AllowOrigin::list([
+            "https://voice.heliasar.com".parse().expect("valid origin"),
+            "http://localhost:5173".parse().expect("valid origin"),
+            "http://localhost:3846".parse().expect("valid origin"),
+            "http://127.0.0.1:5173".parse().expect("valid origin"),
+            "http://127.0.0.1:3846".parse().expect("valid origin"),
+        ]))
         .allow_methods([Method::POST, Method::GET, Method::DELETE])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
 
@@ -297,8 +305,31 @@ fn service_router(state: ServiceState) -> Router {
         .route("/audio/speech", speech_routes.clone())
         .route("/v1/audio/speech", speech_routes)
         .layer(cors)
+        .layer(from_fn(validate_origin))
         .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state)
+}
+
+async fn validate_origin(request: axum::http::Request<Body>, next: Next) -> Response {
+    let allowed = match request.headers().get(header::ORIGIN) {
+        None => true,
+        Some(value) => value.to_str().map(is_allowed_origin).unwrap_or(false),
+    };
+    if !allowed {
+        return (StatusCode::FORBIDDEN, "untrusted origin").into_response();
+    }
+    next.run(request).await
+}
+
+fn is_allowed_origin(origin: &str) -> bool {
+    matches!(
+        origin,
+        "https://voice.heliasar.com"
+            | "http://localhost:5173"
+            | "http://localhost:3846"
+            | "http://127.0.0.1:5173"
+            | "http://127.0.0.1:3846"
+    )
 }
 
 async fn health(
