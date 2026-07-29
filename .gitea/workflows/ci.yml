@@ -4,6 +4,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     runs-on: saga-build
@@ -139,3 +143,73 @@ jobs:
           done
 
           (cd "$readback" && sha256sum --check "${archive}.sha256")
+
+  deploy-saga-backend:
+    needs: publish
+    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    runs-on: asgard-build-1
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      SOURCE_COMMIT: ${{ gitea.sha }}
+      PACKAGE_OWNER: ${{ gitea.repository_owner }}
+      GITEA_SERVER_URL: ${{ gitea.server_url }}
+      GITEA_REPOSITORY: ${{ github.repository }}
+      GITEA_RUN_ID: ${{ github.run_id }}
+      CENTRAL_HOMELAB_REPOSITORY: /home/bex/personal/homelab
+      SAGA_HOMELAB_REPOSITORY: /home/bex/personal/saga-homelab
+      CODEX_VOICE_CONFIG_SOURCE: /home/bex/.config/codex-voice/config.json
+      CODEX_VOICE_PROVIDER_ENV_SOURCE: /home/bex/.config/codex-voice/saga-provider.env
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+      - name: Deploy and accept the exact Saga backend artifact
+        run: |
+          set -euo pipefail
+          stage_file="$RUNNER_TEMP/codex-voice-saga-deploy-stage"
+          archive_sha_file="$RUNNER_TEMP/codex-voice-saga-archive-sha256"
+          lock_file="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/codex-voice-saga-deploy.lock"
+          install -m 0600 /dev/null "$stage_file"
+          printf 'workflow-setup\n' > "$stage_file"
+          install -m 0600 /dev/null "$archive_sha_file"
+          flock --exclusive --wait 2700 "$lock_file" \
+            python3 scripts/deploy_saga_backend.py \
+              --source-commit "$SOURCE_COMMIT" \
+              --gitea-server-url "$GITEA_SERVER_URL" \
+              --package-owner "$PACKAGE_OWNER" \
+              --stage-file "$stage_file" \
+              --archive-sha-file "$archive_sha_file" \
+              --producer-root "$GITHUB_WORKSPACE" \
+              --central-repository "$CENTRAL_HOMELAB_REPOSITORY" \
+              --saga-repository "$SAGA_HOMELAB_REPOSITORY" \
+              --config-source "$CODEX_VOICE_CONFIG_SOURCE" \
+              --provider-env-source "$CODEX_VOICE_PROVIDER_ENV_SOURCE" \
+              --ssh-target saga
+      - name: Email Bex after a terminal deployment failure
+        if: failure()
+        env:
+          CODEX_VOICE_FAILURE_EMAIL_FROM: ${{ secrets.CODEX_VOICE_FAILURE_EMAIL_FROM }}
+          CODEX_VOICE_FAILURE_EMAIL_TO: ${{ secrets.CODEX_VOICE_FAILURE_EMAIL_TO }}
+          CODEX_VOICE_FAILURE_SMTP_HOST: ${{ secrets.CODEX_VOICE_FAILURE_SMTP_HOST }}
+          CODEX_VOICE_FAILURE_SMTP_PORT: ${{ secrets.CODEX_VOICE_FAILURE_SMTP_PORT }}
+          CODEX_VOICE_FAILURE_SMTP_SECURITY: ${{ secrets.CODEX_VOICE_FAILURE_SMTP_SECURITY }}
+          CODEX_VOICE_FAILURE_SMTP_USERNAME: ${{ secrets.CODEX_VOICE_FAILURE_SMTP_USERNAME }}
+          CODEX_VOICE_FAILURE_SMTP_PASSWORD: ${{ secrets.CODEX_VOICE_FAILURE_SMTP_PASSWORD }}
+        run: |
+          set -u
+          stage_file="$RUNNER_TEMP/codex-voice-saga-deploy-stage"
+          archive_sha_file="$RUNNER_TEMP/codex-voice-saga-archive-sha256"
+          archive_sha256=""
+          if [[ -r "$archive_sha_file" ]]; then
+            candidate=$(tr -d '\r\n' < "$archive_sha_file")
+            if [[ "$candidate" =~ ^[0-9a-f]{64}$ ]]; then
+              archive_sha256="$candidate"
+            fi
+          fi
+          python3 scripts/notify_saga_deploy_failure.py \
+            --source-commit "$SOURCE_COMMIT" \
+            --archive-sha256 "$archive_sha256" \
+            --stage-file "$stage_file" \
+            --diagnostic-pointer "${GITEA_SERVER_URL}/${GITEA_REPOSITORY}/actions/runs/${GITEA_RUN_ID}"

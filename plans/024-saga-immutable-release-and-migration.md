@@ -1,6 +1,10 @@
 # Saga immutable release and migration
 
-Status: **IN PROGRESS — the real Saga runner passes through deterministic artifact validation; the repository package secret is now provisioned and publication/read-back is pending a fresh `main` run. Nothing is deployed.**
+Status: **PHASE 1 PROVEN; PHASE 2 IMPLEMENTATION UNCOMMITTED — the immutable
+artifact has been published/read back, installed as the Saga backend, and passed
+the private installed-service acceptance. Automatic delivery is being prepared
+but is not published or active. Public routing and the Asgard tray are
+unchanged.**
 
 This plan separates confirmed current state from the approved target. It is the
 release/cutover contract for moving Codex Voice from Asgard to Saga.
@@ -10,19 +14,53 @@ release/cutover contract for moving Codex Voice from Asgard to Saga.
 - A release must build `web/dist` before Rust: cargo otherwise embeds a stub PWA.
 - The application server is no-auth by default. It allows loopback and Tailnet
   binds; the migrated Saga service will use loopback only.
+- Codex Voice is two services, not one host workload. On Asgard,
+  `codex-voice-server.service` runs `/usr/local/bin/codex-voice-wrapper server
+  --bind 100.120.202.119:3845` as `bex`; this is the backend being migrated.
+  Separately, `codex-voice.service` runs `/usr/local/bin/codex-voice-wrapper run`
+  as `bex`, owns the graphical tray/Tauri process, and self-hosts its desktop
+  origin on `127.0.0.1:3846`. There is no `codex-voice-tray.service` unit.
+- The unit name is intentionally host-scoped: Saga's backend is
+  `/etc/systemd/system/codex-voice.service`, running
+  `/opt/saga-services/codex-voice/codex-voice server --bind 127.0.0.1:3845`
+  as `ubuntu:ubuntu`. Automatic deployment may manage this Saga unit only. It
+  must never copy, stop, restart, enable, disable, or otherwise manage Asgard's
+  `codex-voice.service` tray unit.
+- The Asgard tray currently has no unit-level endpoint override. Backend client
+  resolution checks `CODEX_VOICE_TRANSCRIBER_URL` plus
+  `CODEX_VOICE_TRANSCRIBER_TOKEN` before the private discovery file at
+  `${XDG_STATE_HOME:-~/.local/state}/codex-voice/transcriber.json`. The running
+  Asgard backend owns that discovery file and its process-bound token. Therefore
+  the later cutover is a tray-client endpoint/config switch after Saga backend
+  acceptance, not a tray process or host migration.
+- The active Asgard config is the service user's resolved
+  `/home/bex/.config/codex-voice/config.json`. The proven Saga backend config is
+  `/home/ubuntu/.config/codex-voice/config.json`; provider values remain in the
+  separately owned `/srv/services-state/codex-voice/codex-voice.env`, and Saga's
+  existing auth remains `/home/ubuntu/.codex/auth.json` pointing to its
+  host-owned auth file. None belongs in an artifact or workflow output.
 - Saga currently terminates Tailnet-only `voice.heliasar.com` ingress and proxies
-  to Asgard. Asgard remains live owner until a separately authorized cutover.
+  to the Asgard backend at `100.120.202.119:3845`. The compatibility host
+  `codex-voice.heliasar.com` redirects to `voice.heliasar.com`. Asgard remains
+  public backend owner until a separately authorized cutover.
 - Saga uses a central Ansible, fixed-root, selected-service deployment lane.
-- The active Gitea producer runner label is `saga-build`; no active runner
-  currently advertises the repository's previous `ubuntu-latest` label.
+- The active Gitea producer runner label is `saga-build`. The established
+  host-native deployment runner is `asgard-build-1`; it already owns the proven
+  operator SSH route to `saga`. Its capacity is one, and the Codex Voice workflow
+  adds a service-specific non-cancelling concurrency group as the explicit
+  serialization boundary.
 - The Codex Voice repository now owns a least-privilege `PACKAGE_TOKEN` Actions
   secret for immutable Gitea package publication/read-back; its value remains
   outside the repository and workflow output.
 - Saga has normal Codex auth already. This migration does not copy auth or log in.
-- The one active Codex Voice config source/destination must still be resolved
-  from the effective Asgard and Saga service definitions.
-- No repository-local Bex mail recipient/credential seam is confirmed. The
-  deploy workflow must use the existing operational notification interface.
+- Phase 1 used central homelab commit
+  `674eb3d15c496dc1ce6d6b4408bfe33497092226` and Saga consumer commit
+  `1b4c308e4c82570b4715c4e4951e899f58c7d098`. Phase 2 pins those proven
+  contracts instead of consuming mutable local branches.
+- No configured Asgard/Saga mail transport or existing Codex Voice mail command
+  is present. The workflow therefore owns a standard SMTP adapter, while the
+  recipient, sender, SMTP endpoint, and credentials remain external Gitea
+  Actions secrets and are never repository literals or diagnostic output.
 
 ## Approved artifact and automation contract
 
@@ -111,8 +149,18 @@ not transfer, rewrite, or print it.
    Tailnet consumer, accept canonical DNS/TLS, the same health instance and
    capabilities, PWA/assets, config surface, one bounded transcription, and
    one TTS synthesis.
-4. **Ownership closeout.** Only after canonical live acceptance, stop/disable
-   Asgard and remove its ownership references.
+4. **Tray endpoint switch, separately authorized follow-up.** Keep the graphical
+   tray on Asgard. Replace its process-local backend discovery dependency with
+   the accepted canonical Saga backend by setting both
+   `CODEX_VOICE_TRANSCRIBER_URL` and `CODEX_VOICE_TRANSCRIBER_TOKEN` in the
+   Asgard tray unit's protected environment seam. The token remains a bounded
+   request identifier, not application authentication; Saga stays no-auth and
+   Tailnet-only. Prove tray transcription against the accepted Saga instance.
+   This is a client endpoint/config update, not a binary copy or process move.
+5. **Backend ownership closeout.** Only after canonical and tray-client live
+   acceptance, stop/disable Asgard `codex-voice-server.service` and remove its
+   backend/public-route ownership references. Leave Asgard
+   `codex-voice.service` enabled and running as the tray.
 
 Rollback acceptance, drills, and proof are not gates. Ordinary failure handling
 stops the failed stage, reports it, and leaves corrective action to the operator.
@@ -138,14 +186,28 @@ mask the original deployment failure.
 - **Provider environment:** only the environment-variable names declared by the
   active config's provider `apiKeyEnv` fields. Resolve names without values; do
   not assume defaults when the migrated config names custom variables.
-- **Artifact read credential:** reuse the Gitea package/artifact read credential
-  owned by the selected-service lane; its configuration name remains evidence
-  to resolve.
-- **Saga deploy credential:** reuse the selected-service Ansible/SSH credential
-  seam; its configuration name remains evidence to resolve.
-- **Failure email:** reuse the existing Bex recipient, sender, and mail
-  credential configuration. Those names/interfaces remain evidence to resolve
-  and must not become repository literals.
+- **Artifact read credential:** none. The exact Generic Package files are
+  anonymously readable; only the producer publication step receives
+  `PACKAGE_TOKEN`.
+- **Saga deploy credential:** none added to this repository. The
+  `asgard-build-1` host runner reuses its established operator SSH identity for
+  `saga` and the locked central Ansible executable.
+- **Protected controller source:** the exact active config remains
+  `/home/bex/.config/codex-voice/config.json`. Before workflow activation,
+  provision the separately owned provider-only environment at
+  `/home/bex/.config/codex-voice/saga-provider.env`, owned by `bex`, mode 0600,
+  containing exactly one effective key name for each enabled provider. An
+  explicit advanced `apiKeyEnv` wins; otherwise use exactly one supported
+  application default (`GEMINI_API_KEY` or `GOOGLE_API_KEY`, and
+  `ELEVENLABS_API_KEY` or `ELEVEN_API_KEY`). The workflow checks names, type,
+  ownership, and mode without printing values.
+- **Failure email:** configure Gitea Actions secrets
+  `CODEX_VOICE_FAILURE_EMAIL_TO`, `CODEX_VOICE_FAILURE_EMAIL_FROM`,
+  `CODEX_VOICE_FAILURE_SMTP_HOST`, `CODEX_VOICE_FAILURE_SMTP_PORT`,
+  `CODEX_VOICE_FAILURE_SMTP_SECURITY`,
+  `CODEX_VOICE_FAILURE_SMTP_USERNAME`, and
+  `CODEX_VOICE_FAILURE_SMTP_PASSWORD`. Recipient and values remain external and
+  are available only to the failure step.
 
 ## Exact companion Saga Ops requirements
 
@@ -221,19 +283,16 @@ transcript content.
 
 ## Remaining evidence and decisions
 
-- Confirm current Saga Ops selected-service task/variable names and the
-  fixed-root atomic file-replacement contract.
-- Confirm the Saga consumer's package-read credential name/owner for the proven
-  Generic Package URL; producer publication/read-back uses `PACKAGE_TOKEN` only
-  in its final step.
-- Resolve the effective Asgard config source and Saga destination.
-- Confirm Saga's existing Codex auth is readable and usable under the confirmed
-  final `ubuntu:ubuntu` unit identity.
-- Locate the existing mail command/API, recipient configuration name, sender
-  owner, and credential owner without exposing values.
-- Private install/canary and automatic-delivery implementation are authorized.
-  Caddy/domain cutover, canonical-host acceptance, and Asgard retirement remain
-  a separate later authorization.
+- Phase 1 confirmed the central selected-service task/variable names, fixed-root
+  atomic replacement, anonymous package read, protected paths, Saga auth, and
+  installed acceptance on the real service.
+- Before publishing/activating the Phase 2 workflow, provision the protected
+  controller provider environment at the fixed path above and configure the
+  seven failure-email secrets. No suitable configured host mail transport was
+  found, so these are real activation prerequisites rather than inferred state.
+- Commit/push approval and one real successful-main automatic-delivery proof are
+  still required. Caddy/domain cutover, the tray endpoint switch, Asgard backend
+  retirement, and the deferred deployment-skill audit remain later work.
 
 ## Smallest implementation-ready sequence
 
