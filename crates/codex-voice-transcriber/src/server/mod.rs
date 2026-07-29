@@ -263,6 +263,7 @@ fn service_router(state: ServiceState) -> Router {
             "http://localhost:3846".parse().expect("valid origin"),
             "http://127.0.0.1:5173".parse().expect("valid origin"),
             "http://127.0.0.1:3846".parse().expect("valid origin"),
+            "http://127.0.0.1:38455".parse().expect("valid origin"),
         ]))
         .allow_methods([Method::POST, Method::GET, Method::DELETE])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
@@ -329,6 +330,7 @@ fn is_allowed_origin(origin: &str) -> bool {
             | "http://localhost:3846"
             | "http://127.0.0.1:5173"
             | "http://127.0.0.1:3846"
+            | "http://127.0.0.1:38455"
     )
 }
 

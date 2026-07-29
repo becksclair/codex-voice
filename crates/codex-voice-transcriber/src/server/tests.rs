@@ -72,7 +72,11 @@ async fn origin_guard_allows_canonical_and_native_requests_but_rejects_foreign_o
     state.auth.no_auth = true;
     let app = service_router(state);
 
-    for origin in [None, Some("https://voice.heliasar.com")] {
+    for origin in [
+        None,
+        Some("https://voice.heliasar.com"),
+        Some("http://127.0.0.1:38455"),
+    ] {
         let mut request = axum::http::Request::builder().uri("/healthz");
         if let Some(origin) = origin {
             request = request.header(header::ORIGIN, origin);
