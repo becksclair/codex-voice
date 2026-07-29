@@ -7,6 +7,7 @@ import path from 'node:path';
 // `#intent=<id>` (one-shot selected-text handoff + auto-generate).
 
 const discoveryPath = path.resolve(__dirname, '../../target/webtests-state/codex-voice/transcriber.json');
+const referenceLinksFixturePath = path.resolve(__dirname, '../fixtures/reference-links.md');
 
 const composerSourceValue = (page: Page) =>
   page.evaluate(
@@ -155,6 +156,41 @@ test('consecutive button and native pastes generate the newly pasted text', asyn
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem('codex-voice.web.text')))
     .toBe('second native paste');
+});
+
+test('reference-style Markdown links do not crash the composer transform', async ({ page }) => {
+  const fixture = await fs.readFile(referenceLinksFixturePath, 'utf8');
+  const pageErrors: Error[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error));
+  await page.evaluate(() =>
+    localStorage.setItem(
+      'codex-voice.web.settings.v1',
+      JSON.stringify({ generateOnPaste: false }),
+    ),
+  );
+  await page.goto('/web?reference-links-regression=1');
+
+  await page.evaluate((text) => navigator.clipboard.writeText(text), fixture);
+  await page.locator('#text').click();
+  await page.locator('#text').press(process.platform === 'darwin' ? 'Meta+V' : 'Control+V');
+
+  await expect
+    .poll(async () => (await composerSourceValue(page))?.replace(/\n{2,}/g, '\n').trimEnd())
+    .toBe(fixture.replace(/\n{2,}/g, '\n').trimEnd());
+  await expect(page.locator('#text')).toContainText('[CDC][1]');
+  await expect(page.locator('#text [style*="--emotion-tag"]')).toHaveText('[brightly]');
+  expect(pageErrors).toEqual([]);
+
+  await page.locator('#text').fill('[CDC]');
+  await expect(page.locator('#text [style*="--emotion-tag"]')).toHaveText('[CDC]');
+  await page.locator('#text').type('[1]');
+  await expect(page.locator('#text [style*="--emotion-tag"]')).toHaveCount(0);
+
+  await page.locator('#text').fill('[1]');
+  await expect(page.locator('#text [style*="--emotion-tag"]')).toHaveText('[1]');
+  await page.locator('#text').type(':');
+  await expect(page.locator('#text [style*="--emotion-tag"]')).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
 });
 
 test('closing a stale settings window cannot overwrite the main draft', async ({ context, page }) => {

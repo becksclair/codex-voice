@@ -17,7 +17,7 @@ import { $isCodeNode, CodeHighlightNode, CodeNode } from "@lexical/code";
 import { LinkNode } from "@lexical/link";
 import { ListItemNode, ListNode } from "@lexical/list";
 import { HeadingNode, QuoteNode } from "@lexical/rich-text";
-import { TextNode, type EditorState, type LexicalEditor } from "lexical";
+import { $isTextNode, TextNode, type EditorState, type LexicalEditor } from "lexical";
 
 /** The source mirror preserves the existing generation-facing `.value` contract. */
 export type TextMirrorElement = HTMLTextAreaElement;
@@ -28,6 +28,8 @@ export type TextMirrorElement = HTMLTextAreaElement;
  */
 const OVERLAY_ICON_BUTTON =
   "icon-button inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer touch-manipulation items-center justify-center rounded-full border border-[var(--overlay-border)] bg-[image:var(--overlay-bg)] p-0 text-[var(--overlay-color)] shadow-[var(--overlay-shadow)] [backdrop-filter:blur(10px)_saturate(1.2)] [-webkit-backdrop-filter:blur(10px)_saturate(1.2)] hover:border-[var(--overlay-hover-border)] hover:bg-[image:var(--overlay-hover-bg)] active:bg-[image:var(--overlay-active-bg)] active:shadow-[var(--overlay-active-shadow)]";
+const EMOTION_TAG_STYLE =
+  "--emotion-tag:1;font-weight:650;color:var(--emotion-ink);border:1px solid var(--emotion-border);padding-inline:0.2em;border-radius:0.38em;white-space:nowrap;";
 
 interface TextEditorProps {
   textRef: MutableRefObject<TextMirrorElement | null>;
@@ -81,13 +83,41 @@ function isEmotionTag(text: string): boolean {
   return /^\[[^\]\n]{1,80}\]$/.test(text);
 }
 
+function isMarkdownReferenceFragment(
+  textNode: TextNode,
+  text: string,
+  start: number,
+  end: number,
+): boolean {
+  const previousText = textNode.getPreviousSibling()?.getTextContent() ?? "";
+  const nextText = textNode.getNextSibling()?.getTextContent() ?? "";
+  const previousCharacter = text[start - 1] ?? previousText.at(-1);
+  const nextCharacter = text[end] ?? nextText[0];
+  return previousCharacter === "]" || nextCharacter === "[" || nextCharacter === ":";
+}
+
 /** Split bracketed delivery cues into styled text nodes without changing text content. */
 function registerEmotionTagTransform(editor: LexicalEditor): () => void {
   return editor.registerNodeTransform(TextNode, (textNode) => {
     if ($isCodeNode(textNode.getParent()) || textNode.hasFormat("code")) return;
     const text = textNode.getTextContent();
-    const matches = [...text.matchAll(/\[[^\]\n]{1,80}\]/g)];
-    if (matches.length === 0) return;
+    const previousNode = textNode.getPreviousSibling();
+    if (
+      (text.startsWith("[") || text.startsWith(":")) &&
+      $isTextNode(previousNode) &&
+      isEmotionTag(previousNode.getTextContent()) &&
+      previousNode.getStyle().includes("--emotion-tag")
+    ) {
+      previousNode.setStyle("");
+    }
+    const matches = [...text.matchAll(/\[[^\]\n]{1,80}\]/g)].filter((match) => {
+      const start = match.index ?? 0;
+      return !isMarkdownReferenceFragment(textNode, text, start, start + match[0].length);
+    });
+    if (matches.length === 0) {
+      if (textNode.getStyle().includes("--emotion-tag")) textNode.setStyle("");
+      return;
+    }
     const offsets = [
       ...new Set(
         matches
@@ -97,11 +127,10 @@ function registerEmotionTagTransform(editor: LexicalEditor): () => void {
     ];
     const parts = textNode.splitText(...offsets);
     for (const part of parts) {
-      if (isEmotionTag(part.getTextContent()) && !part.getStyle().includes("--emotion-tag")) {
-        part.setStyle(
-          "--emotion-tag:1;font-weight:650;color:var(--emotion-ink);border:1px solid var(--emotion-border);padding-inline:0.2em;border-radius:0.38em;white-space:nowrap;",
-        );
-      }
+      const styledAsEmotion = part.getStyle().includes("--emotion-tag");
+      if (isEmotionTag(part.getTextContent())) {
+        if (!styledAsEmotion) part.setStyle(EMOTION_TAG_STYLE);
+      } else if (styledAsEmotion) part.setStyle("");
     }
   });
 }
