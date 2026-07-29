@@ -45,6 +45,16 @@ class DeployError(RuntimeError):
     """A bounded, non-secret deployment contract failure."""
 
 
+def _validate_pinned_archive_member(member: tarfile.TarInfo, destination: Path) -> None:
+    path = PurePosixPath(member.name)
+    if path.is_absolute() or ".." in path.parts:
+        raise DeployError("pinned repository archive contains an unsafe member")
+    try:
+        tarfile.data_filter(member, destination)
+    except tarfile.FilterError as error:
+        raise DeployError("pinned repository archive contains an unsafe member") from error
+
+
 def write_stage(path: Path, stage: str) -> None:
     if stage not in STAGES:
         raise DeployError(f"invalid deployment stage: {stage}")
@@ -248,14 +258,7 @@ def extract_git_commit(repository: Path, commit: str, destination: Path) -> None
     destination.mkdir(mode=0o700)
     with tarfile.open(archive_path, "r:") as archive:
         for member in archive.getmembers():
-            path = PurePosixPath(member.name)
-            if (
-                path.is_absolute()
-                or ".." in path.parts
-                or member.issym()
-                or member.islnk()
-            ):
-                raise DeployError("pinned repository archive contains an unsafe member")
+            _validate_pinned_archive_member(member, destination)
         archive.extractall(destination, filter="data")
     archive_path.unlink()
 

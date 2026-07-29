@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import stat
+import tarfile
 import tempfile
 import unittest
 
@@ -100,6 +101,59 @@ class DeploySagaBackendTests(unittest.TestCase):
             link.symlink_to(source)
             with self.assertRaisesRegex(MOD.DeployError, "non-symlink"):
                 MOD.require_protected_regular_file(link, "source")
+
+    def test_pinned_archive_accepts_internal_skill_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "extract"
+            destination.mkdir()
+            with tarfile.open(root / "archive.tar", "w") as archive:
+                target = tarfile.TarInfo(".agents/skills")
+                target.type = tarfile.DIRTYPE
+                archive.addfile(target)
+                for name in (".claude/skills", ".codex/skills"):
+                    link = tarfile.TarInfo(name)
+                    link.type = tarfile.SYMTYPE
+                    link.linkname = "../.agents/skills"
+                    archive.addfile(link)
+
+            with tarfile.open(root / "archive.tar", "r") as archive:
+                for member in archive.getmembers():
+                    MOD._validate_pinned_archive_member(member, destination)
+                archive.extractall(destination, filter="data")
+
+            self.assertTrue((destination / ".agents/skills").is_dir())
+            self.assertEqual(
+                (destination / ".claude/skills").resolve(),
+                (destination / ".agents/skills").resolve(),
+            )
+            self.assertEqual(
+                (destination / ".codex/skills").resolve(),
+                (destination / ".agents/skills").resolve(),
+            )
+
+    def test_pinned_archive_rejects_unsafe_links_and_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "extract"
+            destination.mkdir()
+            cases = (
+                ("escaping symlink", "nested/link", tarfile.SYMTYPE, "../../outside"),
+                ("absolute symlink", "nested/link", tarfile.SYMTYPE, "/tmp/outside"),
+                ("escaping hardlink", "nested/link", tarfile.LNKTYPE, "../../outside"),
+                ("absolute member", "/outside", tarfile.REGTYPE, None),
+                ("traversal member", "nested/../outside", tarfile.REGTYPE, None),
+            )
+            for label, name, member_type, linkname in cases:
+                with self.subTest(label=label):
+                    member = tarfile.TarInfo(name)
+                    member.type = member_type
+                    if linkname is not None:
+                        member.linkname = linkname
+                    with self.assertRaisesRegex(
+                        MOD.DeployError,
+                        "pinned repository archive contains an unsafe member",
+                    ):
+                        MOD._validate_pinned_archive_member(member, destination)
 
     def test_sidecar_is_bound_to_exact_archive_name(self) -> None:
         name = "codex-voice-linux-amd64-" + "a" * 40 + ".tar.gz"
