@@ -175,28 +175,28 @@ scripts/package_linux_amd64.sh "$(git rev-parse HEAD)"
 
 The packager builds the PWA first, emits the archive and `.sha256` sidecar under
 `output/releases/`, validates their exact contract, and smokes the extracted
-binary's `--version`, loopback health, and non-stub embedded PWA. See
-[`plans/024-saga-immutable-release-and-migration.md`](plans/024-saga-immutable-release-and-migration.md)
-for the automation, protected-state, notification, and cutover contract.
+binary's `--version`, loopback health, and non-stub embedded PWA.
 
-After Saga has installed and activated that exact artifact, the canonical live
-acceptance entrypoint consumes Saga's bounded host attestation and talks only to
-an explicit loopback URL (locally on Saga or through an SSH local forward):
+On protected `main`, `.gitea/workflows/ci.yml` is the production release path.
+After verify/deny/web-E2E succeed, it publishes the deterministic artifact to
+Gitea Generic Packages, reads the archive and sidecar back, verifies byte
+identity, and hands only the full source commit plus archive SHA-256 to the
+least-privileged `saga-deploy` runner. That runner submits the pair through the
+Codex-Voice-bound SSH capability and polls the host-owned deployment job. CI
+contains no Saga install path, unit, package URL, protected-input source, or
+rollback logic.
 
-```bash
-scripts/accept_installed_service.py \
-  --base-url http://127.0.0.1:<forwarded-port> \
-  --source-commit <full-commit-sha> \
-  --artifact-sha256 <archive-sha256> \
-  --installed-attestation <path-to-redacted-saga-attestation.json>
-```
+The central homelab registration owns the reviewed unit, protected-input
+metadata, package identity, artifact validator, health URL, and fixed install
+root. The host controller independently requires the commit to belong to
+protected `main`, validates the exact published artifact, performs the
+transactional fixed-root replacement, retains one `.previous` tree, restarts
+only `codex-voice.service`, and rolls back if health fails. The canonical
+Tailnet ingress remains infrastructure-owned and is not touched by application
+deployment.
 
-It fails closed on artifact/installed-binary identity, unit identity/state,
-the sole loopback listener and its per-process health instance ID, protected config/provider readiness, existing Saga
-Codex auth readiness, health, non-stub PWA/assets, resolved web config, live TTS,
-and live transcription of the generated fixed non-sensitive canary phrase. It
-never uses the source tree, direct-provider CLI fallback, a non-loopback URL, or
-prints config/provider/auth values or transcript text.
+A failed CI run can be retried explicitly with the workflow's `release=true`
+manual input; no source-only retry commit is required.
 
 `/web/config` and the `/web/speech*` routes are deliberately unauthenticated
 so the private-network web app can call them without a bearer token. Version 2

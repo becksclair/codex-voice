@@ -1,5 +1,11 @@
 # Saga immutable release and migration
 
+> Historical implementation plan. The bespoke selected-service installer,
+> installed-service attestation harness, SMTP failure notifier, and direct
+> Asgard deployment path described below were retired after Codex Voice moved to
+> the manifest-registered `saga-deploy` controller. Keep this document as
+> migration evidence, not current operational guidance.
+
 Status: **PHASE 1 PROVEN; PHASE 2 IMPLEMENTATION UNCOMMITTED — the immutable
 artifact has been published/read back, installed as the Saga backend, and passed
 the private installed-service acceptance. Automatic delivery is being prepared
