@@ -3,6 +3,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish and deploy the exact current main commit
+        required: false
+        default: "false"
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -60,7 +67,7 @@ jobs:
 
   publish:
     needs: [verify, deny, web-e2e]
-    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    if: (gitea.event_name == 'push' && gitea.ref == 'refs/heads/main') || (gitea.event_name == 'workflow_dispatch' && gitea.ref == 'refs/heads/main' && inputs.release == 'true')
     runs-on: saga-build
     timeout-minutes: 45
     permissions:
@@ -150,7 +157,7 @@ jobs:
 
   deploy-saga-backend:
     needs: publish
-    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    if: (gitea.event_name == 'push' && gitea.ref == 'refs/heads/main') || (gitea.event_name == 'workflow_dispatch' && gitea.ref == 'refs/heads/main' && inputs.release == 'true')
     runs-on: saga-deploy
     timeout-minutes: 20
     permissions:
